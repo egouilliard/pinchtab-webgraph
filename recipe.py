@@ -14,8 +14,8 @@ Safe by design: it opens and reads a form, then cancels. It does not click
 Save/Submit/Create-confirm, so it does not persist data. (On most apps opening
 a "Create X" dialog creates nothing until you submit.)
 
-  ./run-recipe.sh --goal "add cae" --page https://app/caes/some-project
-  ./run-recipe.sh --goal "create team" --graph leytongo-full-links.json
+  ./run-recipe.sh --goal "add item"  --page https://app.example.com/items/123
+  ./run-recipe.sh --goal "create team" --start https://app.example.com/home
 """
 import argparse
 import heapq
@@ -35,7 +35,7 @@ def same_host(u, ref):
         return n[4:] if n.startswith("www.") else n
     return h(u) == h(ref)
 
-# create-style verbs (EN + ES, since e.g. LeytonGo is bilingual)
+# create-style verbs (EN + ES — covers bilingual apps; extend for other locales)
 VERBS = r"create|add|new|start|crear|nuevo|nueva|añadir|anadir|agregar|generar"
 
 # --- stable CSS selector + form introspection, injected into the page ---------
@@ -175,15 +175,11 @@ SKIP_NAV = re.compile(
     r"log\s*out|sign\s*out|logout|crear|nuevo|nueva|a[nñ]adir|agregar|guardar|"
     r"eliminar|borrar|enviar|subir)\b", re.I)
 
-# "Distinct app section" nav (Settings / Admin / Users / Cross-product / config /
-# org / billing …). Features (create-forms) live in these sections, NOT in the
-# repeated project/data list — so we prioritize them and never cap them out,
-# while the project list (e.g. /caes/<project>) is capped hard. EN + ES.
-SECTION = re.compile(
-    r"settings?|admin|administraci|users?|roles?|permission|permiso|config|"
-    r"preference|ajuste|account|cuenta|team|equipo|member|miembro|organi|"
-    r"company|empresa|manage|gestion|setup|workspace|"
-    r"billing|facturaci|integration|integraci", re.I)
+# NOTE: a hardcoded EN/ES "section vocabulary" regex used to live here to
+# prioritize "section" nav by matching app words. It was REMOVED — it biased toward
+# apps that name their sections with those specific words. "Distinct-section"
+# priority is now derived STRUCTURALLY in tier() below (an aria tab/menu, or a link
+# that is not part of a repeated sibling-list) — no app- or language-specific vocab.
 
 
 def pt(args, server, timeout=60):
@@ -206,24 +202,28 @@ def pt_json(js, server):
 # settle tunables — overridable from the CLI (see main()). Defaults tuned for
 # this realtime SPA: with images/media blocked, the DOM stabilizes in <0.5s, so
 # a tight poll + short trailing delay beats the old 0.4s/0.3s cadence by ~2x.
-RENDER_MS = 4000      # hard cap on the render-stability poll
-SETTLE_POLL = 0.2     # interval between control-count reads
-SETTLE_DELAY = 0.15   # trailing settle after the count is stable
-NETIDLE_MS = 1500     # networkidle cap (it never truly settles on this app)
+RENDER_MS = 3000      # hard cap on the render-stability poll
+SETTLE_POLL = 0.1     # interval between control-count reads
+SETTLE_DELAY = 0.1    # trailing settle after the count is stable
+NETIDLE_MS = 0        # networkidle wait: 0 = skip it (this realtime app never idles,
+                      # so it just burns ~0.7s/state; the render-poll handles readiness)
 
 
 def settle(server, render_ms=None, delay=None):
     render_ms = RENDER_MS if render_ms is None else render_ms
     delay = SETTLE_DELAY if delay is None else delay
-    # networkidle never settles on realtime apps (websockets) — cap it short and
-    # rely on the render-stability poll below instead.
-    pt(["wait", "--load", "networkidle", "--timeout", str(NETIDLE_MS)],
-       server, timeout=max(3, NETIDLE_MS / 1000.0 + 2))
+    if NETIDLE_MS > 0:    # optional networkidle wait (off by default — see above)
+        pt(["wait", "--load", "networkidle", "--timeout", str(NETIDLE_MS)],
+           server, timeout=max(3, NETIDLE_MS / 1000.0 + 2))
     deadline = time.time() + render_ms / 1000.0
     last = -1
     while time.time() < deadline:
-        rc, out, _ = pt(["eval", 'document.querySelectorAll("a[href]").length+'
-                                 'document.querySelectorAll("button,[role=button]").length'], server)
+        # count the SAME control families CONTROLS_JS enumerates — crucially incl.
+        # role=tab/menuitem, else tab-heavy pages read 0 controls and the
+        # poll stalls to its deadline.
+        rc, out, _ = pt(["eval", 'document.querySelectorAll('
+                                 '"a[href],button,[role=button],[role=tab],[role=menuitem],summary"'
+                                 ').length'], server)
         try:
             c = int(out.strip().strip('"'))
         except ValueError:
@@ -309,19 +309,23 @@ def main():
     ap.add_argument("--max-links", type=int, default=3,
                     help="max content (non-nav) links to follow per state (default 3)")
     ap.add_argument("--max-per-section", type=int, default=1,
-                    help="max pages to explore per site section, e.g. /caes/* (default 1)")
-    ap.add_argument("--max-nav", type=int, default=1,
-                    help="cap on low-value nav controls per state; goal-relevant + "
-                         "distinct-section nav are never capped (default 1)")
+                    help="max pages to explore per site section, e.g. /items/* (default 1)")
+    ap.add_argument("--max-nav", type=int, default=0,
+                    help="cap on low-value GENERIC nav controls per state (toolbar "
+                         "combos/filters); goal-relevant + distinct-section nav are "
+                         "never capped, so create-forms (in sections/tabs) stay "
+                         "reachable. Default 0 — raise it to explore generic menus too.")
     ap.add_argument("--data-list-min", type=int, default=3,
                     help="N sibling links sharing a section root = a repeated data "
-                         "list (e.g. /caes/*); skip exploring it entirely (default 3)")
+                         "list (e.g. /items/*); skip exploring it entirely (default 3)")
     ap.add_argument("--render-ms", type=int, default=RENDER_MS,
                     help="cap on the per-state render-stability poll (default %d)" % RENDER_MS)
     ap.add_argument("--settle-poll", type=float, default=SETTLE_POLL,
                     help="interval between control-count reads while settling (default %.2f)" % SETTLE_POLL)
     ap.add_argument("--settle-delay", type=float, default=SETTLE_DELAY,
                     help="trailing settle delay after the DOM is stable (default %.2f)" % SETTLE_DELAY)
+    ap.add_argument("--screenshot", action="store_true",
+                    help="also save a PNG of the opened form (off by default for speed)")
     ap.add_argument("--out", default="recipe")
     a = ap.parse_args()
 
@@ -359,10 +363,24 @@ def main():
         base = 3 if tag == "button" else (2 if role == "button" or tag == "input" else 1)
         return (base, -len(c.get("text") or ""))
 
+    mat_state = {"path": None}              # path the browser is currently materialized at
     def materialize(path):
         try:
             idx = max((i for i, act in enumerate(path) if act.get("href")), default=-1)
-            if idx == -1:                   # no link in path: start fresh, replay clicks
+            cur_path = mat_state["path"]
+            cidx = (max((i for i, act in enumerate(cur_path) if act.get("href")), default=-1)
+                    if cur_path is not None else -2)
+            # PREFIX-REUSE: if we're already on the same section page (same last-link
+            # href) and this path only appends trailing tab/menu clicks, skip the
+            # nav+settle and just (re)click the target tab — tabs are idempotent
+            # siblings, so the click lands the right state regardless of the active
+            # tab. Saves a full page-load per depth-2 sibling explored back-to-back.
+            reuse = (cur_path is not None and idx >= 0 and cidx >= 0
+                     and idx < len(path) - 1
+                     and path[idx]["href"] == cur_path[cidx]["href"])
+            if reuse:
+                rest = path[idx + 1:]
+            elif idx == -1:                 # no link in path: start fresh, replay clicks
                 nav(start_url, a.server)
                 rest = path
             else:                           # jump to last link, replay only later clicks
@@ -376,8 +394,10 @@ def main():
                     # --wait-nav would hang ~30s; settle() handles SPA re-render.
                     pt(["click", act["selector"]], a.server, timeout=20)
                     settle(a.server)
+            mat_state["path"] = path
             return True
         except Exception as e:
+            mat_state["path"] = None        # browser is in an unknown state now
             print("  ! materialize failed (%s)" % str(e)[:80], file=sys.stderr)
             return False
 
@@ -406,8 +426,10 @@ def main():
         if not materialize(path):
             continue
         budget -= 1
-        cur = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
-        controls = pt_json(CONTROLS_JS, a.server)
+        # one DOM round-trip per state: read URL + controls together
+        st = pt_json("({href:location.href, controls:%s})" % CONTROLS_JS, a.server)
+        cur = (st.get("href") or "").strip().strip('"')
+        controls = st.get("controls") or []
         sig = state_sig(cur, controls)
         if sig in seen_states:
             continue
@@ -424,10 +446,10 @@ def main():
         if len(path) >= a.max_depth:
             continue
         # Identify the repeated DATA LIST on this state: many sibling links that
-        # share a section root (e.g. ~15 /caes/<project> rows). These are data
+        # share a URL path-segment root (e.g. ~15 /items/<id> rows). These are data
         # instances, not features — visiting even one costs a heavy DOM read and
-        # never hosts a create-form we want. Skip the whole list. (Genuine config
-        # sections like /settings have few siblings and survive.)
+        # never hosts a create-form we want. Skip the whole list. (Genuine distinct
+        # sections have few siblings and survive.)
         sib = {}
         for c in controls:
             h = c.get("href")
@@ -455,24 +477,36 @@ def main():
                     continue                # cap repetitive instances of one section
                 section_counts[sk] = section_counts.get(sk, 0) + 1
                 enq_links.add(u)
-                kids.append({"selector": c["selector"], "label": txt or u, "href": u, "nav": isnav})
+                kids.append({"selector": c["selector"], "label": txt or u, "href": u,
+                             "nav": isnav, "role": (c.get("role") or "")})
             elif isnav:
-                key = sig + "||" + c["selector"]
+                # Global tab/menu dedup BY LABEL: a same-labelled tab/menu item
+                # usually leads to the same place no matter which parent section you
+                # reached it from (e.g. two sidebar entries into one SPA share a tab
+                # bar), so enqueue it once. Avoids re-materializing the identical
+                # tab-state through a second parent (the dominant duplicate cost).
+                key = txt.strip().lower() or ("@" + c["selector"])
                 if key in enq_clicks:
                     continue
                 enq_clicks.add(key)
-                kids.append({"selector": c["selector"], "label": txt, "href": None, "nav": True})
-        # Rank kids into relevance tiers, then PRUNE the long tail. Strict BFS
-        # pops every shallower state before any deeper one, so state count is
-        # governed by fan-out — not ordering. We never cap goal-relevant (tier 0)
-        # or distinct-section (tier 1) nav, where create-forms live; we DO cap the
-        # generic-nav tail (tier 2) and content links.
+                kids.append({"selector": c["selector"], "label": txt, "href": None,
+                             "nav": True, "role": (c.get("role") or "")})
+        # Rank kids into relevance tiers, then PRUNE the long tail. Strict BFS pops
+        # every shallower state before any deeper one, so state count is governed by
+        # fan-out — not ordering. Tiers are fully STRUCTURAL (no app/word vocabulary):
+        #   tier 0 = the user's goal noun appears in the label (generic, --goal-driven)
+        #   tier 1 = EXPLICIT navigation: a link to a distinct section (repeated data
+        #            lists are already skipped above), or an aria tab/menuitem
+        #   tier 2 = a generic nav control (button/combobox/haspopup toggle with no
+        #            href and no nav role) — toolbar/view widgets, rarely a route to a
+        #            create-form, so capped by --max-nav (raise it to explore them).
+        NAV_ROLES = ("tab", "menuitem", "menuitemradio", "menuitemcheckbox")
         def tier(k):
             if goal_re.search(k["label"] or ""):
-                return 0                                # goal noun in the label
-            if SECTION.search((k["label"] or "") + " " + (k.get("href") or "")):
-                return 1                                # Settings/Admin/Users/… section
-            return 2                                    # generic nav / content
+                return 0
+            if k.get("href") or k.get("role") in NAV_ROLES:
+                return 1
+            return 2
         navk = [k for k in kids if k["nav"]]
         content = [k for k in kids if not k["nav"]]
         navk.sort(key=lambda k: tier(k))
@@ -483,9 +517,17 @@ def main():
             elif tail < a.max_nav:
                 keep_nav.append(k)
                 tail += 1
+        def navrank(k):                     # within a (depth,tier): order by structure
+            if k.get("role") in NAV_ROLES:
+                return 0                    # tab/menu click — stays in this section (forms live here)
+            if k["nav"] and k.get("href"):
+                return 1                    # link — jumps to a different section
+            if k["nav"]:
+                return 2                    # generic nav control (toolbar/menu toggle)
+            return 3                        # content link
         for k in keep_nav + content[:a.max_links]:
             seq += 1
-            heapq.heappush(frontier, (len(path) + 1, tier(k), 0 if k["nav"] else 1, seq, path + [k]))
+            heapq.heappush(frontier, (len(path) + 1, tier(k), navrank(k), seq, path + [k]))
     if trigger is None:
         sys.exit("Could not find a control matching %r within %d explored states from %s"
                  % (needle, a.max_discover, start_url))
@@ -501,7 +543,8 @@ def main():
     after = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
     navigated = after.rstrip("/") != before.rstrip("/")
     form = pt_json(FORM_JS, a.server)
-    pt(["screenshot", "-o", os.path.expanduser("~/pinchtab-webgraph/%s.png" % a.out)], a.server)
+    if a.screenshot:                        # optional — off by default (saves a round-trip)
+        pt(["screenshot", "-o", os.path.expanduser("~/pinchtab-webgraph/%s.png" % a.out)], a.server)
 
     # 4) cancel without saving (Escape closes a modal; on a form page it's a no-op)
     pt(["press", "Escape"], a.server)
@@ -532,7 +575,9 @@ def main():
         print("  • %-30s [%s]%s%s%s%s" % (f["label"] or "(unlabeled)", f["type"], req, ph, val, opt))
     if form.get("submitButtons"):
         print("\nThen click to confirm: %s" % "  /  ".join("“%s”" % b for b in form["submitButtons"]))
-    print("\nScreenshot: ~/pinchtab-webgraph/%s.png   ·   spec: ~/pinchtab-webgraph/%s.json" % (a.out, a.out))
+    if a.screenshot:
+        print("\nScreenshot: ~/pinchtab-webgraph/%s.png" % a.out, end="")
+    print("\nspec: ~/pinchtab-webgraph/%s.json" % a.out)
 
 
 if __name__ == "__main__":

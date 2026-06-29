@@ -182,7 +182,7 @@ SKIP_NAV = re.compile(
 SECTION = re.compile(
     r"settings?|admin|administraci|users?|roles?|permission|permiso|config|"
     r"preference|ajuste|account|cuenta|team|equipo|member|miembro|organi|"
-    r"company|empresa|cross[- ]?product|manage|gestion|setup|workspace|"
+    r"company|empresa|manage|gestion|setup|workspace|"
     r"billing|facturaci|integration|integraci", re.I)
 
 
@@ -310,9 +310,12 @@ def main():
                     help="max content (non-nav) links to follow per state (default 3)")
     ap.add_argument("--max-per-section", type=int, default=1,
                     help="max pages to explore per site section, e.g. /caes/* (default 1)")
-    ap.add_argument("--max-nav", type=int, default=4,
+    ap.add_argument("--max-nav", type=int, default=1,
                     help="cap on low-value nav controls per state; goal-relevant + "
-                         "distinct-section nav are never capped (default 4)")
+                         "distinct-section nav are never capped (default 1)")
+    ap.add_argument("--data-list-min", type=int, default=3,
+                    help="N sibling links sharing a section root = a repeated data "
+                         "list (e.g. /caes/*); skip exploring it entirely (default 3)")
     ap.add_argument("--render-ms", type=int, default=RENDER_MS,
                     help="cap on the per-state render-stability poll (default %d)" % RENDER_MS)
     ap.add_argument("--settle-poll", type=float, default=SETTLE_POLL,
@@ -420,6 +423,18 @@ def main():
             break
         if len(path) >= a.max_depth:
             continue
+        # Identify the repeated DATA LIST on this state: many sibling links that
+        # share a section root (e.g. ~15 /caes/<project> rows). These are data
+        # instances, not features — visiting even one costs a heavy DOM read and
+        # never hosts a create-form we want. Skip the whole list. (Genuine config
+        # sections like /settings have few siblings and survive.)
+        sib = {}
+        for c in controls:
+            h = c.get("href")
+            if h and h.startswith("http") and same_host(h, start_url):
+                sib[section_key(h.split("#")[0])] = sib.get(section_key(h.split("#")[0]), 0) + 1
+        datalist = {k for k, n in sib.items() if n >= a.data_list_min}
+
         kids = []                           # enqueue navigational controls only
         for c in controls:
             txt = c.get("text") or ""
@@ -431,9 +446,13 @@ def main():
                 u = href.split("#")[0]
                 if not (u.startswith("http") and same_host(u, start_url)) or u in enq_links:
                     continue
-                sk = section_key(u)         # cap repetitive instances of one section
-                if section_counts.get(sk, 0) >= a.max_per_section:
+                if u.rstrip("/") == cur.split("#")[0].rstrip("/"):
+                    continue                # self-link to the current page — no new state
+                sk = section_key(u)
+                if sk in datalist:          # skip the repeated data/project list
                     continue
+                if section_counts.get(sk, 0) >= a.max_per_section:
+                    continue                # cap repetitive instances of one section
                 section_counts[sk] = section_counts.get(sk, 0) + 1
                 enq_links.add(u)
                 kids.append({"selector": c["selector"], "label": txt or u, "href": u, "nav": isnav})
@@ -445,9 +464,9 @@ def main():
                 kids.append({"selector": c["selector"], "label": txt, "href": None, "nav": True})
         # Rank kids into relevance tiers, then PRUNE the long tail. Strict BFS
         # pops every shallower state before any deeper one, so state count is
-        # governed by fan-out — not ordering. We therefore cap low-value nav
-        # (tier 2) and content links, but never cap goal-relevant (tier 0) or
-        # distinct-section (tier 1) nav, which is where create-forms live.
+        # governed by fan-out — not ordering. We never cap goal-relevant (tier 0)
+        # or distinct-section (tier 1) nav, where create-forms live; we DO cap the
+        # generic-nav tail (tier 2) and content links.
         def tier(k):
             if goal_re.search(k["label"] or ""):
                 return 0                                # goal noun in the label
@@ -456,7 +475,6 @@ def main():
             return 2                                    # generic nav / content
         navk = [k for k in kids if k["nav"]]
         content = [k for k in kids if not k["nav"]]
-        # keep all tier 0/1 nav; cap the generic-nav tail and the content links
         navk.sort(key=lambda k: tier(k))
         keep_nav, tail = [], 0
         for k in navk:

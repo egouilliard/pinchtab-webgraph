@@ -1,0 +1,23 @@
+# secrets & runtime state — NEVER commit
+# crawl-config.json holds the bridge auth token; .instance/ holds live sessions
+crawl-config.json
+.instance/
+bridge.log
+httpd.log
+
+# python
+__pycache__/
+*.pyc
+
+# generated outputs (graphs, how-tos, screenshots, benchmarks)
+*.html
+*.png
+*.output
+leytongo-*.json
+books.json
+webgraph.json
+howto-*.json
+recipe.json
+recipe-*.json
+bench-*.json
+_settletest.*

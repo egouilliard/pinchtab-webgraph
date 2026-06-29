@@ -1,0 +1,50 @@
+{
+  "_comment": "Copy to crawl-config.json and set a real server.token (e.g. `openssl rand -hex 24`). Add your app's domain(s) to security.allowedDomains. crawl-config.json is gitignored because it holds the auth token.",
+  "server": {
+    "port": "9871",
+    "bind": "127.0.0.1",
+    "token": "REPLACE_WITH_RANDOM_TOKEN",
+    "stateDir": "/home/youruser/pinchtab-webgraph/.instance/state"
+  },
+  "instanceDefaults": {
+    "mode": "headless",
+    "maxTabs": 20,
+    "stealthLevel": "light",
+    "blockAds": true,
+    "blockImages": true,
+    "blockMedia": true
+  },
+  "security": {
+    "allowEvaluate": true,
+    "allowDownload": false,
+    "allowUpload": false,
+    "enableActionGuards": true,
+    "allowedDomains": [
+      "127.0.0.1",
+      "::1",
+      "localhost",
+      "cdnjs.cloudflare.com",
+      "unpkg.com",
+      "cdn.jsdelivr.net",
+      "your-app.example.com"
+    ],
+    "idpi": {
+      "enabled": true,
+      "strictMode": true,
+      "scanContent": true,
+      "wrapContent": true,
+      "customPatterns": [],
+      "scanTimeoutSec": 5,
+      "shieldThreshold": 0
+    }
+  },
+  "profiles": {
+    "baseDir": "/home/youruser/pinchtab-webgraph/.instance/profiles",
+    "defaultProfile": "crawler"
+  },
+  "multiInstance": {
+    "strategy": "always-on",
+    "instancePortStart": 9872,
+    "instancePortEnd": 9899
+  }
+}

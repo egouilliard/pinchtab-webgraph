@@ -63,15 +63,44 @@ TRIGGER_RE = re.compile(r"\b(%s)\b" % VERBS, re.I)
 
 NAV_ROLES = ("tab", "menuitem", "menuitemradio", "menuitemcheckbox")
 
+# Single-URL app-shells (e.g. MS Teams) swap views in place WITHOUT changing the URL,
+# so a programmatic nav() to the same URL blanks/re-inits the SPA (read returns 0
+# controls). For these apps we NEVER navigate: we read the current live page and drive
+# it by clicking. Two structural fixes that mode needs (both app-agnostic):
+#  (1) JS-dispatch clicks — coordinate clicks get "occluded" by transient animation
+#      overlays (a fade-out div sits on top), and pinchtab reports rc=0 even when the
+#      click is swallowed. el.click() bypasses occlusion and is position-independent.
+#  (2) a VIEW marker in the state signature — switching the active view often only
+#      flips aria-selected/aria-pressed/aria-current on the persistent nav chrome
+#      while the captured control set is unchanged, so without it all views collapse
+#      to one state. ARIA-only signal, no app vocabulary.
+VIEW_JS = (r"""[...document.querySelectorAll('[aria-selected="true"],"""
+           r"""[aria-pressed="true"],[aria-current]:not([aria-current="false"])')]"""
+           r""".map(e=>(e.getAttribute('aria-label')||e.innerText||'')"""
+           r""".replace(/\s+/g,' ').trim().slice(0,30)).filter(Boolean)""")
 
-def state_sig(url, controls):
+
+def click_js(selector, server):
+    sel = json.dumps(selector)
+    rc, out, err = pt(["eval", "(()=>{const e=document.querySelector(%s);"
+                       "if(!e)return 'missing';e.click();return 'ok';})()" % sel], server)
+    if rc != 0:
+        raise RuntimeError(err or out)
+    if "missing" in (out or ""):
+        raise RuntimeError("selector not present: %s" % selector[:60])
+
+
+def state_sig(url, controls, view=None):
     # Signature on the STRUCTURALLY meaningful controls only (nav + create-triggers),
     # not volatile page content (counts, notifications, timestamps) — so the same
     # logical page/tab dedups to one state instead of many cosmetic variants.
     key = sorted({(c.get("text") or "")[:30] for c in controls
                   if not c.get("bulk") and
                   (c.get("nav") or TRIGGER_RE.search(c.get("text") or ""))})
-    return url.split("#")[0] + "||" + "|".join(key)[:2000]
+    base = url.split("#")[0] + "||" + "|".join(key)[:2000]
+    if view:  # single-URL mode: the active aria-view distinguishes same-chrome views
+        base += "||view=" + "|".join(sorted(set(view)))[:300]
+    return base
 
 
 def section_key(u):
@@ -87,14 +116,17 @@ def norm(u):
     return u.split("#")[0].rstrip("/")
 
 
-def probe_bridge(server, start_url, timeout):
+def probe_bridge(server, start_url, timeout, single_url=False):
     # Distinguish a WEDGED bridge from a merely-bad path/selector. Don't use nav()
     # (it hardcodes timeout=60) — probe directly with a short timeout. Both calls
     # rc==0 → bridge ALIVE (the earlier failure was a bad path → skip). Any
     # Exception (incl. subprocess.TimeoutExpired) or rc!=0 → WEDGED (→ recover).
+    # In single_url mode we must NOT nav (it blanks the app-shell SPA) — a plain
+    # eval is enough to tell a live bridge from a wedged one.
     try:
-        if pt(["nav", start_url], server, timeout=timeout)[0] != 0:
-            return False
+        if not single_url:
+            if pt(["nav", start_url], server, timeout=timeout)[0] != 0:
+                return False
         if pt(["eval", "location.href"], server, timeout=timeout)[0] != 0:
             return False
         return True
@@ -157,6 +189,11 @@ def main():
     ap.add_argument("--rows-per-list", type=int, default=1,
                     help="descend into N representative rows of each data list to reach "
                          "per-row nested forms (default 1; 0 = skip lists entirely)")
+    ap.add_argument("--single-url", dest="single_url", action="store_true", default=False,
+                    help="single-URL app-shell mode: NEVER navigate (a programmatic nav "
+                         "blanks such SPAs, e.g. MS Teams) — read the current live page and "
+                         "drive it with JS-dispatch clicks; key states by active aria-view. "
+                         "Use --no-read-forms with this (form-open in this mode is a follow-up).")
     ap.add_argument("--read-forms", dest="read_forms", action="store_true", default=True,
                     help="open+read each create form (default on)")
     ap.add_argument("--no-read-forms", dest="read_forms", action="store_false",
@@ -188,6 +225,16 @@ def main():
 
     def materialize(path):
         try:
+            if a.single_url:
+                # No nav (it blanks the shell). Replay the click-path from the CURRENT
+                # live position: path[0] is a child of the root state = persistent shell
+                # chrome, present in every view, so it re-anchors us from wherever we are;
+                # each subsequent click was discovered present after the previous one.
+                for act in path:
+                    click_js(act["selector"], a.server)
+                    settle(a.server)
+                mat_state["path"] = path
+                return True
             idx = max((i for i, act in enumerate(path) if act.get("href")), default=-1)
             cur = mat_state["path"]
             cidx = (max((i for i, act in enumerate(cur) if act.get("href")), default=-1)
@@ -218,7 +265,13 @@ def main():
     def read_state():
         st = pt_json("({href:location.href, controls:%s})" % CONTROLS_JS, a.server)
         cur = (st.get("href") or "").strip().strip('"')
-        return cur, (st.get("controls") or [])
+        view = None
+        if a.single_url:
+            try:
+                view = pt_json(VIEW_JS, a.server)
+            except Exception:
+                view = None
+        return cur, (st.get("controls") or []), view
 
     # ---- graph accumulators ----
     states = {}            # sig -> {id, url, label, depth}
@@ -385,17 +438,17 @@ def main():
         # Process this state's browser I/O (materialize + DOM read) under one guard:
         # a wedged bridge often passes materialize() (nav/settle swallow errors) and
         # only surfaces at read_state(), so BOTH must route to the same recovery.
-        cur = controls = None
+        cur = controls = view = None
         ok = materialize(path)
         if ok:
             try:
-                cur, controls = read_state()
+                cur, controls, view = read_state()
             except Exception as e:
                 print("  ! read_state failed (%s)" % str(e)[:70], file=sys.stderr)
                 ok = False
         if not ok:
             mat_state["path"] = None                       # probe navigates; invalidate cursor
-            if probe_bridge(a.server, start_url, a.probe_timeout):
+            if probe_bridge(a.server, start_url, a.probe_timeout, a.single_url):
                 continue                                   # bridge alive → bad path → skip
             if restart_attempts >= a.max_restarts:
                 print("  ! max restarts (%d) reached — writing partial output"
@@ -409,7 +462,7 @@ def main():
             continue
         visits += 1
         restart_attempts = 0                               # progress clears the consecutive-wedge tally
-        sig = state_sig(cur, controls)
+        sig = state_sig(cur, controls, view)
 
         # record the edge that brought us here (even to an already-known state)
         if psig is not None and pact is not None:

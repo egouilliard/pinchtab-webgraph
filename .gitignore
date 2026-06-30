@@ -21,3 +21,9 @@ recipe.json
 recipe-*.json
 bench-*.json
 _settletest.*
+
+# interaction-graph caches + test outputs
+interaction-graph*.json
+*-cache.json
+test-*.json
+cmp.json

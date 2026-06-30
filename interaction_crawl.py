@@ -34,12 +34,14 @@ BFS resumed (partial output is still written if recovery gives up):
       --restart-cmd '<relaunch the bridge>' --login-cmd '<re-authenticate>'
 """
 import argparse
+import heapq
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+from collections import deque
 from urllib.parse import urlparse
 
 import recipe  # proven primitives — see module docstring
@@ -77,6 +79,12 @@ def section_key(u):
     seg = [s for s in p.path.split("/") if s]
     base = seg[0] if seg else "root"
     return base + ("?" + p.query if p.query else "")
+
+
+def norm(u):
+    # Same URL-normalization the comparisons elsewhere use (drop #fragment, trailing
+    # /). Keys the global url->state dedup so each distinct URL is visited once.
+    return u.split("#")[0].rstrip("/")
 
 
 def probe_bridge(server, start_url, timeout):
@@ -135,12 +143,13 @@ def main():
     ap.add_argument("--server", default="http://localhost:9871")
     ap.add_argument("--config", default=os.path.expanduser("~/pinchtab-webgraph/crawl-config.json"))
     ap.add_argument("--out", default="interaction-graph")
-    ap.add_argument("--max-states", type=int, default=200,
-                    help="hard cap on distinct states to record (default 200)")
-    ap.add_argument("--max-visits", type=int, default=600,
-                    help="hard cap on materializations, incl. revisits (default 600)")
-    ap.add_argument("--max-depth", type=int, default=4,
-                    help="max click-depth to explore (default 4 — covers 3-4 click forms)")
+    ap.add_argument("--max-states", type=int, default=300,
+                    help="hard cap on distinct states to record (default 300)")
+    ap.add_argument("--max-visits", type=int, default=450,
+                    help="hard cap on materializations, incl. revisits (default 450; "
+                         "global URL dedup keeps visits≈states×1.5)")
+    ap.add_argument("--max-depth", type=int, default=5,
+                    help="max click-depth to explore (default 5 — covers deep nested forms)")
     ap.add_argument("--max-per-section", type=int, default=2,
                     help="max distinct pages explored per URL section, e.g. /items/* (default 2)")
     ap.add_argument("--data-list-min", type=int, default=3,
@@ -344,9 +353,23 @@ def main():
         return kids
 
     # ---- BFS over states, recording the graph ----
-    # queue items: (path, parent_sig, action_taken)
-    queue = [([], None, None)]
-    enq = {(): None}
+    # A priority min-heap keyed (depth, tier, seq): depth is primary so it stays a
+    # true BFS (all depth-d items drain before depth-(d+1)); within a depth, the
+    # STRUCTURAL tier (link/tab < row < menu) orders breadth-first nav ahead of deep
+    # data-list row descents, so sibling tabs aren't starved by row-by-row dives.
+    # Heap entries: (depth, tier, seq, (path, parent_sig, action_taken)).
+    TIER = {"link": 1, "tab": 1, "row": 2, "menu": 3}
+    queue = []
+    seq = [0]
+    def enqueue(item, depth, tier):
+        heapq.heappush(queue, (depth, tier, seq[0], item))
+        seq[0] += 1
+    enqueue(([], None, None), 0, 0)
+    retry_queue = deque()              # wedge-recovery re-tries jump the heap (FIFO)
+    enq = {(): None}                   # path-tuple dedup (legacy guard, still cheap)
+    url_to_sig = {}                    # norm(url) -> state sig: global URL dedup
+    enq_urls = set()                   # norm(url) already enqueued-or-visited (any parent)
+    visited_click_keys = set()         # (parent_sig, label.lower()) for click-only children
     visits = 0
     restart_attempts = 0
     gave_up = False
@@ -354,8 +377,11 @@ def main():
     print("Interaction crawl from %s (max %d states / %d visits, depth %d)"
           % (start_url, a.max_states, a.max_visits, a.max_depth), file=sys.stderr)
 
-    while queue and len(states) < a.max_states and visits < a.max_visits:
-        path, psig, pact = queue.pop(0)
+    while (queue or retry_queue) and len(states) < a.max_states and visits < a.max_visits:
+        if retry_queue:                                    # recovered items first, in order
+            path, psig, pact = retry_queue.popleft()
+        else:
+            _, _, _, (path, psig, pact) = heapq.heappop(queue)
         # Process this state's browser I/O (materialize + DOM read) under one guard:
         # a wedged bridge often passes materialize() (nav/settle swallow errors) and
         # only surfaces at read_state(), so BOTH must route to the same recovery.
@@ -379,7 +405,7 @@ def main():
             restart_attempts += 1
             if recover_bridge(a.server, a.restart_cmd, a.login_cmd, restart_attempts):
                 mat_state["path"] = None
-                queue.insert(0, (path, psig, pact))        # retry this item next
+                retry_queue.appendleft((path, psig, pact))  # retry this item next
             continue
         visits += 1
         restart_attempts = 0                               # progress clears the consecutive-wedge tally
@@ -393,6 +419,7 @@ def main():
         if sig in states:
             continue                            # already expanded this state
         node = register(sig, cur, label_for(cur, path), len(path))
+        url_to_sig[norm(cur)] = sig             # this URL now resolves to a known state
         print("· [%d states / %d visits] depth %d · %s (%d controls)"
               % (len(states), visits, len(path), cur, len(controls)), file=sys.stderr)
 
@@ -401,17 +428,33 @@ def main():
         if len(path) >= a.max_depth:
             continue
         for ch in nav_children(cur, controls):
-            if ch.get("href"):
-                sk = section_key(ch["href"])
+            href = ch.get("href")
+            if href:
+                n = norm(href)
+                if n in url_to_sig:
+                    # already a recorded state: capture the cross-edge here (it's the
+                    # only place we'd see it, since we won't re-visit) and don't enqueue
+                    edges.append({"from": sig, "to": url_to_sig[n], "label": ch["label"],
+                                  "selector": ch["selector"], "kind": ch["kind"]})
+                    continue
+                if n in enq_urls:
+                    continue                    # pending from another parent — visit once
+                enq_urls.add(n)                 # claim it before the per-section cap below
+                sk = section_key(href)
                 if sec_counts.get(sk, 0) >= a.max_per_section:
                     continue
                 sec_counts[sk] = sec_counts.get(sk, 0) + 1
+            else:
+                ck = (sig, ch["label"].lower())  # click-only tab/menu: dedup per parent
+                if ck in visited_click_keys:
+                    continue
+                visited_click_keys.add(ck)
             cpath = path + [ch]
             k = tuple((x["selector"], x.get("href")) for x in cpath)
             if k in enq:
                 continue
             enq[k] = sig
-            queue.append((cpath, sig, ch))
+            enqueue((cpath, sig, ch), len(cpath), TIER.get(ch["kind"], 1))
 
     # ---- persist ----
     out = {

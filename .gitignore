@@ -30,3 +30,9 @@ cmp.json
 
 # per-host cache-store files (ask.py write-back) — runtime data, never commit
 caches/
+
+# teams generality-test bridge (token + live session) + its generated outputs
+teams-config.json
+.instance-teams/
+teams-*.log
+teams-*.json

@@ -24,11 +24,20 @@ persists nothing until submitted, and we never submit.
 
   ./run-crawl-interactions.sh https://app.example.com/home
   python3 interaction_crawl.py --start https://app.example.com/home --out interaction-graph
+
+For long crawls the headless bridge can WEDGE (nav/click time out though health
+says ok). Pass your environment's bridge-relaunch and re-login commands to enable
+auto-recovery — a wedge is then detected, the bridge restarted, and the in-memory
+BFS resumed (partial output is still written if recovery gives up):
+
+  python3 interaction_crawl.py --start https://app.example.com/home \\
+      --restart-cmd '<relaunch the bridge>' --login-cmd '<re-authenticate>'
 """
 import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from urllib.parse import urlparse
@@ -70,6 +79,56 @@ def section_key(u):
     return base + ("?" + p.query if p.query else "")
 
 
+def probe_bridge(server, start_url, timeout):
+    # Distinguish a WEDGED bridge from a merely-bad path/selector. Don't use nav()
+    # (it hardcodes timeout=60) — probe directly with a short timeout. Both calls
+    # rc==0 → bridge ALIVE (the earlier failure was a bad path → skip). Any
+    # Exception (incl. subprocess.TimeoutExpired) or rc!=0 → WEDGED (→ recover).
+    try:
+        if pt(["nav", start_url], server, timeout=timeout)[0] != 0:
+            return False
+        if pt(["eval", "location.href"], server, timeout=timeout)[0] != 0:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def recover_bridge(server, restart_cmd, login_cmd, attempt):
+    # Mirror hard-bench.sh's ensure_browser(): kill the stale bridge by its PORT
+    # pid (NEVER pkill -f — that self-kills this process, exit 144; see gotchas.md),
+    # relaunch, poll health, re-login. Returns True if the bridge is healthy again.
+    print("  ! WEDGE detected (attempt %d) — killing bridge + restarting…" % attempt,
+          file=sys.stderr)
+    time.sleep(5 * attempt)                                  # backoff, grows per attempt
+    subprocess.run("BPID=$(ss -ltnp 2>/dev/null | grep 9871 | grep -oP 'pid=\\K[0-9]+' "
+                   "| head -1); [ -n \"$BPID\" ] && kill \"$BPID\"", shell=True)
+    time.sleep(2)
+    if restart_cmd:
+        subprocess.run(restart_cmd, shell=True)
+    up = False
+    for _ in range(25):
+        time.sleep(1)
+        try:
+            if pt(["health"], server, timeout=3)[0] == 0:
+                up = True
+                break
+        except Exception:
+            pass
+    if not up:
+        print("  ! bridge did not come up after restart %d — giving up" % attempt,
+              file=sys.stderr)
+        return False
+    if login_cmd:
+        r = subprocess.run(login_cmd, shell=True)
+        if r.returncode != 0:
+            print("  ! login_cmd exited %d — bridge may not be authenticated"
+                  % r.returncode, file=sys.stderr)
+            return False
+    print("  ! bridge up — resuming crawl", file=sys.stderr)
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(description="Crawl a web app into an interaction-graph cache")
     ap.add_argument("--start", required=True, help="start URL (the crawl root)")
@@ -93,6 +152,15 @@ def main():
                     help="open+read each create form (default on)")
     ap.add_argument("--no-read-forms", dest="read_forms", action="store_false",
                     help="record triggers but skip opening their forms (faster, no form specs)")
+    ap.add_argument("--restart-cmd", default="",
+                    help="shell command to relaunch the bridge after a wedge "
+                         "(empty = no relaunch, just kill the stale PID)")
+    ap.add_argument("--login-cmd", default="",
+                    help="shell command to re-authenticate after restart (empty = none)")
+    ap.add_argument("--max-restarts", type=int, default=3,
+                    help="max wedge-recovery attempts before writing partial output (default 3)")
+    ap.add_argument("--probe-timeout", type=int, default=12,
+                    help="seconds for the wedge-detection probe (default 12)")
     ap.add_argument("--render-ms", type=int, default=recipe.RENDER_MS)
     ap.add_argument("--settle-poll", type=float, default=recipe.SETTLE_POLL)
     ap.add_argument("--settle-delay", type=float, default=recipe.SETTLE_DELAY)
@@ -280,16 +348,41 @@ def main():
     queue = [([], None, None)]
     enq = {(): None}
     visits = 0
+    restart_attempts = 0
+    gave_up = False
     sec_counts = {}
     print("Interaction crawl from %s (max %d states / %d visits, depth %d)"
           % (start_url, a.max_states, a.max_visits, a.max_depth), file=sys.stderr)
 
     while queue and len(states) < a.max_states and visits < a.max_visits:
         path, psig, pact = queue.pop(0)
-        if not materialize(path):
+        # Process this state's browser I/O (materialize + DOM read) under one guard:
+        # a wedged bridge often passes materialize() (nav/settle swallow errors) and
+        # only surfaces at read_state(), so BOTH must route to the same recovery.
+        cur = controls = None
+        ok = materialize(path)
+        if ok:
+            try:
+                cur, controls = read_state()
+            except Exception as e:
+                print("  ! read_state failed (%s)" % str(e)[:70], file=sys.stderr)
+                ok = False
+        if not ok:
+            mat_state["path"] = None                       # probe navigates; invalidate cursor
+            if probe_bridge(a.server, start_url, a.probe_timeout):
+                continue                                   # bridge alive → bad path → skip
+            if restart_attempts >= a.max_restarts:
+                print("  ! max restarts (%d) reached — writing partial output"
+                      % a.max_restarts, file=sys.stderr)
+                gave_up = True
+                break                                      # fall through to persist
+            restart_attempts += 1
+            if recover_bridge(a.server, a.restart_cmd, a.login_cmd, restart_attempts):
+                mat_state["path"] = None
+                queue.insert(0, (path, psig, pact))        # retry this item next
             continue
         visits += 1
-        cur, controls = read_state()
+        restart_attempts = 0                               # progress clears the consecutive-wedge tally
         sig = state_sig(cur, controls)
 
         # record the edge that brought us here (even to an already-known state)
@@ -340,6 +433,9 @@ def main():
     json.dump(out, open(path_out, "w"), indent=2)
     print("\nWrote %s: %d states, %d edges, %d triggers"
           % (path_out, len(states), len(out["edges"]), len(out["triggers"])), file=sys.stderr)
+
+    if gave_up:                                            # gave up mid-crawl after a wedge:
+        sys.exit(1)                                        # output written, but signal incomplete
 
 
 if __name__ == "__main__":

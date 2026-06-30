@@ -138,7 +138,15 @@ FORM_JS = r"""
 CONTROLS_JS = r"""
 (() => {
   function cssEsc(s){return (window.CSS&&CSS.escape)?CSS.escape(s):s.replace(/[^a-zA-Z0-9_-]/g,'\\$&');}
-  function sel(el){ if(el.id) return '#'+cssEsc(el.id);
+  // An id is only a STABLE selector if a framework didn't auto-generate it. Radix
+  // (`radix-:r5:`), Headless UI, React-Aria etc. mint ids that change every render,
+  // so a selector captured now breaks when a path is replayed later (the cache crawl
+  // replays paths across states/time). Such ids contain ':' or a known prefix — skip
+  // them and fall back to the structural nth-of-type path. Generic: keys on framework
+  // id patterns, never app/section vocabulary.
+  function stableId(id){ return !!id && id.indexOf(':')<0 &&
+    !/^(radix|headlessui|react-aria|reach-|mui|chakra|rc[-_])/i.test(id); }
+  function sel(el){ if(el.id && stableId(el.id)) return '#'+cssEsc(el.id);
     const parts=[]; let e=el;
     while(e&&e.nodeType===1&&e!==document.body){ let p=e.tagName.toLowerCase(); const par=e.parentElement;
       if(par){const s=Array.prototype.filter.call(par.children,c=>c.tagName===e.tagName);

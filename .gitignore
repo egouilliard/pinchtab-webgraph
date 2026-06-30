@@ -27,3 +27,6 @@ interaction-graph*.json
 *-cache.json
 test-*.json
 cmp.json
+
+# per-host cache-store files (ask.py write-back) — runtime data, never commit
+caches/

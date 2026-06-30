@@ -564,7 +564,12 @@ def main():
     steps.append("Click the “%s” button" % trigger["text"])
     rec = {"goal": a.goal, "start": start_url, "triggerPage": page, "trigger": trigger["text"],
            "shortestClicks": len(path_actions) + 1, "steps": steps,
-           "opensAt": form.get("opensAt"), "form": form}
+           "opensAt": form.get("opensAt"), "form": form,
+           # structured path (additive) so the cache write-back can stitch states+edges
+           # from a live result — one entry per click; href is null for tab/menu clicks.
+           "pathStructured": [{"label": act["label"], "selector": act["selector"],
+                               "href": act.get("href")} for act in path_actions],
+           "triggerSelector": trigger["selector"]}
     json.dump(rec, open(os.path.expanduser("~/pinchtab-webgraph/%s.json" % a.out), "w"), indent=2)
 
     print("\n=== HOW TO: %s ===\n" % a.goal.upper())

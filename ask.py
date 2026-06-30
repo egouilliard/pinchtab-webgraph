@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""
+The unified, cache-first "how do I do X?" entry point.
+
+Makes the default workflow query-cache → on-miss-run-live → write-result-back, so
+repeat questions for the same host answer OFFLINE in milliseconds and the cache
+fills itself in on the first miss:
+
+  1. route by hostname → caches/<host>.json,
+  2. if a cache exists, answer from it via howto.py (0 browser calls),
+  3. on a miss (or with --verify), run live discovery via recipe.py against the
+     crawl browser, then stitch the result back into the cache (cache_store.merge).
+
+This script makes NO direct browser calls itself — it only shells out to howto.py
+(offline) and recipe.py (live). Generic: routing is by URL hostname, nothing
+app/section-specific.
+
+  ./run-ask.sh --goal "add item"   --start https://app.example.com/home
+  ./run-ask.sh --goal "create team" --start https://app/dashboard --verify
+"""
+import argparse
+import datetime
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from urllib.parse import urlparse
+
+import cache_store
+
+DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG = os.path.join(DIR, "crawl-config.json")
+
+
+def _goal_nouns(goal):
+    return [w for w in (goal or "").lower().split()
+            if w not in ("a", "the", "create", "add", "new", "make", "to")]
+
+
+def _mark_stale(host, goal):
+    # --verify could not confirm a cached answer live: flag the matching trigger(s)
+    # so a reader knows the answer may be out of date — but NEVER delete it (a failed
+    # live check is more often a wedged browser than a real UI change).
+    graph = cache_store.load(host)
+    if not graph:
+        return
+    nouns = _goal_nouns(goal)
+    hit = False
+    for t in graph.get("triggers", []):
+        lab = (t.get("label") or "").lower()
+        if any(n in lab for n in nouns):
+            t["staleWarning"] = True
+            hit = True
+    if hit:
+        cache_store.atomic_write(host, graph)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Cache-first how-to: query cache, fall back to live, write back")
+    ap.add_argument("--goal", required=True, help='what to do, e.g. "add item" / "create team"')
+    ap.add_argument("--start", required=True, help="start URL (routes the cache by hostname)")
+    ap.add_argument("--verify", action="store_true",
+                    help="print the cached answer, then re-run live and refresh the cache")
+    ap.add_argument("--server", default="http://localhost:9871")
+    ap.add_argument("--graph", help="explicit cache file (bypasses host routing)")
+    ap.add_argument("--out", help="basename for the live result JSON (default: a temp file)")
+    # unknown args are forwarded ONLY to the live recipe.py run (e.g. --max-discover,
+    # --max-depth, --match) — howto.py never sees them.
+    a, extra = ap.parse_known_args()
+
+    host = urlparse(a.start).hostname
+    cache_file = a.graph or cache_store.cache_path(host)
+    cache_exists = os.path.exists(cache_file)
+    howto_py = os.path.join(DIR, "howto.py")
+    recipe_py = os.path.join(DIR, "recipe.py")
+
+    # 1) CACHE-FIRST: answer offline unless the user forced a live re-check.
+    if cache_exists and not a.verify:
+        rc = subprocess.run(["python3", howto_py, cache_file,
+                             "--goal", a.goal, "--start", a.start]).returncode
+        if rc == 0:
+            return                       # cache hit — done, 0 browser calls
+        if rc != 2:
+            sys.exit(rc)                 # real error (not a miss) — propagate
+        # rc == 2 → cache miss; fall through to live discovery
+    elif cache_exists and a.verify:
+        subprocess.run(["python3", howto_py, cache_file,
+                        "--goal", a.goal, "--start", a.start])
+        print("--- verifying live ---", file=sys.stderr)
+
+    # 2) LIVE: recipe.py drives the crawl browser. Pass the same token/config
+    #    run-recipe.sh exports, so a direct `python3 ask.py` works too.
+    env = dict(os.environ)
+    try:
+        env["PINCHTAB_TOKEN"] = json.load(open(CONFIG))["server"]["token"]
+        env["PINCHTAB_CONFIG"] = CONFIG
+    except Exception:
+        pass
+
+    # recipe.py writes to ~/pinchtab-webgraph/<out>.json (basename, relative to its
+    # own dir), so --out is a basename, not a path. Use a unique temp basename when
+    # the caller didn't pick one, and clean it up after we read it back.
+    if a.out:
+        out_base, cleanup = a.out, False
+    else:
+        out_base = os.path.basename(tempfile.mktemp(prefix=".ask-", dir=tempfile.gettempdir()))
+        cleanup = True
+    result_json = os.path.join(DIR, out_base + ".json")
+
+    rc = subprocess.run(["python3", recipe_py, "--goal", a.goal, "--start", a.start,
+                         "--out", out_base, "--server", a.server] + extra, env=env).returncode
+    if rc != 0:
+        # Do NOT touch the cache on a live failure.
+        if a.verify and cache_exists:
+            print("! Live check failed — cached answer may be stale", file=sys.stderr)
+            _mark_stale(host, a.goal)
+        else:
+            print("Live discovery failed — is the crawl browser running? "
+                  "See runbook.md step 1.", file=sys.stderr)
+        sys.exit(rc)
+
+    # 3) WRITE-BACK: stitch the live result into the cache so the next ask hits.
+    try:
+        with open(result_json) as f:
+            live_rec = json.load(f)
+        counts = cache_store.merge(host, live_rec,
+                                   datetime.datetime.now(datetime.timezone.utc).isoformat())
+        print("Cache updated: %s.json (%d states, %d edges, %d triggers)."
+              % (host, counts["states"], counts["edges"], counts["triggers"]), file=sys.stderr)
+    finally:
+        if cleanup:
+            try:
+                os.remove(result_json)
+            except OSError:
+                pass
+
+
+if __name__ == "__main__":
+    main()

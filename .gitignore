@@ -36,3 +36,5 @@ teams-config.json
 .instance-teams/
 teams-*.log
 teams-*.json
+teams-*.md
+teams-ui-map.md

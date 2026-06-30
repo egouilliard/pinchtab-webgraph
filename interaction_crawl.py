@@ -189,6 +189,9 @@ def main():
     ap.add_argument("--rows-per-list", type=int, default=1,
                     help="descend into N representative rows of each data list to reach "
                          "per-row nested forms (default 1; 0 = skip lists entirely)")
+    ap.add_argument("--dump-controls", dest="dump_controls", action="store_true", default=False,
+                    help="store the FULL control inventory (links/buttons/tabs/menus) of every "
+                         "state in the output, not just create-triggers — for exhaustive UI capture")
     ap.add_argument("--single-url", dest="single_url", action="store_true", default=False,
                     help="single-URL app-shell mode: NEVER navigate (a programmatic nav "
                          "blanks such SPAs, e.g. MS Teams) — read the current live page and "
@@ -472,6 +475,11 @@ def main():
         if sig in states:
             continue                            # already expanded this state
         node = register(sig, cur, label_for(cur, path), len(path))
+        if a.dump_controls:                     # full per-state control inventory (generic)
+            node["controls"] = [{"text": c.get("text"), "role": c.get("role"),
+                                 "tag": c.get("tag"), "href": c.get("href"),
+                                 "nav": c.get("nav"), "selector": c.get("selector")}
+                                for c in controls]
         url_to_sig[norm(cur)] = sig             # this URL now resolves to a known state
         print("· [%d states / %d visits] depth %d · %s (%d controls)"
               % (len(states), visits, len(path), cur, len(controls)), file=sys.stderr)

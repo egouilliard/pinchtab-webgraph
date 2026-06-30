@@ -102,6 +102,52 @@ def open_conversation(server, raw_label):
         % json.dumps(raw_label)], server)[1]
 
 
+def goto_rail(server, prefix):
+    return recipe.pt(["eval",
+        "(()=>{const b=[...document.querySelectorAll('button,[role=tab]')]"
+        ".find(e=>(e.getAttribute('aria-label')||'').startsWith(%s));if(!b)return'none';"
+        "b.click();return'ok';})()" % json.dumps(prefix)], server)[1]
+
+
+def expand_all_teams(server):
+    # click every collapsed team group (aria-expanded=false), except the Quick-views group
+    return recipe.pt(["eval",
+        "(()=>{let n=0;[...document.querySelectorAll('[role=treeitem][aria-expanded=\"false\"]')]"
+        ".forEach(g=>{if(!/quick views/i.test(g.getAttribute('aria-label')||'')){g.click();n++;}});"
+        "return n;})()"], server)[1]
+
+
+def list_channels(server):
+    # Walk the Teams tree in order: a level-2 expandable row is a TEAM; the level>=3
+    # leaf rows after it are its CHANNELS (channels, unlike 1:1 chats, activate on click).
+    rows = J(server, r"""[...document.querySelectorAll('[role=treeitem]')].map(e=>({
+      lvl:e.getAttribute('aria-level'), exp:e.getAttribute('aria-expanded'),
+      label:(e.getAttribute('aria-label')||e.innerText||'').replace(/\s+/g,' ').trim()}))""") or []
+    out, team = [], None
+    for r in rows:
+        lvl = int(r["lvl"]) if r["lvl"] else 0
+        lab = r["label"]
+        if r["exp"] is not None and lvl == 2:
+            team = lab
+        elif r["exp"] is None and lvl >= 3 and lab and not lab.startswith("See all"):
+            out.append({"team": team, "channel": lab})
+    return out
+
+
+def open_treeitem(server, name):
+    return recipe.pt(["eval",
+        "(()=>{const t=[...document.querySelectorAll('[role=treeitem]')]"
+        ".find(e=>((e.getAttribute('aria-label')||e.innerText||'').replace(/\\s+/g,' ').trim())"
+        ".startsWith(%s));if(!t)return'notfound';t.scrollIntoView({block:'center'});"
+        "t.click();return'ok';})()" % json.dumps(name)], server)[1]
+
+
+def tabs_now(server):
+    return J(server, r"""[...document.querySelectorAll('[role=tab]')]"""
+                     r""".map(e=>(e.innerText||e.getAttribute('aria-label')||'').trim())"""
+                     r""".filter(Boolean)""") or []
+
+
 def last_messages(server, n):
     """Latest N messages of the open conversation: body text + epoch-ms id (data-mid)."""
     raw = J(server,
@@ -137,6 +183,11 @@ def main():
                          "best-effort and may fail per chat. For reliable full message history "
                          "use the Microsoft Graph API (/chats/{id}/messages).")
     ap.add_argument("--max-convos", type=int, default=0, help="cap conversations listed (0 = all)")
+    ap.add_argument("--channels", dest="channels", action="store_true", default=True,
+                    help="walk Teams → expand every team → open every channel and capture its "
+                         "controls + tabs (default on; channels DO activate, unlike 1:1 chats)")
+    ap.add_argument("--no-channels", dest="channels", action="store_false")
+    ap.add_argument("--max-channels", type=int, default=0, help="cap channels opened (0 = all)")
     ap.add_argument("--out", default="teams-content")
     a = ap.parse_args()
     try:
@@ -199,23 +250,53 @@ def main():
             print("  %-28s %d msgs" % (conv["name"][:28], len(conv.get("messages", []))),
                   file=sys.stderr)
 
+    # ---- 3) Teams → expand every team, open every channel, capture controls + tabs ----
+    channels = []
+    if a.channels:
+        goto_rail(S, "Teams (")
+        time.sleep(1.5); recipe.settle(S)
+        ne = expand_all_teams(S)
+        time.sleep(1.5); recipe.settle(S)
+        chans = list_channels(S)
+        if a.max_channels:
+            chans = chans[:a.max_channels]
+        print("teams expanded: %s · channels to open: %d" % (ne, len(chans)), file=sys.stderr)
+        for i, ch in enumerate(chans, 1):
+            rec = {"team": ch["team"], "channel": ch["channel"],
+                   "opened": False, "controlCount": 0, "tabs": []}
+            if open_treeitem(S, ch["channel"]) == "ok":
+                time.sleep(1.2); recipe.settle(S)
+                cc = controls_now(S)
+                rec.update(opened=True, controlCount=len(cc), tabs=tabs_now(S))
+                for c in cc:                       # fold channel controls into the global union
+                    k = (c.get("text"), c.get("selector"))
+                    if k not in seen_ctrl:
+                        seen_ctrl.add(k)
+                        all_controls.append(c)
+            channels.append(rec)
+            print("  [%d/%d] %-16s / %-26s %d ctrls" % (i, len(chans),
+                  (ch["team"] or "?")[:16], ch["channel"][:26], rec["controlCount"]), file=sys.stderr)
+
     out = {
         "extractedAt": datetime.now().isoformat(timespec="seconds"),
         "host": "teams.cloud.microsoft",
         "summary": {"views": len(views), "uniqueControls": len(all_controls),
                     "conversations": len(conversations),
-                    "chatsOpenedForMessages": opened_ok},
+                    "chatsOpenedForMessages": opened_ok,
+                    "channels": len(channels),
+                    "channelsOpened": sum(1 for c in channels if c["opened"])},
         "views": views,
         "allControls": all_controls,
         "conversations": conversations,
+        "channels": channels,
     }
     path = os.path.join(os.path.dirname(__file__), a.out + ".json")
     json.dump(out, open(path, "w"), indent=2, ensure_ascii=False)
     print("\nWrote %s" % path, file=sys.stderr)
-    print("  %d views · %d unique controls · %d conversations (%d opened for messages)"
+    print("  %d views · %d unique controls · %d conversations · %d/%d channels opened"
           % (out["summary"]["views"], out["summary"]["uniqueControls"],
-             out["summary"]["conversations"], out["summary"]["chatsOpenedForMessages"]),
-          file=sys.stderr)
+             out["summary"]["conversations"], out["summary"]["channelsOpened"],
+             out["summary"]["channels"]), file=sys.stderr)
 
 
 if __name__ == "__main__":

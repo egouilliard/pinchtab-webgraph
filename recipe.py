@@ -243,6 +243,41 @@ def pt(args, server, timeout=60):
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 
 
+def active_tab(server, url=None):
+    # PinchTab 0.10.0 targets the tab in $PINCHTAB_TAB (a STORED default), NOT "the active
+    # tab" — so once that stored id goes stale every command 404s ("tab not found"). Resolve
+    # a live page tab (prefer one whose URL matches `url`, else the last active page) so the
+    # caller can pin $PINCHTAB_TAB to it. Returns None if it can't tell.
+    try:
+        rc, out, _ = pt(["tab", "--json"], server, timeout=15)
+        if rc != 0:
+            return None
+        tabs = json.loads(out)
+        if isinstance(tabs, dict):
+            tabs = tabs.get("tabs", [])
+        pages = [t for t in tabs if t.get("type") == "page" and t.get("id")]
+        if url:
+            key = url.split("#")[0].rstrip("/")
+            for t in pages:                                   # exact URL match
+                if (t.get("url", "").split("#")[0].rstrip("/")) == key:
+                    return t["id"]
+            for t in pages:                                   # prefix match (SPA route drift)
+                if key[:60] and key[:60] in t.get("url", ""):
+                    return t["id"]
+        act = [t for t in pages if t.get("status") == "active"] or pages
+        return act[-1]["id"] if act else None
+    except Exception:
+        return None
+
+
+def pin_tab(server, url=None):
+    """Point $PINCHTAB_TAB at a live tab so subsequent pt()/eval calls hit it (0.10.0)."""
+    tid = active_tab(server, url)
+    if tid:
+        os.environ["PINCHTAB_TAB"] = tid
+    return tid
+
+
 def pt_json(js, server):
     rc, out, err = pt(["eval", "JSON.stringify(%s)" % js], server)
     if rc != 0:
@@ -293,7 +328,9 @@ def settle(server, render_ms=None, delay=None):
 def nav(url, server):
     rc, out, err = pt(["nav", url], server, timeout=60)
     if rc != 0 and "not found" in (err + out).lower():
+        # stale/closed $PINCHTAB_TAB (0.10.0) OR genuinely no tab → open a fresh one
         pt(["nav", url, "--new-tab"], server, timeout=60)
+    pin_tab(server, url)                          # pin the now-current tab for later commands
     settle(server)
 
 

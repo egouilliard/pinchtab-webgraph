@@ -206,8 +206,9 @@ def recover_bridge(server, restart_cmd, login_cmd, attempt):
     print("  ! WEDGE detected (attempt %d) — killing bridge + restarting…" % attempt,
           file=sys.stderr)
     time.sleep(5 * attempt)                                  # backoff, grows per attempt
-    subprocess.run("BPID=$(ss -ltnp 2>/dev/null | grep 9871 | grep -oP 'pid=\\K[0-9]+' "
-                   "| head -1); [ -n \"$BPID\" ] && kill \"$BPID\"", shell=True)
+    port = (urlparse(server).port or 9871)                   # derive from --server (was hardcoded 9871)
+    subprocess.run("BPID=$(ss -ltnp 2>/dev/null | grep ':%d ' | grep -oP 'pid=\\K[0-9]+' "
+                   "| head -1); [ -n \"$BPID\" ] && kill \"$BPID\"" % port, shell=True)
     time.sleep(2)
     if restart_cmd:
         subprocess.run(restart_cmd, shell=True)
@@ -257,6 +258,12 @@ def main():
     ap.add_argument("--rows-per-list", type=int, default=1,
                     help="descend into N representative rows of each data list to reach "
                          "per-row nested forms (default 1; 0 = skip lists entirely)")
+    ap.add_argument("--cross-host", dest="cross_host", action="store_true", default=False,
+                    help="follow links AND iframe srcs to OTHER hosts (embedded/linked apps, "
+                         "e.g. an in-Teams SharePoint doc library) as graph nodes — so the graph "
+                         "spans app boundaries. Off by default (a same-host crawl is the norm).")
+    ap.add_argument("--max-cross-host", type=int, default=25,
+                    help="cap on distinct other-host nodes followed (default 25)")
     # Full capture is ON BY DEFAULT: one bare run extracts EVERYTHING — the full
     # control inventory (links/buttons/tabs/menus) of every state AND each state's data
     # collections — so "run the script" means "capture it all". --no-* opts out for speed.
@@ -306,6 +313,12 @@ def main():
 
     start_url = a.start
 
+    # PinchTab 0.10.0 targets $PINCHTAB_TAB (a stored default that goes stale → "tab not
+    # found" on every command). Pin it to a live tab up-front — critical for --single-url,
+    # which READS the current page before any nav() would pin it.
+    if a.single_url:
+        recipe.pin_tab(a.server, start_url)
+
     # ---- browser position tracking + materialization (prefix-reuse, like recipe) ----
     mat_state = {"path": None}
 
@@ -316,9 +329,14 @@ def main():
                 # live position: path[0] is a child of the root state = persistent shell
                 # chrome, present in every view, so it re-anchors us from wherever we are;
                 # each subsequent click was discovered present after the previous one.
+                # EXCEPTION: an href action is a cross-host/iframe HOP to a real URL — nav
+                # to it (leaving the shell is fine; we're capturing that other app).
                 for act in path:
-                    click_js(act["selector"], a.server)
-                    settle(a.server)
+                    if act.get("href"):
+                        nav(act["href"], a.server)
+                    else:
+                        click_js(act["selector"], a.server)
+                        settle(a.server)
                 mat_state["path"] = path
                 return True
             idx = max((i for i, act in enumerate(path) if act.get("href")), default=-1)
@@ -444,13 +462,22 @@ def main():
                   file=sys.stderr)
 
     # ---- nav children of a state (what we enqueue to explore) ----
-    def nav_children(cur, controls):
+    def nav_children(cur, controls, iframes=()):
         sib = {}
         for c in controls:
             h = c.get("href")
             if h and h.startswith("http") and same_host(h, start_url):
                 sib[section_key(h.split("#")[0])] = sib.get(section_key(h.split("#")[0]), 0) + 1
         datalist = {k for k, n in sib.items() if n >= a.data_list_min}
+
+        def xhost_ok(u):
+            # can we follow a control/iframe to another host? only with --cross-host, bounded
+            if same_host(u, start_url):
+                return True
+            if not a.cross_host or xhost["n"] >= a.max_cross_host:
+                return False
+            xhost["n"] += 1
+            return True
 
         kids, enq_links, enq_clicks, rows_taken = [], set(), set(), {}
         for c in controls:
@@ -461,9 +488,17 @@ def main():
             isnav = bool(c.get("nav"))
             if href:
                 u = href.split("#")[0]
-                if not (u.startswith("http") and same_host(u, start_url)):
+                if not u.startswith("http"):
                     continue
+                cross = not same_host(u, start_url)
+                if cross and not xhost_ok(u):
+                    continue                   # cross-host link, budget off/exhausted → skip
                 if u.rstrip("/") == cur.split("#")[0].rstrip("/") or u in enq_links:
+                    continue
+                if cross:                      # another app/host — a distinct node, not a data row
+                    enq_links.add(u)
+                    kids.append({"label": txt or u, "selector": c["selector"], "href": u,
+                                 "kind": "external"})
                     continue
                 sk = section_key(u)
                 if sk in datalist:
@@ -489,6 +524,18 @@ def main():
                 kind = "tab" if c.get("role") in NAV_ROLES else "menu"
                 kids.append({"label": txt, "selector": c["selector"], "href": None,
                              "kind": kind})
+        # EMBEDDED apps: follow each iframe's real src as a node (cross-host aware). This is
+        # how the graph spans embeds like an in-Teams SharePoint doc library — pinchtab's
+        # `frame` can't attach to cross-origin OOP iframes, but the src IS a real URL we nav to.
+        for src in iframes:
+            u = src.split("#")[0]
+            if not u.startswith("http") or u in enq_links:
+                continue
+            if not xhost_ok(u):
+                continue
+            enq_links.add(u)
+            kids.append({"label": "⧉ " + (urlparse(u).hostname or u), "selector": None,
+                         "href": u, "kind": "iframe"})
         return kids
 
     # ---- persistence: build the graph + write it ATOMICALLY (temp then os.replace, so a
@@ -546,7 +593,9 @@ def main():
     # STRUCTURAL tier (link/tab < row < menu) orders breadth-first nav ahead of deep
     # data-list row descents, so sibling tabs aren't starved by row-by-row dives.
     # Heap entries: (depth, tier, seq, (path, parent_sig, action_taken)).
-    TIER = {"link": 1, "tab": 1, "row": 2, "menu": 3}
+    # external/iframe explored LAST within a depth: following a cross-host hop leaves the
+    # (single-URL) shell, which can strand not-yet-materialized in-shell siblings — do them first.
+    TIER = {"link": 1, "tab": 1, "row": 2, "menu": 3, "external": 4, "iframe": 4}
     queue = []
     seq = [0]
     def enqueue(item, depth, tier):
@@ -558,6 +607,7 @@ def main():
     url_to_sig = {}                    # norm(url) -> state sig: global URL dedup
     enq_urls = set()                   # norm(url) already enqueued-or-visited (any parent)
     visited_click_keys = set()         # (parent_sig, label.lower()) for click-only children
+    xhost = {"n": 0}                    # count of distinct other-host nodes followed (--cross-host)
     visits = 0
     restart_attempts = 0
     gave_up = False
@@ -633,7 +683,14 @@ def main():
 
         if len(path) >= a.max_depth:
             continue
-        for ch in nav_children(cur, controls):
+        iframes = []
+        if a.cross_host:                        # only pay the extra read when following embeds
+            try:
+                iframes = pt_json("[...document.querySelectorAll('iframe[src]')]"
+                                  ".map(f=>f.src).filter(s=>/^https?:/.test(s))", a.server) or []
+            except Exception:
+                iframes = []
+        for ch in nav_children(cur, controls, iframes):
             href = ch.get("href")
             if href:
                 n = norm(href)
@@ -660,7 +717,13 @@ def main():
             if k in enq:
                 continue
             enq[k] = sig
-            enqueue((cpath, sig, ch), len(cpath), TIER.get(ch["kind"], 1))
+            tier = TIER.get(ch["kind"], 1)
+            # cross-host/iframe hops leave the page: in SINGLE-URL that strands not-yet-
+            # materialized in-shell siblings → do them LAST; in normal (nav) mode each nav
+            # is independent, so explore embeds/other-hosts alongside links (tier 1).
+            if ch["kind"] in ("external", "iframe"):
+                tier = 4 if a.single_url else 1
+            enqueue((cpath, sig, ch), len(cpath), tier)
 
     # ---- why did the crawl stop? Be EXPLICIT — a silently truncated crawl reads as
     # "captured everything" when it didn't. Only a drained frontier means full coverage. ----

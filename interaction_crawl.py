@@ -34,10 +34,12 @@ BFS resumed (partial output is still written if recovery gives up):
       --restart-cmd '<relaunch the bridge>' --login-cmd '<re-authenticate>'
 """
 import argparse
+import atexit
 import heapq
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -137,8 +139,11 @@ def capture_collections(server, max_rounds=50):
                 break
         else:
             stable, last = 0, len(order)
-        pt(["eval", SCROLL_DOMINANT], server)
-        settle(server)
+        try:                                                 # a wedge mid-scroll must not throw
+            pt(["eval", SCROLL_DOMINANT], server)            # out of here unguarded — break and
+            settle(server)                                   # keep what we accumulated so far.
+        except Exception:
+            break
     final = read() or cols
     out = []
     for c in final:
@@ -235,11 +240,14 @@ def main():
     ap.add_argument("--server", default="http://localhost:9871")
     ap.add_argument("--config", default=os.path.expanduser("~/code/pinchtab-webgraph/crawl-config.json"))
     ap.add_argument("--out", default="interaction-graph")
-    ap.add_argument("--max-states", type=int, default=300,
-                    help="hard cap on distinct states to record (default 300)")
-    ap.add_argument("--max-visits", type=int, default=450,
-                    help="hard cap on materializations, incl. revisits (default 450; "
-                         "global URL dedup keeps visits≈states×1.5)")
+    ap.add_argument("--max-states", type=int, default=500,
+                    help="hard cap on distinct states to record (default 500 — raised so a "
+                         "full-capture run isn't truncated; lower it to bound a huge app)")
+    ap.add_argument("--max-visits", type=int, default=1200,
+                    help="hard cap on materializations, incl. revisits (default 1200; click-only "
+                         "tabs/menus can't be URL-deduped so visits run several× states — this "
+                         "ceiling is deliberately high so breadth isn't starved. See the 'stopped' "
+                         "field in the output: 'frontier-exhausted' = truly complete, a cap = truncated)")
     ap.add_argument("--max-depth", type=int, default=5,
                     help="max click-depth to explore (default 5 — covers deep nested forms)")
     ap.add_argument("--max-per-section", type=int, default=2,
@@ -249,14 +257,24 @@ def main():
     ap.add_argument("--rows-per-list", type=int, default=1,
                     help="descend into N representative rows of each data list to reach "
                          "per-row nested forms (default 1; 0 = skip lists entirely)")
-    ap.add_argument("--dump-controls", dest="dump_controls", action="store_true", default=False,
+    # Full capture is ON BY DEFAULT: one bare run extracts EVERYTHING — the full
+    # control inventory (links/buttons/tabs/menus) of every state AND each state's data
+    # collections — so "run the script" means "capture it all". --no-* opts out for speed.
+    ap.add_argument("--dump-controls", dest="dump_controls", action="store_true", default=True,
                     help="store the FULL control inventory (links/buttons/tabs/menus) of every "
-                         "state in the output, not just create-triggers — for exhaustive UI capture")
-    ap.add_argument("--capture-content", dest="capture_content", action="store_true", default=False,
+                         "state in the output, not just create-triggers (default ON)")
+    ap.add_argument("--no-dump-controls", dest="dump_controls", action="store_false",
+                    help="record only create-triggers per state, not the full control inventory")
+    ap.add_argument("--capture-content", dest="capture_content", action="store_true", default=True,
                     help="ALSO capture each state's DATA collections (tables/grids/trees/lists/"
                          "feeds + repeated-sibling clusters) via CONTENT_JS, scroll-loading through "
-                         "virtualization — generic, structural, no app vocabulary. This is what "
-                         "turns the nav graph into a full content graph of ANY site.")
+                         "virtualization — generic, structural, no app vocabulary. Turns the nav "
+                         "graph into a full content graph of ANY site (default ON).")
+    ap.add_argument("--no-capture-content", dest="capture_content", action="store_false",
+                    help="skip data-collection capture (faster; nav+controls+forms only)")
+    ap.add_argument("--checkpoint-every", type=int, default=10,
+                    help="flush the graph to disk every N new states (default 10) so a crash or "
+                         "kill never loses progress; the crawl also flushes on SIGINT/SIGTERM")
     ap.add_argument("--single-url", dest="single_url", action="store_true", default=False,
                     help="single-URL app-shell mode: NEVER navigate (a programmatic nav "
                          "blanks such SPAs, e.g. MS Teams) — read the current live page and "
@@ -473,6 +491,55 @@ def main():
                              "kind": kind})
         return kids
 
+    # ---- persistence: build the graph + write it ATOMICALLY (temp then os.replace, so a
+    # file is never half-written). Called at every checkpoint, on normal completion, AND
+    # from the signal handler below — so a crash, OOM, 2-min kill or Ctrl-C NEVER loses the
+    # crawl (the exact failure mode that lost a 50-state run before). ----
+    path_out = os.path.expanduser("~/code/pinchtab-webgraph/%s.json" % a.out)
+    persist_flags = {"final_done": False}
+
+    def persist(final=False, reason="in-progress"):
+        out = {
+            "meta": {"start": start_url, "host": urlparse(start_url).hostname,
+                     "states": len(states), "edges": len(edges), "triggers": len(triggers),
+                     "max_depth": a.max_depth, "tool": "interaction_crawl.py",
+                     "complete": bool(final), "stopped": reason},
+            "states": list(states.values()),
+            "state_index": {sig: st["id"] for sig, st in states.items()},
+            "edges": [{"from": states[e["from"]]["id"] if e["from"] in states else None,
+                       "to": states[e["to"]]["id"] if e["to"] in states else None,
+                       "label": e["label"], "selector": e["selector"], "kind": e["kind"]}
+                      for e in edges if e["from"] in states],
+            "triggers": [{"label": t["label"],
+                          "state": states[t["state"]]["id"] if t["state"] in states else None,
+                          "path": t["path"], "form": t["form"], "opensAt": t["opensAt"]}
+                         for t in triggers],
+        }
+        tmp = path_out + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(out, fh, indent=2)
+        os.replace(tmp, path_out)                    # atomic swap — reader never sees a partial file
+        if final:
+            persist_flags["final_done"] = True
+        return len(out["edges"])
+
+    # Flush-on-exit: even an external SIGTERM (2-min Bash limit) / SIGINT (Ctrl-C) writes the
+    # partial graph before dying, marked complete=false. atexit covers uncaught exceptions;
+    # it's a no-op once a final write happened (never clobbers complete=true with false).
+    dying = {"sig": False}
+    def on_signal(signum, frame):
+        if dying["sig"]:
+            os._exit(130)
+        dying["sig"] = True
+        print("\n  ! signal %d — flushing partial graph before exit" % signum, file=sys.stderr)
+        try:
+            persist(final=False)
+        finally:
+            os._exit(130)
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+    atexit.register(lambda: None if persist_flags["final_done"] else persist(final=False))
+
     # ---- BFS over states, recording the graph ----
     # A priority min-heap keyed (depth, tier, seq): depth is primary so it stays a
     # true BFS (all depth-d items drain before depth-(d+1)); within a depth, the
@@ -546,7 +613,13 @@ def main():
                                  "nav": c.get("nav"), "selector": c.get("selector")}
                                 for c in controls]
         if a.capture_content:                   # data collections (tables/grids/trees/lists)
-            node["collections"] = capture_collections(a.server)
+            try:
+                node["collections"] = capture_collections(a.server)
+            except Exception as e:              # a wedge here must not kill the crawl: keep
+                node["collections"] = []        # the nav/controls we already have and move on
+                mat_state["path"] = None        # cursor may be dirty after a failed scroll
+                print("  ! content capture failed (%s) — nav+controls only"
+                      % str(e)[:50], file=sys.stderr)
         url_to_sig[norm(cur)] = sig             # this URL now resolves to a known state
         ncol = sum(c.get("count", 0) for c in node.get("collections", []))
         print("· [%d states / %d visits] depth %d · %s (%d controls%s)"
@@ -554,6 +627,9 @@ def main():
                  (", %d items" % ncol) if a.capture_content else ""), file=sys.stderr)
 
         capture_triggers(path, sig, controls)
+
+        if a.checkpoint_every > 0 and len(states) % a.checkpoint_every == 0:
+            persist()                           # incremental flush — never lose progress
 
         if len(path) >= a.max_depth:
             continue
@@ -586,26 +662,29 @@ def main():
             enq[k] = sig
             enqueue((cpath, sig, ch), len(cpath), TIER.get(ch["kind"], 1))
 
-    # ---- persist ----
-    out = {
-        "meta": {"start": start_url, "host": urlparse(start_url).hostname,
-                 "states": len(states), "edges": len(edges), "triggers": len(triggers),
-                 "max_depth": a.max_depth, "tool": "interaction_crawl.py"},
-        "states": list(states.values()),
-        "state_index": {sig: st["id"] for sig, st in states.items()},
-        "edges": [{"from": states[e["from"]]["id"] if e["from"] in states else None,
-                   "to": states[e["to"]]["id"] if e["to"] in states else None,
-                   "label": e["label"], "selector": e["selector"], "kind": e["kind"]}
-                  for e in edges if e["from"] in states],
-        "triggers": [{"label": t["label"],
-                      "state": states[t["state"]]["id"] if t["state"] in states else None,
-                      "path": t["path"], "form": t["form"], "opensAt": t["opensAt"]}
-                     for t in triggers],
-    }
-    path_out = os.path.expanduser("~/code/pinchtab-webgraph/%s.json" % a.out)
-    json.dump(out, open(path_out, "w"), indent=2)
-    print("\nWrote %s: %d states, %d edges, %d triggers"
-          % (path_out, len(states), len(out["edges"]), len(out["triggers"])), file=sys.stderr)
+    # ---- why did the crawl stop? Be EXPLICIT — a silently truncated crawl reads as
+    # "captured everything" when it didn't. Only a drained frontier means full coverage. ----
+    if gave_up:
+        reason = "wedge-gave-up"
+    elif not queue and not retry_queue:
+        reason = "frontier-exhausted"                     # nothing left to explore = complete
+    elif len(states) >= a.max_states:
+        reason = "hit-max-states(%d)" % a.max_states
+    elif visits >= a.max_visits:
+        reason = "hit-max-visits(%d)" % a.max_visits
+    else:
+        reason = "stopped"
+    complete = (reason == "frontier-exhausted")
+
+    # ---- final persist ---- (complete=true only when the whole frontier was drained)
+    nedges = persist(final=complete, reason=reason)
+    persist_flags["final_done"] = True                    # this write is authoritative — stop
+    #                                                       atexit clobbering the real 'stopped'
+    note = ("" if complete else
+            "  ⚠ TRUNCATED (%s) — %d nav paths still queued; raise the cap for fuller coverage"
+            % (reason, len(queue) + len(retry_queue)))
+    print("\nWrote %s: %d states, %d edges, %d triggers  [stopped: %s]%s"
+          % (path_out, len(states), nedges, len(triggers), reason, note), file=sys.stderr)
 
     if gave_up:                                            # gave up mid-crawl after a wedge:
         sys.exit(1)                                        # output written, but signal incomplete

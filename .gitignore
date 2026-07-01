@@ -4,6 +4,7 @@ crawl-config.json
 .instance/
 bridge.log
 httpd.log
+*.crawl.log
 
 # python
 __pycache__/

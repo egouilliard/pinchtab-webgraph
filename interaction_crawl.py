@@ -47,6 +47,7 @@ from urllib.parse import urlparse
 import recipe  # proven primitives — see module docstring
 
 CONTROLS_JS = recipe.CONTROLS_JS
+CONTENT_JS = recipe.CONTENT_JS
 FORM_JS = recipe.FORM_JS
 SKIP_NAV = recipe.SKIP_NAV
 VERBS = recipe.VERBS
@@ -88,6 +89,65 @@ def click_js(selector, server):
         raise RuntimeError(err or out)
     if "missing" in (out or ""):
         raise RuntimeError("selector not present: %s" % selector[:60])
+
+
+# Scroll the last item of the page's LARGEST collection into view (generic — used to
+# defeat list VIRTUALIZATION, where only the on-screen rows exist in the DOM).
+SCROLL_DOMINANT = r"""(()=>{
+  const CLOSE='[role=grid],[role=table],[role=treegrid],[role=tree],[role=list],[role=listbox],[role=feed],table,ul,ol';
+  const ITEM='[role=row],[role=treeitem],[role=listitem],[role=option],[role=article],tr,li';
+  let best=null,bn=0;
+  document.querySelectorAll(CLOSE).forEach(c=>{const n=c.querySelectorAll(ITEM).length;if(n>bn){bn=n;best=c;}});
+  if(!best)return 0;
+  const it=best.querySelectorAll(ITEM); if(it.length)it[it.length-1].scrollIntoView({block:'end'});
+  return it.length;
+})()"""
+
+
+def capture_collections(server, max_rounds=50):
+    """GENERIC content capture: read the view's data collections (CONTENT_JS) and, for
+    the dominant (largest) one, scroll-load through virtualization, accumulating unique
+    items until the count stops growing. Returns the collection list (dominant expanded)."""
+    def read():
+        try:
+            return pt_json(CONTENT_JS, server) or []
+        except Exception:
+            return []
+    cols = read()
+    if not cols:
+        return []
+    dominant = max(cols, key=lambda c: c.get("count", 0)).get("kind")
+
+    def key(it):
+        return (it.get("t", ""), " | ".join(it.get("cells", [])), it.get("level"))
+
+    merged, order = {}, []
+    last, stable = -1, 0
+    for _ in range(max_rounds):
+        for c in read():
+            if c.get("kind") == dominant:
+                for it in c.get("items", []):
+                    k = key(it)
+                    if k not in merged:
+                        merged[k] = it
+                        order.append(k)
+        if len(order) == last:
+            stable += 1
+            if stable >= 3:                                  # no growth after 3 scrolls → done
+                break
+        else:
+            stable, last = 0, len(order)
+        pt(["eval", SCROLL_DOMINANT], server)
+        settle(server)
+    final = read() or cols
+    out = []
+    for c in final:
+        if c.get("kind") == dominant and order:
+            out.append({"kind": c["kind"], "count": len(order),
+                        "items": [merged[k] for k in order]})
+        else:
+            out.append(c)
+    return out
 
 
 def state_sig(url, controls, view=None):
@@ -173,7 +233,7 @@ def main():
     ap = argparse.ArgumentParser(description="Crawl a web app into an interaction-graph cache")
     ap.add_argument("--start", required=True, help="start URL (the crawl root)")
     ap.add_argument("--server", default="http://localhost:9871")
-    ap.add_argument("--config", default=os.path.expanduser("~/pinchtab-webgraph/crawl-config.json"))
+    ap.add_argument("--config", default=os.path.expanduser("~/code/pinchtab-webgraph/crawl-config.json"))
     ap.add_argument("--out", default="interaction-graph")
     ap.add_argument("--max-states", type=int, default=300,
                     help="hard cap on distinct states to record (default 300)")
@@ -192,6 +252,11 @@ def main():
     ap.add_argument("--dump-controls", dest="dump_controls", action="store_true", default=False,
                     help="store the FULL control inventory (links/buttons/tabs/menus) of every "
                          "state in the output, not just create-triggers — for exhaustive UI capture")
+    ap.add_argument("--capture-content", dest="capture_content", action="store_true", default=False,
+                    help="ALSO capture each state's DATA collections (tables/grids/trees/lists/"
+                         "feeds + repeated-sibling clusters) via CONTENT_JS, scroll-loading through "
+                         "virtualization — generic, structural, no app vocabulary. This is what "
+                         "turns the nav graph into a full content graph of ANY site.")
     ap.add_argument("--single-url", dest="single_url", action="store_true", default=False,
                     help="single-URL app-shell mode: NEVER navigate (a programmatic nav "
                          "blanks such SPAs, e.g. MS Teams) — read the current live page and "
@@ -480,9 +545,13 @@ def main():
                                  "tag": c.get("tag"), "href": c.get("href"),
                                  "nav": c.get("nav"), "selector": c.get("selector")}
                                 for c in controls]
+        if a.capture_content:                   # data collections (tables/grids/trees/lists)
+            node["collections"] = capture_collections(a.server)
         url_to_sig[norm(cur)] = sig             # this URL now resolves to a known state
-        print("· [%d states / %d visits] depth %d · %s (%d controls)"
-              % (len(states), visits, len(path), cur, len(controls)), file=sys.stderr)
+        ncol = sum(c.get("count", 0) for c in node.get("collections", []))
+        print("· [%d states / %d visits] depth %d · %s (%d controls%s)"
+              % (len(states), visits, len(path), cur, len(controls),
+                 (", %d items" % ncol) if a.capture_content else ""), file=sys.stderr)
 
         capture_triggers(path, sig, controls)
 
@@ -533,7 +602,7 @@ def main():
                       "path": t["path"], "form": t["form"], "opensAt": t["opensAt"]}
                      for t in triggers],
     }
-    path_out = os.path.expanduser("~/pinchtab-webgraph/%s.json" % a.out)
+    path_out = os.path.expanduser("~/code/pinchtab-webgraph/%s.json" % a.out)
     json.dump(out, open(path_out, "w"), indent=2)
     print("\nWrote %s: %d states, %d edges, %d triggers"
           % (path_out, len(states), len(out["edges"]), len(out["triggers"])), file=sys.stderr)

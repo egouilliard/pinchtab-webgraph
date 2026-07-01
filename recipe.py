@@ -189,6 +189,53 @@ SKIP_NAV = re.compile(
 # priority is now derived STRUCTURALLY in tier() below (an aria tab/menu, or a link
 # that is not part of a repeated sibling-list) — no app- or language-specific vocab.
 
+# CONTENT_JS — GENERIC content/data extractor (no app vocabulary). Where CONTROLS_JS
+# captures the interactive chrome (buttons/links/tabs), this captures the DATA a view
+# renders: tables, grids, trees, lists, feeds, and non-ARIA "repeated-sibling" clusters
+# (the project's allowed data-list heuristic). Structural signals only — ARIA roles
+# (grid/table/treegrid/tree/list/listbox/feed + row/treeitem/listitem/option/article)
+# and the semantic tags table/tr/ul/ol/li. Validated identically on MS Teams (tree +
+# messages), Hacker News (<table> rows), and GitHub trending (React article cards).
+# Each collection → {kind, count, items:[{t, cells?, level?}]}. Item count capped per
+# collection; virtualization (only-visible rows) is handled by scroll-loading in the caller.
+CONTENT_JS = r"""
+(() => {
+  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+  const COLL = {grid:1,table:1,treegrid:1,tree:1,list:1,listbox:1,feed:1};
+  const ITEM = '[role=row],[role=treeitem],[role=listitem],[role=option],[role=article],tr,li';
+  const CLOSE = '[role=grid],[role=table],[role=treegrid],[role=tree],[role=list],[role=listbox],[role=feed],table,ul,ol';
+  const roleOf = e => (e.getAttribute('role')||'').toLowerCase() ||
+     (e.tagName==='TABLE'?'table':((e.tagName==='UL'||e.tagName==='OL')?'list':''));
+  const out=[], containers=new Set();
+  document.querySelectorAll('[role],table,ul,ol').forEach(c=>{
+    if(out.length>=60) return;
+    const role=roleOf(c); if(!COLL[role]) return;
+    const items=[...c.querySelectorAll(ITEM)].filter(it=>{
+      const a=it.parentElement&&it.parentElement.closest(CLOSE); return a===c; });
+    if(items.length<2) return;
+    containers.add(c);
+    out.push({kind:'aria:'+role, count:items.length, items: items.slice(0,500).map(it=>{
+      const cells=[...it.querySelectorAll('[role=gridcell],[role=cell],td')].map(x=>norm(x.innerText)).filter(Boolean);
+      const lvl=it.getAttribute('aria-level'); const t=norm(it.getAttribute('aria-label')||it.innerText).slice(0,140);
+      const o={t}; if(cells.length)o.cells=cells.slice(0,10); if(lvl)o.level=+lvl; return o; })});
+  });
+  // repeated-sibling clusters (no ARIA) — generic data lists (cards, rows-of-divs)
+  const used=new Set();
+  document.querySelectorAll('div,ul,ol,tbody,section,nav,main').forEach(p=>{
+    if(out.length>=80) return; if(containers.has(p)) return;
+    const kids=[...p.children]; if(kids.length<5) return;
+    const byTag={}; kids.forEach(k=>byTag[k.tagName]=(byTag[k.tagName]||0)+1);
+    const top=Object.entries(byTag).sort((a,b)=>b[1]-a[1])[0]; if(!top||top[1]<5) return;
+    const grp=kids.filter(k=>k.tagName===top[0]&&norm(k.innerText)); if(grp.length<5) return;
+    const anc=grp[0].closest(CLOSE); if(anc&&COLL[roleOf(anc)]) return;
+    if(used.has(grp[0])) return; grp.forEach(g=>used.add(g));
+    out.push({kind:'repeated:'+top[0].toLowerCase(), count:grp.length,
+      items:grp.slice(0,500).map(k=>({t:norm(k.innerText).slice(0,140)}))});
+  });
+  return out;
+})()
+"""
+
 
 def pt(args, server, timeout=60):
     cmd = ["pinchtab", "--server", server] + args
@@ -309,7 +356,7 @@ def main():
     ap.add_argument("--graph", help="a crawl <out>.json, to locate the button + show the path")
     ap.add_argument("--match", help="regex for the trigger text (default: verbs + goal nouns)")
     ap.add_argument("--server", default="http://localhost:9871")
-    ap.add_argument("--config", default=os.path.expanduser("~/pinchtab-webgraph/crawl-config.json"))
+    ap.add_argument("--config", default=os.path.expanduser("~/code/pinchtab-webgraph/crawl-config.json"))
     ap.add_argument("--max-discover", type=int, default=30,
                     help="max states to explore when auto-locating the trigger (default 30)")
     ap.add_argument("--max-depth", type=int, default=6,
@@ -552,7 +599,7 @@ def main():
     navigated = after.rstrip("/") != before.rstrip("/")
     form = pt_json(FORM_JS, a.server)
     if a.screenshot:                        # optional — off by default (saves a round-trip)
-        pt(["screenshot", "-o", os.path.expanduser("~/pinchtab-webgraph/%s.png" % a.out)], a.server)
+        pt(["screenshot", "-o", os.path.expanduser("~/code/pinchtab-webgraph/%s.png" % a.out)], a.server)
 
     # 4) cancel without saving (Escape closes a modal; on a form page it's a no-op)
     pt(["press", "Escape"], a.server)
@@ -570,7 +617,7 @@ def main():
            "pathStructured": [{"label": act["label"], "selector": act["selector"],
                                "href": act.get("href")} for act in path_actions],
            "triggerSelector": trigger["selector"]}
-    json.dump(rec, open(os.path.expanduser("~/pinchtab-webgraph/%s.json" % a.out), "w"), indent=2)
+    json.dump(rec, open(os.path.expanduser("~/code/pinchtab-webgraph/%s.json" % a.out), "w"), indent=2)
 
     print("\n=== HOW TO: %s ===\n" % a.goal.upper())
     print("Shortest route — %d click%s:" % (len(steps) - 1, "" if len(steps) - 1 == 1 else "s"))
@@ -589,8 +636,8 @@ def main():
     if form.get("submitButtons"):
         print("\nThen click to confirm: %s" % "  /  ".join("“%s”" % b for b in form["submitButtons"]))
     if a.screenshot:
-        print("\nScreenshot: ~/pinchtab-webgraph/%s.png" % a.out, end="")
-    print("\nspec: ~/pinchtab-webgraph/%s.json" % a.out)
+        print("\nScreenshot: ~/code/pinchtab-webgraph/%s.png" % a.out, end="")
+    print("\nspec: ~/code/pinchtab-webgraph/%s.json" % a.out)
 
 
 if __name__ == "__main__":

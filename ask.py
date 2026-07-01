@@ -98,7 +98,7 @@ def main():
     except Exception:
         pass
 
-    # recipe.py writes to ~/pinchtab-webgraph/<out>.json (basename, relative to its
+    # recipe.py writes to ~/code/pinchtab-webgraph/<out>.json (basename, relative to its
     # own dir), so --out is a basename, not a path. Use a unique temp basename when
     # the caller didn't pick one, and clean it up after we read it back.
     if a.out:

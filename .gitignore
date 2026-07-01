@@ -38,3 +38,6 @@ teams-*.log
 teams-*.json
 teams-*.md
 teams-ui-map.md
+
+# scratch test outputs
+scratch-*

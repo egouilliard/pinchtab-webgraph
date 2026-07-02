@@ -2,23 +2,31 @@
   "sandbox": {
     "enabled": true,
     "network": {
-      "allowedDomains": [
-        "localhost",
-        "127.0.0.1",
-        "github.com",
-        "*.githubusercontent.com",
-        "pypi.org",
-        "files.pythonhosted.org"
-      ]
+      "allowedDomains": ["localhost", "127.0.0.1"]
     },
     "credentials": {
       "files": [
         { "path": "~/.ssh", "mode": "deny" },
         { "path": "~/.aws", "mode": "deny" },
+        { "path": "~/.azure", "mode": "deny" },
         { "path": "~/.config/gcloud", "mode": "deny" },
-        { "path": "~/.gnupg", "mode": "deny" }
+        { "path": "~/.gnupg", "mode": "deny" },
+        { "path": "~/.local/share/keyrings", "mode": "deny" },
+        { "path": "~/.config/gh", "mode": "deny" },
+        { "path": "~/.git-credentials", "mode": "deny" },
+        { "path": "~/.netrc", "mode": "deny" },
+        { "path": "~/.npmrc", "mode": "deny" },
+        { "path": "~/.kube", "mode": "deny" },
+        { "path": "~/.docker/config.json", "mode": "deny" }
+      ],
+      "envVars": [
+        { "name": "GITHUB_TOKEN", "mode": "deny" },
+        { "name": "GH_TOKEN", "mode": "deny" },
+        { "name": "NPM_TOKEN", "mode": "deny" },
+        { "name": "ANTHROPIC_API_KEY", "mode": "deny" },
+        { "name": "AWS_ACCESS_KEY_ID", "mode": "deny" },
+        { "name": "AWS_SECRET_ACCESS_KEY", "mode": "deny" }
       ]
-    },
-    "excludedCommands": ["docker"]
+    }
   }
 }

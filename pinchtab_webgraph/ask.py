@@ -27,10 +27,10 @@ import sys
 import tempfile
 from urllib.parse import urlparse
 
-import cache_store
+from . import cache_store
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG = os.path.join(DIR, "crawl-config.json")
+CONFIG = os.environ.get("PINCHTAB_CONFIG", "crawl-config.json")
 
 
 def _goal_nouns(goal):
@@ -88,7 +88,7 @@ def main():
         if not cache_exists:
             sys.exit("No cache for %s yet — crawl it first: interaction_crawl.py "
                      "--start %s --capture-content" % (host, a.start))
-        cmd = ["python3", howto_py, cache_file]
+        cmd = [sys.executable, "-m", "pinchtab_webgraph.howto", cache_file]
         if a.find:
             cmd += ["--find", a.find, "--start", a.start]
         if a.list_content:
@@ -99,7 +99,7 @@ def main():
 
     # 1) CACHE-FIRST: answer offline unless the user forced a live re-check.
     if cache_exists and not a.verify:
-        rc = subprocess.run(["python3", howto_py, cache_file,
+        rc = subprocess.run([sys.executable, "-m", "pinchtab_webgraph.howto", cache_file,
                              "--goal", a.goal, "--start", a.start]).returncode
         if rc == 0:
             return                       # cache hit — done, 0 browser calls
@@ -107,7 +107,7 @@ def main():
             sys.exit(rc)                 # real error (not a miss) — propagate
         # rc == 2 → cache miss; fall through to live discovery
     elif cache_exists and a.verify:
-        subprocess.run(["python3", howto_py, cache_file,
+        subprocess.run([sys.executable, "-m", "pinchtab_webgraph.howto", cache_file,
                         "--goal", a.goal, "--start", a.start])
         print("--- verifying live ---", file=sys.stderr)
 
@@ -120,7 +120,7 @@ def main():
     except Exception:
         pass
 
-    # recipe.py writes to ~/code/pinchtab-webgraph/<out>.json (basename, relative to its
+    # recipe.py writes <out>.json to the CURRENT WORKING DIR (basename; we read it back
     # own dir), so --out is a basename, not a path. Use a unique temp basename when
     # the caller didn't pick one, and clean it up after we read it back.
     if a.out:
@@ -128,9 +128,9 @@ def main():
     else:
         out_base = os.path.basename(tempfile.mktemp(prefix=".ask-", dir=tempfile.gettempdir()))
         cleanup = True
-    result_json = os.path.join(DIR, out_base + ".json")
+    result_json = os.path.abspath(out_base + ".json")
 
-    rc = subprocess.run(["python3", recipe_py, "--goal", a.goal, "--start", a.start,
+    rc = subprocess.run([sys.executable, "-m", "pinchtab_webgraph.recipe", "--goal", a.goal, "--start", a.start,
                          "--out", out_base, "--server", a.server] + extra, env=env).returncode
     if rc != 0:
         # Do NOT touch the cache on a live failure.

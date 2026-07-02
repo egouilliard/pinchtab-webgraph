@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 
 def caches_dir():
-    return os.path.expanduser("~/code/pinchtab-webgraph/caches")
+    return os.path.expanduser(os.environ.get("PINCHTAB_WEBGRAPH_HOME", "~/.pinchtab-webgraph") + "/caches")
 
 
 def cache_path(host):

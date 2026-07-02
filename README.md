@@ -53,24 +53,41 @@ Automating or documenting a web app usually means one of two brittle things: han
 - **Python 3.10+** — the tools are pure Python, no third-party dependencies.
 - **The [PinchTab](https://github.com/) browser-automation CLI** available on your `PATH` as `pinchtab`. Every tool drives the live browser through it; you run an **isolated** PinchTab bridge (own profile, own port) so a "click-everything" crawl never touches a browser holding a live session you care about.
 
+## 📦 Install
+
+Pure Python (stdlib only) — the one runtime prerequisite is the external [PinchTab](#-requirements) CLI.
+
+```bash
+# from GitHub (no PyPI account needed):
+pipx install git+https://github.com/egouilliard/pinchtab-webgraph
+#   or:  uv tool install git+https://github.com/egouilliard/pinchtab-webgraph
+#   or:  pip install git+https://github.com/egouilliard/pinchtab-webgraph
+```
+
+This installs the **`pinchtab-webgraph`** command (short alias **`pwg`**) with subcommands
+`crawl · howto · ask · recipe · linkcrawl · paths`. Run `pinchtab-webgraph --help` for the map.
+
 ## 🚀 Quickstart
 
 ```bash
 # 1. Start the isolated crawl browser (own profile/port). Leave it running.
-./start-crawl-browser.sh
+#    (a PinchTab bridge — see Requirements; a helper script lives in the repo)
 
 # 2a. Full interaction + content graph of an app (the main tool):
-./run-crawl-interactions.sh https://app.example.com/dashboard --out app
+pinchtab-webgraph crawl https://app.example.com/dashboard --out app     # (pwg crawl …)
 
 # 2b. …or a page→page link graph + interactive Cytoscape viewer:
-./run-crawl.sh https://docs.example.com --interaction-depth 0 --out docs
+pinchtab-webgraph linkcrawl https://docs.example.com --interaction-depth 0 --out docs
 xdg-open docs.html
 
 # 3. Ask the graph, offline, in milliseconds:
-python3 howto.py app.json --goal "create template"     # shortest click-path + form spec
-python3 howto.py app.json --find "invoice"             # where does this data live + how to reach it
-python3 howto.py app.json --list-content               # per-view data inventory
+pwg howto app.json --goal "create template"     # shortest click-path + form spec
+pwg howto app.json --find "invoice"             # where does this data live + how to reach it
+pwg howto app.json --list-content               # per-view data inventory
 ```
+
+Graphs and screenshots are written to the current working directory. From a git checkout you can
+also run any tool without installing: `python3 -m pinchtab_webgraph.cli crawl …`.
 
 `run-*.sh` forward the bridge auth token automatically and point at the isolated browser. Copy `crawl-config.example.json` to `crawl-config.json` and set a real token (`openssl rand -hex 24`) before the first run — `crawl-config.json` is gitignored because it holds that token.
 

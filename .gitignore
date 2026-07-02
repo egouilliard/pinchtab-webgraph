@@ -8,6 +8,9 @@ bridge.log
 httpd.log
 *.crawl.log
 
+# Claude Code local sandbox/permission overrides (per-machine; committed settings.json is shared)
+.claude/settings.local.json
+
 # python
 __pycache__/
 *.pyc

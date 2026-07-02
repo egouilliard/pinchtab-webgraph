@@ -175,6 +175,12 @@ safest first:
    See **[docs/authenticated-login.md](docs/authenticated-login.md)** for the full config
    reference, security properties, limits (SSO/2FA are not automated), and test steps.
 
+> ⚠️ **Keyring is at-rest hygiene, not agent-proof.** Any process running as your user
+> (an AI agent included) — and certainly one with `sudo` — can read a keyring secret with
+> one command. To keep credentials genuinely out of an automation's reach, use a
+> **dedicated bot account** and run the login on a **separate host or an unprivileged
+> user**. See the [threat model](docs/authenticated-login.md#threat-model--read-this-before-trusting-keyring).
+
 ## 🗄️ Importing into Neo4j (optional)
 
 The JSON maps directly to a property graph:

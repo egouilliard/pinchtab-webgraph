@@ -32,6 +32,7 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - [Architecture](#️-architecture)
 - [Graph shape](#-graph-shape)
 - [Safety model](#-safety-model)
+- [Authenticated apps (login)](#-authenticated-apps-login)
 - [Importing into Neo4j](#-importing-into-neo4j-optional)
 - [Roadmap](#️-roadmap)
 - [Contributing](#-contributing)
@@ -143,6 +144,32 @@ The JSON graph is `{ nodes, edges, meta }`:
 - **Never mutates data** — discovery opens and reads forms, then Escapes. Create / save / delete / submit controls are skipped by default and recorded, not clicked. **Never run a "click everything" crawl in an authenticated session you care about** — that's exactly why the isolated bridge exists.
 - **Hard caps** on states, actions-per-state, interaction depth, and a global action budget prevent the classic SPA state explosion.
 - **Secrets stay out of git** — `crawl-config.json` (bridge token) and `.instance/` (live browser profile/session) are gitignored. Commit explicit source files only.
+
+## 🔐 Authenticated apps (login)
+
+Crawling a site that needs a login? You have two options, safest first:
+
+1. **Log in by hand once (recommended, zero config).** Open the persistent bridge
+   profile, sign in, and crawl — the session cookie lives in `.instance/` (gitignored)
+   and the crawler reuses it. **Your password never touches this toolkit.** This is the
+   safest path and needs nothing below.
+
+2. **Automated login (opt-in), for unattended / long-running crawls.** When the bridge
+   may restart mid-crawl or you're running on a schedule, enable keyring-backed login:
+
+   ```bash
+   pip install 'pinchtab-webgraph[login]'          # optional dependency, only for this
+   cp login-config.example.json login-config.json  # gitignored — ROUTING only, no password
+   keyring set pinchtab-webgraph you@example.com    # the password lives in the OS keyring
+   interaction_crawl --start https://app.example.com/home --login-config login-config.json
+   ```
+
+   The password is read from the **OS keyring at runtime** — never from a file, the graph
+   JSON, or logs (only its length is ever printed). `login-config.json` holds per-host
+   routing (`url`, `username`, optional field selectors); login form fields are
+   auto-detected from standard HTML (input `type` / `autocomplete` / DOM order), so most
+   apps need no selectors. The same login is reused to re-authenticate after a bridge wedge.
+   See [`pinchtab_webgraph/login.py`](pinchtab_webgraph/login.py) for the full config shape.
 
 ## 🗄️ Importing into Neo4j (optional)
 

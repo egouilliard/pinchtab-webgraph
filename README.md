@@ -166,14 +166,11 @@ UNWIND $g.edges AS e
 
 ## 🤝 Contributing
 
-PRs welcome. The repository uses protected branches:
+PRs welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide (branch model, commit conventions, PR checklist, issue reporting). The short version:
 
-- **`main`** — production-ready code. All changes land here via PR.
-- **`release`** — release-candidate branch; stabilisation before tagging.
-- **`hotfix`** — urgent fixes that need to skip the normal cycle.
-- **`dev`** — day-to-day integration branch (unprotected).
-
-Every PR into `main`, `release`, or `hotfix` requires a Code Owner review (see [`CODEOWNERS`](CODEOWNERS)), and force-pushes and deletions are blocked on those branches. The one hard rule for code: **stay generic** — no hardcoded app routes, labels, or vocabulary in the crawler; structural heuristics only. Please open an issue before a large refactor.
+- Cut feature branches from **`dev`** and open PRs against it. `main`, `release`, and `hotfix` are protected — every PR into them needs a Code Owner review (see [`CODEOWNERS`](CODEOWNERS)); force-pushes and deletions are blocked.
+- **The one hard rule: stay generic** — no hardcoded app routes, labels, or vocabulary in the crawler; structural heuristics only.
+- Discovery stays **safe** (never submits) and **secrets stay out of git**. Please open an issue before a large refactor.
 
 ## 📄 License
 

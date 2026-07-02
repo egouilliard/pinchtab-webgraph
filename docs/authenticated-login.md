@@ -107,6 +107,82 @@ picks the wrong element.
 - The feature is off unless `--login-config` is passed.
 - Field detection is structural, so no app names/routes leak into code (stays generic).
 
+## Threat model — read this before trusting keyring
+
+Be precise about what the OS keyring protects. It defends the **at-rest / passive**
+boundary, and only that:
+
+| Exposure route | Protected by keyring? |
+| --- | --- |
+| Committed to git | ✅ not in the repo (routing file is gitignored, holds no secret) |
+| Leaked in logs / graph JSON / stdout | ✅ masked, never written |
+| Visible in `ps` / shell history | ✅ never on the CLI |
+| Stolen disk while logged-out / locked | ✅ encrypted at rest |
+| **A process running as your user, session unlocked** | ❌ **readable — one command** |
+| **A process with `sudo` / root** | ❌ **readable — root reads anything** |
+
+The last two rows are the important ones. Once your desktop session has unlocked the
+Secret Service, **any process running as you can read the secret** with a single call:
+
+```bash
+secret-tool lookup service pinchtab-webgraph username you@example.com
+python -c "import keyring; print(keyring.get_password('pinchtab-webgraph','you@example.com'))"
+```
+
+That includes an AI agent with a shell. And if that process can `sudo` (passwordless
+sudo is common on dev machines), then **no local secret store and no same-box OS-user
+isolation helps** — root can `sudo -u <otheruser> secret-tool …` or read any file.
+**Same-UID (or root) = same access.** Hiding *where* the secret lives does not help; the
+keyring is enumerable and files are greppable. Obscurity is not a boundary.
+
+So: **keyring is good at-rest hygiene, not a wall between you and a process that runs as
+you.** Do not treat it as agent-proof.
+
+## Keeping the credential genuinely out of an agent's reach
+
+Only defenses that change *who can read it* or *how much a read is worth* hold against a
+privileged local agent:
+
+1. **Bot account (always do this).** A dedicated, least-privilege, rotatable account in
+   the target app — never your personal login. Even under full local compromise the
+   blast radius is bounded and you can revoke it independently of your own sessions.
+2. **Move the boundary off the box the agent controls.** Run the bridge + login on a
+   **separate host/VM** (or a container on a host you control). The agent drives it over
+   the network with the bridge token but cannot `sudo` into a machine it isn't on, so the
+   credential is unreachable. Strongest guarantee.
+3. **De-privilege the agent.** Run the crawling agent as an **unprivileged user (no
+   sudo)** and the bridge/login as a separate local user with a `chmod 700` home. Then the
+   OS-user boundary genuinely holds on one box — but only because the agent lost root.
+4. **Per-access interactive approval.** A password manager (1Password/Bitwarden) set to
+   require biometric/master-password approval on *each* read stops silent pulls (it does
+   not stop root reading an already-cached secret).
+
+The agent-side crawler already talks to the bridge purely over HTTP + a token, so it works
+against a remote/isolated bridge **without any code change** — point `--server` at it and
+**do not** pass `--login-config` on the agent side (the isolated user performs the login;
+the agent only ever drives the resulting session).
+
+### Bot-account checklist
+
+- Create a dedicated account in the target app; do **not** reuse your personal credentials.
+- Grant the **minimum** permissions the crawl needs (ideally a read-only / viewer role).
+- Store **its** password in the keyring (or on the isolated host) — never your own.
+- Rotate on a schedule, and immediately if you suspect exposure; revoke its sessions
+  independently of yours.
+
+### Verifying an isolation boundary actually holds
+
+From the agent's user, try to read the isolated store — expect `Permission denied`:
+
+```bash
+sudo -u "$AGENT_USER" cat /home/pwgcrawl/.local/share/keyrings/* 2>&1   # want: Permission denied
+```
+
+⚠️ If the agent's user has **passwordless sudo**, `sudo -u pwgcrawl secret-tool lookup …`
+still succeeds — the boundary only holds when the agent lacks root. Check with
+`sudo -n true` (if it returns without a prompt, local isolation will not stop that agent;
+use options 1–2 above).
+
 ## Limits (not yet handled)
 
 - **SSO redirects, 2FA, and CAPTCHA** are not automated. The flow assumes a single-page

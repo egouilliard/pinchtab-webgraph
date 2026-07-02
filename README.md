@@ -147,7 +147,10 @@ The JSON graph is `{ nodes, edges, meta }`:
 
 ## 🔐 Authenticated apps (login)
 
-Crawling a site that needs a login? You have two options, safest first:
+Crawling a site that needs a login? **Safe, opt-in login** is built in — full details,
+security properties, config reference, and how to test it are in
+**[docs/authenticated-login.md](docs/authenticated-login.md)**. In short, two options,
+safest first:
 
 1. **Log in by hand once (recommended, zero config).** Open the persistent bridge
    profile, sign in, and crawl — the session cookie lives in `.instance/` (gitignored)
@@ -169,7 +172,8 @@ Crawling a site that needs a login? You have two options, safest first:
    routing (`url`, `username`, optional field selectors); login form fields are
    auto-detected from standard HTML (input `type` / `autocomplete` / DOM order), so most
    apps need no selectors. The same login is reused to re-authenticate after a bridge wedge.
-   See [`pinchtab_webgraph/login.py`](pinchtab_webgraph/login.py) for the full config shape.
+   See **[docs/authenticated-login.md](docs/authenticated-login.md)** for the full config
+   reference, security properties, limits (SSO/2FA are not automated), and test steps.
 
 ## 🗄️ Importing into Neo4j (optional)
 

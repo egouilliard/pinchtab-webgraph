@@ -171,8 +171,15 @@ def perform_login(entry, server, verbose=True):
     user = entry.get("username", "")
     pw = _get_password(entry)
     log("navigating to %s  (user=%s, pw=<%d chars>)" % (url, user or "-", len(pw)))
-    nav(url, server)
-    settle(server)
+    # Cold-start-safe navigation: a fresh bridge has no tabs and $PINCHTAB_TAB may
+    # hold a stale default id, so a plain nav() can leave evals hitting no tab. Adopt
+    # a live tab if one exists, else force a new tab and pin it before reading.
+    if recipe.pin_tab(server):
+        nav(url, server)
+    else:
+        pt(["nav", url, "--new-tab"], server, timeout=60)
+        recipe.pin_tab(server, url)
+        settle(server)
 
     det = _detect_fields(server)
     user_sel = entry.get("userField") or det.get("user")

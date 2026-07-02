@@ -42,3 +42,8 @@ teams-ui-map.md
 
 # scratch test outputs
 scratch-*
+
+# python build artifacts
+*.egg-info/
+build/
+dist/

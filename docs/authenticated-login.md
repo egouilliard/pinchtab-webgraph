@@ -176,10 +176,14 @@ enforce, at the OS level, what the agent's shell commands can read and which dom
 Crucially, a sandboxed process runs in an unprivileged user namespace, so it **cannot `sudo` back
 out** — which is exactly the escape that defeats same-box OS-user isolation.
 
-**This repo ships a ready posture** in [`.claude/settings.json`](../.claude/settings.json):
-`sandbox.enabled: true`, a network allow-list (localhost + the dev hosts needed to build/push), and
-`sandbox.credentials` denies for `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.gnupg` so a compromised
-crawl can't read unrelated secrets or exfiltrate them.
+**This repo ships a locked-down posture** in [`.claude/settings.json`](../.claude/settings.json):
+`sandbox.enabled: true`, network egress limited to **localhost only** (the crawler just needs the
+local bridge — the browser's own web egress happens in the *unsandboxed* bridge process), and a
+`sandbox.credentials` block that denies reads of the **OS keyring** (`~/.local/share/keyrings`),
+`~/.ssh`, cloud creds, `~/.config/gh` / `~/.git-credentials` / `~/.netrc` / `~/.npmrc`, and unsets
+token env vars (`GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `AWS_*`, …). Dev hosts like `github.com` and
+`pypi.org` are intentionally **not** pre-allowed — approve them on first prompt or add them to
+`.claude/settings.local.json`.
 
 Setup (Linux/WSL2 — macOS needs nothing extra):
 
@@ -203,20 +207,26 @@ prompt the first time the crawl reaches it:
 - The sandbox confines **the agent's Bash**. The PinchTab **bridge is a separate process you launch
   yourself** (in its own terminal) and is *not* sandboxed — it holds the authenticated session and
   reaches the web, so treat it as part of the trusted boundary.
-- **Strongest stance (hide the keyring from the agent):** also deny the keyring in the sandbox —
-  add `{ "path": "~/.local/share/keyrings", "mode": "deny" }` to `sandbox.credentials.files` — and
-  use the **hand-login / session-reuse** path (option 1 at the top of this doc). The sandboxed agent
-  then drives the already-authenticated session but **cannot read your keyring at all**, and the
-  network allow-list stops it phoning secrets home. Automated `--login-config` won't work under that
-  deny (it needs to read the keyring), which is the point.
-- **If you keep automated keyring login**, don't deny the keyring — instead pair it with a **bot
-  account** (below). The sandbox still protects your *other* secrets and bounds network egress, and
-  the readable credential is a low-value, revocable bot login.
+- **The shipped default denies the keyring** (`~/.local/share/keyrings`), so a sandboxed agent
+  **cannot read it at all**. Pair this with the **hand-login / session-reuse** path (option 1 at the
+  top of this doc): the agent drives the already-authenticated session, and nothing needs the keyring.
+- **If you want automated `--login-config`**, remove the keyring deny in `.claude/settings.local.json`
+  and pair it with a **bot account** (below). The sandbox still protects your *other* secrets and
+  bounds network egress, and the now-readable credential is a low-value, revocable bot login.
 
-> ⚠️ The sandbox is a strong risk-reducer, not a perfect wall: its proxy allow-lists by hostname
-> without TLS inspection, and a broad `allowedDomains` entry can become an exfiltration path. Keep
-> the allow-list tight, and keep the bot account as your backstop. See the
-> [Claude Code sandboxing docs](https://code.claude.com/docs/en/sandboxing) for the full model.
+> ⚠️ The sandbox is a strong risk-reducer, not a perfect wall. Known, **inherent** residual risks
+> (accepted by design, not oversights):
+> - **Localhost egress stays open** because the crawler must reach the local bridge; domain
+>   allow-lists can't scope to a single port, so other local services are technically reachable from
+>   the sandbox. Keep sensitive local daemons off, or bound to sockets the sandbox blocks.
+> - **The credential denylist is a blocklist** and therefore non-exhaustive. For maximum lockdown,
+>   replace it with `sandbox.filesystem.denyRead: ["~/"]` plus `allowRead` carve-outs for the project
+>   **and** your Node/PinchTab toolchain path (e.g. `~/.nvm/...`) — stronger, but machine-specific,
+>   which is why the portable default enumerates instead.
+> - The proxy **allow-lists by hostname without TLS inspection** (domain-fronting is possible), so
+>   keep the allow-list tight and keep the **bot account** as your real backstop.
+>
+> See the [Claude Code sandboxing docs](https://code.claude.com/docs/en/sandboxing) for the full model.
 
 ### Bot-account checklist
 

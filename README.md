@@ -1,164 +1,163 @@
-# PinchTab Web-Navigation Graph Crawler
+# 🕸️ pinchtab-webgraph
 
-Crawls a website through PinchTab (a real, JavaScript-rendered browser),
-discovering pages via `<a href>` links **and** interactive widgets (buttons,
-tabs, menus, accordions, SPA route changes) by actually clicking them. Builds
-a navigation graph and emits:
+***Turn any website into a queryable navigation + content graph, then answer "how do I do X?" as the shortest click-path — deterministically, with no LLM in the runtime.***
 
-- `<out>.json` — the graph data: `{ nodes, edges, meta }`
-- `<out>.html` — a self-contained Cytoscape.js viewer (double-click to open)
+![License](https://img.shields.io/badge/license-MIT-3DA639?style=flat-square)
+![Python](https://img.shields.io/badge/python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
+![No LLM at runtime](https://img.shields.io/badge/runtime-no%20LLM-6E56CF?style=flat-square)
+![Browser automation](https://img.shields.io/badge/driver-PinchTab-FF6B00?style=flat-square)
+![Graph viewer](https://img.shields.io/badge/viewer-Cytoscape.js-F7A81B?style=flat-square)
 
-Nodes are **pages** (by normalized URL) and **SPA/modal states** (same URL,
-changed DOM). Edges are **links** (green) or **actions/clicks** (orange).
+`pinchtab-webgraph` drives a **real, JavaScript-rendered browser** (through the [PinchTab](#-requirements) automation CLI) to map an entire web app — every page, SPA state, button, tab, menu, form, and data collection — into a structured **navigation + content graph**. It then answers questions *offline* against that graph in milliseconds: shortest click-path between two views, "how do I create a X" (with the target form's fields read straight from the live UI), and "where does this data live and how do I reach it".
 
-## Quick start
+The whole pipeline is **deterministic** — structural heuristics only (ARIA roles, repeated-sibling detection, URL grouping), no model in the loop, no per-run cost, reproducible output. It works on *any* site: there is no app-specific vocabulary anywhere in the crawler.
+
+## ✨ Highlights
+
+- **Graph from anything** — one crawl records each state's full control inventory (links / buttons / tabs / menus) **and** its data collections (tables, grids, trees, lists, feeds, virtualized/scroll-loaded content). A complete nav + content graph of any site, all from structural signals.
+- **Offline "how-to" in milliseconds** — BFS over the crawled graph returns the shortest click-path to any action *plus* the fields of the form it opens, in ~60–130 ms with zero browser calls.
+- **Safe by construction** — discovery opens and reads forms, then presses Escape. It never submits, saves, or deletes anything. Destructive-looking controls are skipped and recorded, not clicked.
+- **Never loses progress** — atomic checkpoints every N states plus a SIGINT/SIGTERM handler; a crash, OOM, or Ctrl-C keeps the partial graph. `meta.stopped` always says *why* a crawl ended (complete vs. truncated) — no silent truncation.
+- **Spans app boundaries** — `--cross-host` follows links and `iframe[src]` into other hosts as graph nodes, so an embedded/linked app becomes part of the same graph. `--single-url` drives app-shell SPAs (e.g. Teams-style apps that swap views without changing the URL).
+- **Cache-first workflow** — `ask.py` answers from a per-host cache when it can, falls back to a live discovery on a miss, and writes the result back so the next ask is an offline hit.
+- **No LLM in the runtime** — indexing and path-finding are pure Python + the PinchTab CLI. Predictable, reproducible, free to re-run.
+
+## 📑 Table of Contents
+
+- [Why a web-navigation graph?](#-why-a-web-navigation-graph)
+- [Requirements](#-requirements)
+- [Quickstart](#-quickstart)
+- [The tools](#️-the-tools)
+- [How interaction crawling works](#-how-interaction-crawling-works)
+- [Architecture](#️-architecture)
+- [Graph shape](#-graph-shape)
+- [Safety model](#-safety-model)
+- [Importing into Neo4j](#-importing-into-neo4j-optional)
+- [Roadmap](#️-roadmap)
+- [Contributing](#-contributing)
+- [License](#-license)
+
+## 🧠 Why a web-navigation graph?
+
+Automating or documenting a web app usually means one of two brittle things: hand-writing selectors that rot on every redesign, or asking an LLM to "figure out the UI" live on every request (slow, non-deterministic, and expensive).
+
+`pinchtab-webgraph` takes a different stance: **crawl the UI once into a graph, then query the graph.**
+
+- **How-to guides & onboarding** — "how do I create a template / an invoice / a new team?" becomes a shortest-path query that returns the exact clicks *and* the form fields, in milliseconds.
+- **Change detection & QA** — snapshot the full control + content graph, then diff two crawls to see what moved, appeared, or disappeared.
+- **Site maps for humans and agents** — a structured, low-noise map of an app's real navigation, far cheaper than replaying a browser for every question an agent asks.
+- **Content discovery** — `--find TEXT` searches every view's captured data (rows / files / messages / cards) and returns what matched, which view it's in, and the click-path to get there.
+
+## 📦 Requirements
+
+- **Python 3.10+** — the tools are pure Python, no third-party dependencies.
+- **The [PinchTab](https://github.com/) browser-automation CLI** available on your `PATH` as `pinchtab`. Every tool drives the live browser through it; you run an **isolated** PinchTab bridge (own profile, own port) so a "click-everything" crawl never touches a browser holding a live session you care about.
+
+## 🚀 Quickstart
 
 ```bash
-# 1. Start the isolated crawl browser (own profile/port, NOT your monday session).
-#    Run this in its OWN terminal window and leave it open:
+# 1. Start the isolated crawl browser (own profile/port). Leave it running.
 ./start-crawl-browser.sh
 
-# 2. In another terminal, crawl a site:
-./run-crawl.sh https://example.com
+# 2a. Full interaction + content graph of an app (the main tool):
+./run-crawl-interactions.sh https://app.example.com/dashboard --out app
 
-# 3. Open the result:
-xdg-open webgraph.html
+# 2b. …or a page→page link graph + interactive Cytoscape viewer:
+./run-crawl.sh https://docs.example.com --interaction-depth 0 --out docs
+xdg-open docs.html
+
+# 3. Ask the graph, offline, in milliseconds:
+python3 howto.py app.json --goal "create template"     # shortest click-path + form spec
+python3 howto.py app.json --find "invoice"             # where does this data live + how to reach it
+python3 howto.py app.json --list-content               # per-view data inventory
 ```
 
-`run-crawl.sh` forwards the auth token automatically and points at the
-isolated browser on `http://localhost:9871`. You can pass any `crawl.py` flag
-after the URL.
+`run-*.sh` forward the bridge auth token automatically and point at the isolated browser. Copy `crawl-config.example.json` to `crawl-config.json` and set a real token (`openssl rand -hex 24`) before the first run — `crawl-config.json` is gitignored because it holds that token.
 
-## Why a separate browser?
+## 🛠️ The tools
 
-A "click everything" crawler must never run inside a browser holding a live
-authenticated session you care about (e.g. your monday.com tab on port 9867) —
-it would click through your real session. `start-crawl-browser.sh` launches a
-**dedicated, isolated** PinchTab instance:
+| Tool | What it does |
+| --- | --- |
+| `interaction_crawl.py` / `run-crawl-interactions.sh <url>` | **The core.** Crawls the live UI once into an interaction graph: states + action edges + every create-trigger's form spec. Full **capture-all is the default** — control inventory *and* data collections per state. Atomic checkpoints (never loses progress), explicit truncation reasons in `meta.stopped`. Modes: `--single-url` (app-shell SPAs), `--cross-host` (follow links + iframes to other hosts). Safe: opens and reads forms, never submits. |
+| `howto.py <graph.json>` | **Offline** BFS over a crawled graph → shortest click-path + form spec in ms, no browser. `--goal "…"` for actions; `--find TEXT` searches captured data → what matched, which view, and the path to it; `--list-content` = per-view data inventory. |
+| `ask.py` / `run-ask.sh` | **Cache-first** entry point. Routes by host to a per-host cache, answers offline via `howto.py`; on a miss runs a live discovery, then writes the result back so the next ask is an offline hit. `--verify` re-checks live. |
+| `recipe.py` / `run-recipe.sh` | **Live** how-to finder: priority-BFS over the running UI to a goal's trigger, opens the form, reads the fields, never submits. The live fallback for cache misses. |
+| `crawl.py` / `run-crawl.sh <url>` | Page→page **link graph** → `<out>.json` + a self-contained Cytoscape.js `<out>.html` viewer. |
+| `paths.py` | Offline shortest / all click-paths over a crawled link graph (`--from`, `--to`, `--structural`, `--all`). |
 
-- own config (`crawl-config.json`) and profile (`.instance/profiles/crawler`)
-- port `9871`, separate from your daemon on `9867`
-- headless, ads/images/media blocked (fast), JS-eval enabled
-- bound to localhost only
+## 🔎 How interaction crawling works
 
-Stop it with `Ctrl-C` in its terminal.
+For each state the crawler reads every link and clickable widget (stable structural CSS selectors, not framework-generated refs), plus the state's data collections. Then, for each non-skipped widget, it **re-materializes** the state (replay the click-path from a known start), clicks the widget, and classifies the result:
 
-## Useful flags
+- **navigated** (URL changed) → a page edge; enqueue the new page.
+- **DOM changed, same URL** → a new SPA/state node + edge, recursed into up to the interaction depth.
+- **create-trigger** → the form/modal is opened, its fields are read (label / type / required / options / confirm button), then Escape — nothing is persisted.
+- **no change** → ignored.
 
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--max-pages N` | 60 | hard cap on pages/nodes |
-| `--interaction-depth N` | 2 | how many clicks deep to explore widgets/SPA states; `0` = links only |
-| `--max-actions-per-state N` | 25 | cap on widgets probed per page/state |
-| `--max-actions N` | 2000 | global budget of action clicks |
-| `--allow-destructive` | off | also click logout/delete/pay/submit-style controls (**DANGER**) |
-| `--include-subdomains` | off | treat `*.domain.tld` as same site |
-| `--no-strip-tracking` | off | keep `utm_`/`gclid`/etc. query params |
-| `--delay S` | 0.3 | DOM-settle pause after each nav/click |
-| `--out NAME` | `webgraph` | output basename |
+Re-materializing per probe keeps every click starting from a known state and avoids stale element references across reloads. State signatures fold in ARIA view markers so same-URL views don't collapse into one node.
 
-Examples:
+## 🏗️ Architecture
 
-```bash
-# Static site, links only, broad:
-./run-crawl.sh https://docs.example.com --interaction-depth 0 --max-pages 200 --out docs
-
-# SPA, explore 2 clicks deep, modest page cap:
-./run-crawl.sh https://app.example.com --interaction-depth 2 --max-pages 50 --out app
-
-# Authenticated SPA: only nav controls, no data mutation, auto-recover if logged out:
-./run-crawl.sh https://app.example.com --nav-only --skip-writes \
-    --auth-path /auth --relogin-cmd ./login.sh --interaction-depth 1
+```
+   Any website              PinchTab (real browser)          Graph                 Query
+ ┌──────────────┐      ┌─────────────────────────┐    ┌────────────────┐    ┌──────────────┐
+ │ pages        │ ───► │ read controls + content  │──► │ states         │──► │ howto.py     │
+ │ SPA states   │      │ click widgets            │    │ + action edges │    │  (offline    │
+ │ forms        │      │ open forms (read-only)    │    │ + form specs   │    │   BFS, ms)   │
+ │ tables/grids │      │ scroll virtualized data   │    │ + collections  │    │ ask.py cache │
+ └──────────────┘      └─────────────────────────┘    └───────┬────────┘    │ paths.py     │
+   structural signals    isolated bridge, safe             checkpointed      │ Cytoscape UI │
+   only (ARIA, siblings) never submits/saves               (atomic write)    └──────────────┘
 ```
 
-Extra flags: `--nav-only` (probe only tabs/menus/role=tab|menuitem; skip bulk
-table/grid buttons), `--skip-writes` (skip create/add/save/edit/etc. — map
-navigation without creating data), `--auth-path /auth` + `--relogin-cmd <cmd>`
-(detect session loss and re-authenticate mid-crawl).
+Everything runs locally against your own isolated browser bridge. The pipeline is deterministic — no LLM in the indexing or path-finding path — and every crawl flushes atomic checkpoints so a kill never loses work.
 
-## Finding paths between pages — `paths.py`
+## 🧩 Graph shape
 
-```bash
-python3 paths.py graph.json --from /admin/users --to solviverde/documents
-python3 paths.py graph.json --from A --to B --structural    # ignore sidebar/global nav
-python3 paths.py graph.json --from A --to B --all --max-len 4
-```
+The JSON graph is `{ nodes, edges, meta }`:
 
-Shortest path = fewest clicks (directed BFS). `--structural` excludes the
-"global nav" edges (links present on most pages, e.g. a sidebar) — useful to
-see the real content structure; if it returns NO PATH, those pages are only
-connected via global navigation. Also built into the viewer ("Find path
-between pages").
+- **Nodes** — **pages** (by normalized URL) and **SPA/modal states** (same URL, changed DOM). Cross-host mode adds `external` / `iframe` nodes. Each node can carry its **control inventory** and its **content collections**.
+- **Edges** — **links** (navigation) and **actions/clicks**. Destructive-looking actions that were deliberately skipped are recorded as dashed edges so you can see what was avoided.
+- **meta** — crawl parameters plus `meta.stopped`: `frontier-exhausted` (complete) vs. `hit-max-*` / `wedge` (truncated). Truncation is always explicit.
 
-## How-to for an action — `recipe.py`
+## 🛡️ Safety model
 
-Turns a goal into a step-by-step guide: locates the trigger button, shows the
-navigation path, opens the form/modal, and reads its fields — **without
-submitting** (it Escapes, so nothing is created).
+- **Same-origin by default** — the crawler won't wander off the target site unless you pass `--cross-host`.
+- **Never mutates data** — discovery opens and reads forms, then Escapes. Create / save / delete / submit controls are skipped by default and recorded, not clicked. **Never run a "click everything" crawl in an authenticated session you care about** — that's exactly why the isolated bridge exists.
+- **Hard caps** on states, actions-per-state, interaction depth, and a global action budget prevent the classic SPA state explosion.
+- **Secrets stay out of git** — `crawl-config.json` (bridge token) and `.instance/` (live browser profile/session) are gitignored. Commit explicit source files only.
 
-```bash
-./run-recipe.sh --goal "add cae" --page https://app/caes/some-project \
-    --graph graph.json --start https://app/dashboard --out howto-addcae
-```
-
-Outputs: a printed how-to, `<out>.json` (machine-readable field spec:
-label / type / required / options / confirm button), and `<out>.png` (the open
-form). Handles both modal dialogs and navigate-to-a-form-page flows.
-
-## Crawling sites that need login
-
-Because the crawl browser uses a persistent profile, log in once and the
-session is reused on later crawls:
-
-1. Temporarily set `instanceDefaults.mode` to `headed` in `crawl-config.json`
-   (so a window appears), start the browser, and drive it to the login page:
-   `PINCHTAB_TOKEN=… pinchtab --server http://localhost:9871 nav https://app/login --new-tab`
-   then fill credentials with `pinchtab … fill` / `click`, or log in by hand in
-   the visible window.
-2. Switch `mode` back to `headless` and run `./run-crawl.sh` as usual — the
-   cookies persist in the profile.
-
-## Safety model
-
-- **Same-origin only** by default — won't wander off the target site.
-- **Destructive-looking actions are skipped** by default and recorded as
-  dashed "skipped" edges so you can see what was avoided. Override with
-  `--allow-destructive` (use only on throwaway/staging accounts).
-- **Hard caps** on pages, actions-per-state, interaction depth, and a global
-  action budget prevent the classic SPA state explosion.
-
-## How interaction exploration works
-
-For each page it loads the URL and reads every link + clickable widget (stable
-CSS selectors, not refs). Links become page→page edges. For each non-skipped
-widget it re-materializes the state (reload + replay the click path), clicks
-the widget, and classifies the result:
-
-- **navigated** (URL changed) → page edge + enqueue the new page
-- **DOM changed, same URL** → a new SPA/state node + edge, recursed into up to
-  `--interaction-depth`
-- **no change** → ignored
-
-Re-materializing per probe keeps each click starting from a known state and
-avoids stale element references across reloads.
-
-## Files
-
-- `crawl.py` — the crawler (pure Python + PinchTab CLI; no extra deps)
-- `start-crawl-browser.sh` — launch the isolated crawl browser
-- `run-crawl.sh` — run a crawl against it (handles the token)
-- `crawl-config.json` — isolated PinchTab config (port 9871, own profile)
-- `books.html` / `books.json` — example output (a crawl of books.toscrape.com)
-
-## Importing into Neo4j (optional)
+## 🗄️ Importing into Neo4j (optional)
 
 The JSON maps directly to a property graph:
 
 ```cypher
 // after: WITH the json loaded as $g
 UNWIND $g.nodes AS n
-  MERGE (p:Page {id:n.id}) SET p.url=n.url, p.title=n.title, p.type=n.type;
+  MERGE (p:Page {id:n.id}) SET p.url = n.url, p.title = n.title, p.type = n.type;
 UNWIND $g.edges AS e
   MATCH (a:Page {id:e.source}), (b:Page {id:e.target})
   MERGE (a)-[r:NAV {label:e.label, kind:e.kind}]->(b);
 ```
+
+## 🛣️ Roadmap
+
+- Auto-detect single-URL app-shell mode (no `--single-url` flag).
+- Form-reading inside single-URL apps (currently disabled there for safety).
+- Sub-10s cold-start live discovery for cache misses.
+- Richer content queries surfaced through `ask.py` (cross-host collections).
+
+## 🤝 Contributing
+
+PRs welcome. The repository uses protected branches:
+
+- **`main`** — production-ready code. All changes land here via PR.
+- **`release`** — release-candidate branch; stabilisation before tagging.
+- **`hotfix`** — urgent fixes that need to skip the normal cycle.
+- **`dev`** — day-to-day integration branch (unprotected).
+
+Every PR into `main`, `release`, or `hotfix` requires a Code Owner review (see [`CODEOWNERS`](CODEOWNERS)), and force-pushes and deletions are blocked on those branches. The one hard rule for code: **stay generic** — no hardcoded app routes, labels, or vocabulary in the crawler; structural heuristics only. Please open an issue before a large refactor.
+
+## 📄 License
+
+Licensed under the [MIT License](LICENSE). Copyright © 2026 Edouard Gouilliard.

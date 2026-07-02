@@ -58,7 +58,11 @@ def _mark_stale(host, goal):
 
 def main():
     ap = argparse.ArgumentParser(description="Cache-first how-to: query cache, fall back to live, write back")
-    ap.add_argument("--goal", required=True, help='what to do, e.g. "add item" / "create team"')
+    ap.add_argument("--goal", help='what to do, e.g. "add item" / "create team"')
+    ap.add_argument("--find", help="search the captured DATA/content (offline, cache-only — no live)")
+    ap.add_argument("--list-content", action="store_true",
+                    help="inventory the captured data collections per view (offline)")
+    ap.add_argument("--limit", type=int, help="max content matches to show (with --find)")
     ap.add_argument("--start", required=True, help="start URL (routes the cache by hostname)")
     ap.add_argument("--verify", action="store_true",
                     help="print the cached answer, then re-run live and refresh the cache")
@@ -69,11 +73,29 @@ def main():
     # --max-depth, --match) — howto.py never sees them.
     a, extra = ap.parse_known_args()
 
+    if not (a.goal or a.find or a.list_content):
+        ap.error("pass --goal, --find, or --list-content")
+
     host = urlparse(a.start).hostname
     cache_file = a.graph or cache_store.cache_path(host)
     cache_exists = os.path.exists(cache_file)
     howto_py = os.path.join(DIR, "howto.py")
     recipe_py = os.path.join(DIR, "recipe.py")
+
+    # CONTENT queries (--find / --list-content) are answered from the cache ONLY — there is
+    # no live equivalent (recipe.py finds action-paths, not data), so no fallback/write-back.
+    if a.find or a.list_content:
+        if not cache_exists:
+            sys.exit("No cache for %s yet — crawl it first: interaction_crawl.py "
+                     "--start %s --capture-content" % (host, a.start))
+        cmd = ["python3", howto_py, cache_file]
+        if a.find:
+            cmd += ["--find", a.find, "--start", a.start]
+        if a.list_content:
+            cmd += ["--list-content"]
+        if a.limit:
+            cmd += ["--limit", str(a.limit)]
+        sys.exit(subprocess.run(cmd).returncode)
 
     # 1) CACHE-FIRST: answer offline unless the user forced a live re-check.
     if cache_exists and not a.verify:

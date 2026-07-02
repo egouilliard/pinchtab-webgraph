@@ -115,6 +115,12 @@ def main():
     ap.add_argument("--match", help="regex for the trigger label (overrides --goal matching)")
     ap.add_argument("--list", action="store_true", help="list every create-form in the cache")
     ap.add_argument("--all", action="store_true", help="show ALL matching triggers, not just the shortest")
+    ap.add_argument("--find", help="search the captured DATA (collections: table/list/tree/grid rows, "
+                                   "files, messages, …) for text; shows what matched, which view it's in, "
+                                   "and the shortest click-path to that view")
+    ap.add_argument("--list-content", action="store_true",
+                    help="inventory the data collections captured per view (kinds + item counts)")
+    ap.add_argument("--limit", type=int, default=40, help="max content matches/items to show (default 40)")
     a = ap.parse_args()
 
     graph = json.load(open(os.path.expanduser(a.graph)))
@@ -135,8 +141,70 @@ def main():
                      ("  (%d fields)" % ff) if ff is not None else ""))
         return
 
+    def item_text(it):
+        return " ".join([it.get("t", "")] + (it.get("cells") or [])).strip()
+
+    if a.list_content:
+        any_c = False
+        for s in graph["states"]:
+            cols = s.get("collections") or []
+            if not cols:
+                continue
+            any_c = True
+            print("▸ %s  (%s)" % (s.get("label") or "(root)", s.get("url", "?")))
+            for c in sorted(cols, key=lambda x: -x.get("count", 0)):
+                sample = item_text(c["items"][0]) if c.get("items") else ""
+                print("    [%-16s] %4d items   e.g. %s" % (c.get("kind"), c.get("count", 0), sample[:60]))
+        if not any_c:
+            print("No content captured in this graph — re-crawl with --capture-content.")
+        return
+
+    if a.find:
+        adj = build_adj(graph)
+        start_id = find_start_state(graph, a.start) or (graph["states"][0]["id"] if graph["states"] else None)
+        q = a.find.lower()
+        # group matches by the view (state) they live in
+        by_state = {}
+        total = 0
+        for s in graph["states"]:
+            for c in s.get("collections") or []:
+                for it in c.get("items", []):
+                    txt = item_text(it)
+                    if q in txt.lower():
+                        by_state.setdefault(s["id"], []).append((c.get("kind"), txt))
+                        total += 1
+        if not total:
+            print("✗ No captured data matches %r." % a.find)
+            print("  (searched every view's data collections; re-crawl with --capture-content if stale)")
+            sys.exit(2)
+        # route each view: shortest click-path from the start
+        routed = []
+        for sid, items in by_state.items():
+            _, epath = bfs(adj, start_id, {sid})
+            routed.append((len(epath) if epath is not None else 10 ** 6, epath, sid, items))
+        routed.sort(key=lambda x: x[0])
+        print("=== FOUND %d item(s) matching %r across %d view(s) ===" % (total, a.find, len(by_state)))
+        shown = 0
+        for dist, epath, sid, items in routed:
+            st = states[sid]
+            print("\n▸ %s  (%s)" % (st.get("label") or "(root)", st.get("url", "?")))
+            if epath is None:
+                print("   ⚠ no cached click-path from the start view")
+            else:
+                steps = ["Go to %s" % states[start_id]["url"]] + ["Click “%s”" % e["label"] for e in epath]
+                print("   route (%d click%s): %s"
+                      % (len(epath), "" if len(epath) == 1 else "s", "  →  ".join(steps)))
+            for kind, txt in items[:a.limit - shown]:
+                print("     • [%s] %s" % (kind, txt[:110]))
+                shown += 1
+            if shown >= a.limit:
+                print("   … (%d shown; use --limit to see more)" % a.limit)
+                break
+        print("\n(answered offline from cache — 0 browser calls)")
+        return
+
     if not a.goal and not a.match:
-        sys.exit("Pass --goal \"...\" (or --match <regex>), or --list.")
+        sys.exit("Pass --goal \"...\" (or --match <regex>), --find \"...\", --list, or --list-content.")
 
     rx = re.compile(a.match, re.I) if a.match else goal_regex(a.goal)
     matches = [t for t in triggers if rx.search(t["label"])]

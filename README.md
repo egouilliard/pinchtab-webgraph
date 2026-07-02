@@ -178,8 +178,10 @@ safest first:
 > ⚠️ **Keyring is at-rest hygiene, not agent-proof.** Any process running as your user
 > (an AI agent included) — and certainly one with `sudo` — can read a keyring secret with
 > one command. To keep credentials genuinely out of an automation's reach, use a
-> **dedicated bot account** and run the login on a **separate host or an unprivileged
-> user**. See the [threat model](docs/authenticated-login.md#threat-model--read-this-before-trusting-keyring).
+> **dedicated bot account** plus real isolation. The lightest no-VM option is **Claude
+> Code's built-in sandbox** (requires [Claude Code](https://claude.com/claude-code)) — this
+> repo ships a ready posture in [`.claude/settings.json`](.claude/settings.json). See the
+> [threat model + sandbox setup](docs/authenticated-login.md#threat-model--read-this-before-trusting-keyring).
 
 ## 🗄️ Importing into Neo4j (optional)
 

@@ -162,6 +162,62 @@ against a remote/isolated bridge **without any code change** — point `--server
 **do not** pass `--login-config` on the agent side (the isolated user performs the login;
 the agent only ever drives the resulting session).
 
+### Recommended, no-VM isolation: Claude Code's built-in sandbox
+
+> **Requires [Claude Code](https://claude.com/claude-code).** This sandbox is a feature of the
+> Claude Code CLI — if you drive the crawler some other way, it does not apply, and you should use
+> one of the isolation options above (separate host / de-privileged user) instead.
+
+The lightest way to confine the automation on a single Linux/macOS box — no VM, no container — is
+to run the crawler inside **Claude Code's sandboxed Bash tool**. It uses OS primitives
+(`bubblewrap` on Linux, Seatbelt on macOS; the same engine as
+[`@anthropic-ai/sandbox-runtime`](https://github.com/anthropic-experimental/sandbox-runtime)) to
+enforce, at the OS level, what the agent's shell commands can read and which domains they can reach.
+Crucially, a sandboxed process runs in an unprivileged user namespace, so it **cannot `sudo` back
+out** — which is exactly the escape that defeats same-box OS-user isolation.
+
+**This repo ships a ready posture** in [`.claude/settings.json`](../.claude/settings.json):
+`sandbox.enabled: true`, a network allow-list (localhost + the dev hosts needed to build/push), and
+`sandbox.credentials` denies for `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.gnupg` so a compromised
+crawl can't read unrelated secrets or exfiltrate them.
+
+Setup (Linux/WSL2 — macOS needs nothing extra):
+
+```bash
+sudo apt-get install bubblewrap socat          # the Linux sandbox deps
+npm install -g @anthropic-ai/sandbox-runtime    # optional: seccomp unix-socket blocking
+# Ubuntu 24.04+ only, if `sysctl kernel.apparmor_restrict_unprivileged_userns` returns 1:
+#   add the AppArmor profile from https://code.claude.com/docs/en/sandboxing then reload apparmor
+```
+
+Then in Claude Code, run `/sandbox`, pick a mode, and crawl as usual. Add your **target app's
+domain** to the allow-list in `.claude/settings.local.json` (gitignored) — or approve the one-time
+prompt the first time the crawl reaches it:
+
+```json
+{ "sandbox": { "network": { "allowedDomains": ["app.example.com"] } } }
+```
+
+**How this composes with the login model — read this, it matters:**
+
+- The sandbox confines **the agent's Bash**. The PinchTab **bridge is a separate process you launch
+  yourself** (in its own terminal) and is *not* sandboxed — it holds the authenticated session and
+  reaches the web, so treat it as part of the trusted boundary.
+- **Strongest stance (hide the keyring from the agent):** also deny the keyring in the sandbox —
+  add `{ "path": "~/.local/share/keyrings", "mode": "deny" }` to `sandbox.credentials.files` — and
+  use the **hand-login / session-reuse** path (option 1 at the top of this doc). The sandboxed agent
+  then drives the already-authenticated session but **cannot read your keyring at all**, and the
+  network allow-list stops it phoning secrets home. Automated `--login-config` won't work under that
+  deny (it needs to read the keyring), which is the point.
+- **If you keep automated keyring login**, don't deny the keyring — instead pair it with a **bot
+  account** (below). The sandbox still protects your *other* secrets and bounds network egress, and
+  the readable credential is a low-value, revocable bot login.
+
+> ⚠️ The sandbox is a strong risk-reducer, not a perfect wall: its proxy allow-lists by hostname
+> without TLS inspection, and a broad `allowedDomains` entry can become an exfiltration path. Keep
+> the allow-list tight, and keep the bot account as your backstop. See the
+> [Claude Code sandboxing docs](https://code.claude.com/docs/en/sandboxing) for the full model.
+
 ### Bot-account checklist
 
 - Create a dedicated account in the target app; do **not** reuse your personal credentials.

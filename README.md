@@ -36,6 +36,7 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - [Importing into Neo4j](#-importing-into-neo4j-optional)
 - [Roadmap](#️-roadmap)
 - [Contributing](#-contributing)
+- [Star History](#-star-history)
 - [License](#-license)
 
 ## 🧠 Why a web-navigation graph?
@@ -210,6 +211,16 @@ PRs welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide (b
 - Cut feature branches from **`dev`** and open PRs against it. `main`, `release`, and `hotfix` are protected — every PR into them needs a Code Owner review (see [`CODEOWNERS`](CODEOWNERS)); force-pushes and deletions are blocked.
 - **The one hard rule: stay generic** — no hardcoded app routes, labels, or vocabulary in the crawler; structural heuristics only.
 - Discovery stays **safe** (never submits) and **secrets stay out of git**. Please open an issue before a large refactor.
+
+## ⭐ Star History
+
+<a href="https://star-history.com/#egouilliard/pinchtab-webgraph&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=egouilliard/pinchtab-webgraph&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=egouilliard/pinchtab-webgraph&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=egouilliard/pinchtab-webgraph&type=Date" />
+ </picture>
+</a>
 
 ## 📄 License
 

@@ -1,0 +1,12 @@
+{
+  "_comment": "OPT-IN automated login. Copy to login-config.json (gitignored) and edit. This file holds ROUTING ONLY — never a password. Store the password in the OS keyring: `keyring set pinchtab-webgraph you@example.com`. Then crawl with: interaction_crawl --start <url> --login-config login-config.json. Fields marked optional are auto-detected from standard HTML (input type / autocomplete / DOM order); set them explicitly only if detection picks the wrong element.",
+  "app.example.com": {
+    "url": "https://app.example.com/login",
+    "username": "you@example.com",
+    "userField": null,
+    "passField": null,
+    "submit": null,
+    "successUrl": "/dashboard",
+    "keyringService": "pinchtab-webgraph"
+  }
+}

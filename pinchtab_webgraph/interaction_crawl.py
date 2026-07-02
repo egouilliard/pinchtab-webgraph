@@ -296,6 +296,12 @@ def main():
                          "(empty = no relaunch, just kill the stale PID)")
     ap.add_argument("--login-cmd", default="",
                     help="shell command to re-authenticate after restart (empty = none)")
+    ap.add_argument("--login-config", default="",
+                    help="OPT-IN automated login (default off): path to a gitignored "
+                         "per-host routing file. The password is read from the OS keyring "
+                         "at runtime, NEVER from this file — see pinchtab_webgraph/login.py. "
+                         "Empty = log in by hand in the bridge profile instead. Also becomes "
+                         "the wedge-recovery re-auth unless --login-cmd is set.")
     ap.add_argument("--max-restarts", type=int, default=3,
                     help="max wedge-recovery attempts before writing partial output (default 3)")
     ap.add_argument("--probe-timeout", type=int, default=12,
@@ -318,6 +324,20 @@ def main():
     # which READS the current page before any nav() would pin it.
     if a.single_url:
         recipe.pin_tab(a.server, start_url)
+
+    # OPT-IN automated login (off unless --login-config is given). Establishes an
+    # authenticated session BEFORE crawling; the password is read from the OS
+    # keyring at runtime, never from disk here — see pinchtab_webgraph/login.py.
+    if a.login_config:
+        import shlex
+        from . import login as _login
+        _login.ensure_logged_in(a.login_config, start_url, a.server)
+        if not a.login_cmd:            # reuse the same login for wedge-recovery re-auth
+            a.login_cmd = ("%s -m pinchtab_webgraph.login --config %s --server %s "
+                           "--host %s --pinchtab-config %s") % (
+                shlex.quote(sys.executable), shlex.quote(a.login_config),
+                shlex.quote(a.server), shlex.quote(urlparse(start_url).hostname or ""),
+                shlex.quote(a.config))
 
     # ---- browser position tracking + materialization (prefix-reuse, like recipe) ----
     mat_state = {"path": None}

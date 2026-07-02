@@ -22,6 +22,11 @@ classifiers = [
 ]
 dependencies = []  # pure stdlib — only needs the external `pinchtab` CLI at runtime
 
+# Optional: automated keyring-backed login for authenticated apps. The base
+# install stays pure-stdlib; only add this if you use `--login-config`.
+[project.optional-dependencies]
+login = ["keyring>=24"]
+
 [project.urls]
 Homepage = "https://github.com/egouilliard/pinchtab-webgraph"
 Repository = "https://github.com/egouilliard/pinchtab-webgraph"

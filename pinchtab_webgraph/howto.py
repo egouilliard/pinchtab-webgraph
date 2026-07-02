@@ -24,7 +24,7 @@ import sys
 from collections import deque
 from urllib.parse import urlparse
 
-import recipe  # VERBS, for the same generic goal→trigger matching recipe.py uses
+from . import recipe  # VERBS, for the same generic goal→trigger matching recipe.py uses
 
 
 def norm(u):

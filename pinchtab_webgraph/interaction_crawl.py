@@ -46,7 +46,7 @@ import time
 from collections import deque
 from urllib.parse import urlparse
 
-import recipe  # proven primitives — see module docstring
+from . import recipe  # proven primitives — see module docstring
 
 CONTROLS_JS = recipe.CONTROLS_JS
 CONTENT_JS = recipe.CONTENT_JS
@@ -239,7 +239,7 @@ def main():
     ap = argparse.ArgumentParser(description="Crawl a web app into an interaction-graph cache")
     ap.add_argument("--start", required=True, help="start URL (the crawl root)")
     ap.add_argument("--server", default="http://localhost:9871")
-    ap.add_argument("--config", default=os.path.expanduser("~/code/pinchtab-webgraph/crawl-config.json"))
+    ap.add_argument("--config", default=os.environ.get("PINCHTAB_CONFIG", "crawl-config.json"))
     ap.add_argument("--out", default="interaction-graph")
     ap.add_argument("--max-states", type=int, default=500,
                     help="hard cap on distinct states to record (default 500 — raised so a "
@@ -542,7 +542,7 @@ def main():
     # file is never half-written). Called at every checkpoint, on normal completion, AND
     # from the signal handler below — so a crash, OOM, 2-min kill or Ctrl-C NEVER loses the
     # crawl (the exact failure mode that lost a 50-state run before). ----
-    path_out = os.path.expanduser("~/code/pinchtab-webgraph/%s.json" % a.out)
+    path_out = os.path.abspath("%s.json" % a.out)
     persist_flags = {"final_done": False}
 
     def persist(final=False, reason="in-progress"):

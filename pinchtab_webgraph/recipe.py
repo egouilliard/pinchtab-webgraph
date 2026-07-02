@@ -393,7 +393,7 @@ def main():
     ap.add_argument("--graph", help="a crawl <out>.json, to locate the button + show the path")
     ap.add_argument("--match", help="regex for the trigger text (default: verbs + goal nouns)")
     ap.add_argument("--server", default="http://localhost:9871")
-    ap.add_argument("--config", default=os.path.expanduser("~/code/pinchtab-webgraph/crawl-config.json"))
+    ap.add_argument("--config", default=os.environ.get("PINCHTAB_CONFIG", "crawl-config.json"))
     ap.add_argument("--max-discover", type=int, default=30,
                     help="max states to explore when auto-locating the trigger (default 30)")
     ap.add_argument("--max-depth", type=int, default=6,
@@ -636,7 +636,7 @@ def main():
     navigated = after.rstrip("/") != before.rstrip("/")
     form = pt_json(FORM_JS, a.server)
     if a.screenshot:                        # optional — off by default (saves a round-trip)
-        pt(["screenshot", "-o", os.path.expanduser("~/code/pinchtab-webgraph/%s.png" % a.out)], a.server)
+        pt(["screenshot", "-o", os.path.abspath("%s.png" % a.out)], a.server)
 
     # 4) cancel without saving (Escape closes a modal; on a form page it's a no-op)
     pt(["press", "Escape"], a.server)
@@ -654,7 +654,7 @@ def main():
            "pathStructured": [{"label": act["label"], "selector": act["selector"],
                                "href": act.get("href")} for act in path_actions],
            "triggerSelector": trigger["selector"]}
-    json.dump(rec, open(os.path.expanduser("~/code/pinchtab-webgraph/%s.json" % a.out), "w"), indent=2)
+    json.dump(rec, open(os.path.abspath("%s.json" % a.out), "w"), indent=2)
 
     print("\n=== HOW TO: %s ===\n" % a.goal.upper())
     print("Shortest route — %d click%s:" % (len(steps) - 1, "" if len(steps) - 1 == 1 else "s"))
@@ -673,8 +673,8 @@ def main():
     if form.get("submitButtons"):
         print("\nThen click to confirm: %s" % "  /  ".join("“%s”" % b for b in form["submitButtons"]))
     if a.screenshot:
-        print("\nScreenshot: ~/code/pinchtab-webgraph/%s.png" % a.out, end="")
-    print("\nspec: ~/code/pinchtab-webgraph/%s.json" % a.out)
+        print("\nScreenshot: %s.png" % a.out, end="")
+    print("\nspec: %s.json" % a.out)
 
 
 if __name__ == "__main__":

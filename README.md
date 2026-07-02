@@ -145,13 +145,15 @@ The JSON graph is `{ nodes, edges, meta }`:
 - **Never mutates data** — discovery opens and reads forms, then Escapes. Create / save / delete / submit controls are skipped by default and recorded, not clicked. **Never run a "click everything" crawl in an authenticated session you care about** — that's exactly why the isolated bridge exists.
 - **Hard caps** on states, actions-per-state, interaction depth, and a global action budget prevent the classic SPA state explosion.
 - **Secrets stay out of git** — `crawl-config.json` (bridge token) and `.instance/` (live browser profile/session) are gitignored. Commit explicit source files only.
+- **OS-level sandbox (opt-in)** — run under [Claude Code's built-in sandbox](#-run-it-under-a-sandbox-recommended) to confine the crawler at the OS level: no keyring/SSH/cloud-cred reads, localhost-only egress, and no `sudo` escape. A ready posture ships in [`.claude/settings.json`](.claude/settings.json).
 
 ## 🔐 Authenticated apps (login)
 
-Crawling a site that needs a login? **Safe, opt-in login** is built in — full details,
-security properties, config reference, and how to test it are in
-**[docs/authenticated-login.md](docs/authenticated-login.md)**. In short, two options,
-safest first:
+Crawling a site that needs a login is **built in and opt-in** — two ways to authenticate,
+then a sandbox to run the whole thing safely. Full reference, threat model, config, and
+test steps: **[docs/authenticated-login.md](docs/authenticated-login.md)**.
+
+### Two ways to log in (safest first)
 
 1. **Log in by hand once (recommended, zero config).** Open the persistent bridge
    profile, sign in, and crawl — the session cookie lives in `.instance/` (gitignored)
@@ -176,13 +178,39 @@ safest first:
    See **[docs/authenticated-login.md](docs/authenticated-login.md)** for the full config
    reference, security properties, limits (SSO/2FA are not automated), and test steps.
 
-> ⚠️ **Keyring is at-rest hygiene, not agent-proof.** Any process running as your user
-> (an AI agent included) — and certainly one with `sudo` — can read a keyring secret with
-> one command. To keep credentials genuinely out of an automation's reach, use a
-> **dedicated bot account** plus real isolation. The lightest no-VM option is **Claude
-> Code's built-in sandbox** (requires [Claude Code](https://claude.com/claude-code)) — this
-> repo ships a ready posture in [`.claude/settings.json`](.claude/settings.json). See the
-> [threat model + sandbox setup](docs/authenticated-login.md#threat-model--read-this-before-trusting-keyring).
+### 🧱 Run it under a sandbox (recommended)
+
+On its own, keyring is only **at-rest** hygiene: any process running as your user — an AI
+agent included, and certainly one with `sudo` — can read a keyring secret with one command.
+The fix that actually confines the automation, **without a VM or container**, is to run the
+crawler inside **[Claude Code's](https://claude.com/claude-code) built-in sandbox** (this
+feature *requires* Claude Code). It uses OS primitives (`bubblewrap` on Linux, Seatbelt on
+macOS) to enforce, at the OS level, what commands can read and which hosts they can reach —
+and a sandboxed process runs in an unprivileged user namespace, so it **can't `sudo` out**.
+
+This repo ships a locked-down posture in [`.claude/settings.json`](.claude/settings.json):
+sandbox on, network egress limited to **localhost**, and reads **denied** for the OS keyring,
+`~/.ssh`, cloud creds, and GitHub/npm tokens — so a compromised crawl can't read your secrets
+or phone them home.
+
+```bash
+# Linux/WSL2 deps (macOS needs nothing extra):
+sudo apt-get install bubblewrap socat
+npm install -g @anthropic-ai/sandbox-runtime   # optional: seccomp unix-socket blocking
+```
+
+Then run `/sandbox` in Claude Code and crawl as usual. Add your target app's domain to
+`.claude/settings.local.json` (gitignored) or approve it on the first prompt.
+
+**Recommended safe combo:** the shipped default **denies the keyring**, so pair the sandbox
+with **hand-login / session-reuse** (option 1) — the agent drives the authenticated session
+but can't read your credentials at all. If you want automated keyring login, remove the
+keyring deny locally and use a **dedicated bot account**.
+
+> ⚠️ A strong risk-reducer, not a perfect wall: the proxy allow-lists by hostname without
+> TLS inspection, localhost egress stays open (the crawler needs the local bridge), and a
+> denylist is never exhaustive. Keep the allow-list tight and keep a **bot account** as your
+> backstop. Full model: [threat model + sandbox setup](docs/authenticated-login.md#threat-model--read-this-before-trusting-keyring).
 
 ## 🗄️ Importing into Neo4j (optional)
 

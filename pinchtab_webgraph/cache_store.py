@@ -16,9 +16,18 @@ Generic by construction: routing is by hostname, state matching by normalized
 URL. No app/section vocabulary, no hardcoded routes or labels. Stdlib only.
 """
 import datetime
+import glob
 import json
 import os
+import re
 from urllib.parse import urlparse
+
+# A safe hostname-shaped token: letters/digits/dots/hyphens (every real hostname),
+# plus underscore for internal hosts. Crucially it admits NO path separators (`/`,
+# `\`) and no `..`-as-a-segment escape, so a raw `host` can never resolve OUTSIDE
+# caches_dir(). ask.py feeds urlparse(...).hostname (always [A-Za-z0-9.-]), which
+# this always accepts — see cache_path().
+_HOST_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def caches_dir():
@@ -26,6 +35,11 @@ def caches_dir():
 
 
 def cache_path(host):
+    # VALIDATE at the choke point: path/show/clear all route through here, so
+    # rejecting a non-hostname token here blocks path-traversal for every caller
+    # (e.g. `cache clear "../../etc/passwd"`) before any filesystem access.
+    if not isinstance(host, str) or not _HOST_RE.match(host):
+        raise ValueError("invalid cache host: %r" % host)
     return os.path.join(caches_dir(), "%s.json" % host)
 
 
@@ -35,6 +49,34 @@ def load(host):
         return None
     with open(p) as f:
         return json.load(f)
+
+
+def list_hosts():
+    """Hostnames with a persisted cache — the basenames of caches/<host>.json.
+
+    Excludes the in-flight caches/<host>.json.tmp that atomic_write leaves mid-write.
+    """
+    out = []
+    for p in glob.glob(os.path.join(caches_dir(), "*.json")):
+        if p.endswith(".json.tmp"):
+            continue
+        out.append(os.path.basename(p)[:-len(".json")])
+    return sorted(out)
+
+
+def clear(host):
+    """Remove one host's cache file. Returns True if a file was removed, else False."""
+    p = cache_path(host)
+    if os.path.exists(p):
+        os.remove(p)
+        return True
+    return False
+
+
+def clear_all():
+    """Remove every host cache file. Returns the removed host names, sorted."""
+    removed = [h for h in list_hosts() if clear(h)]
+    return sorted(removed)
 
 
 def _norm(u):

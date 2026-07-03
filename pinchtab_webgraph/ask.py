@@ -77,6 +77,8 @@ def main():
         ap.error("pass --goal, --find, or --list-content")
 
     host = urlparse(a.start).hostname
+    if not a.graph and not host:
+        ap.error("--start must be a full URL including a scheme, e.g. https://example.com")
     cache_file = a.graph or cache_store.cache_path(host)
     cache_exists = os.path.exists(cache_file)
     howto_py = os.path.join(DIR, "howto.py")

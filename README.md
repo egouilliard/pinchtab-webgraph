@@ -21,6 +21,7 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - **Spans app boundaries** — `--cross-host` follows links and `iframe[src]` into other hosts as graph nodes, so an embedded/linked app becomes part of the same graph. `--single-url` drives app-shell SPAs (e.g. Teams-style apps that swap views without changing the URL).
 - **Cache-first workflow** — `ask.py` answers from a per-host cache when it can, falls back to a live discovery on a miss, and writes the result back so the next ask is an offline hit.
 - **No LLM in the runtime** — indexing and path-finding are pure Python + the PinchTab CLI. Predictable, reproducible, free to re-run.
+- **Three ways to call it** — the exact same graph queries are reachable from a full **CLI**, a **Model Context Protocol (MCP)** server, and a **Universal Tool Calling Protocol (UTCP)** manual — all over one shared, importable core API. See [Three ways to call it](#-three-ways-to-call-it).
 
 ## 📑 Table of Contents
 
@@ -28,6 +29,7 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - [Requirements](#-requirements)
 - [Quickstart](#-quickstart)
 - [The tools](#️-the-tools)
+- [Three ways to call it](#-three-ways-to-call-it)
 - [MCP server](#-mcp-server)
 - [UTCP interface](#-utcp-interface)
 - [How interaction crawling works](#-how-interaction-crawling-works)
@@ -109,6 +111,20 @@ also run any tool without installing: `python3 -m pinchtab_webgraph.cli crawl �
 | `cache_cmd.py` (`pinchtab-webgraph cache`) | Inspect / manage the per-host interaction-graph caches `ask.py` writes back: `cache list`, `cache path <host>`, `cache show <host>`, `cache clear <host>` / `--all` (destructive, dry-run unless `--yes`). |
 | `query_cmd.py` (`pinchtab-webgraph query`) | **Machine-readable** twin of `howto.py` / `paths.py`: runs the offline `api.*` queries (`graph_summary`, `howto`, `find_content`, `list_content`, `list_forms`, `link_paths`) and prints the result as JSON on stdout. Takes `--host` (cache) or `--graph` (path). The substrate the UTCP manual shells out to. |
 | `utcp_manual.py` (`pinchtab-webgraph manual`) | Build / print / serve the [UTCP](https://www.utcp.io) tool-calling manual so external tool-callers can invoke the `query` (and live `crawl`/`ask`) surface by running the CLI directly — no wrapper server. `manual --out FILE` / `manual --serve`. |
+
+## 🔌 Three ways to call it
+
+The same crawl-once-query-offline capability is reachable through three interfaces, all layered over one importable core (`pinchtab_webgraph.api` — typed, print-free functions that return structured dicts). Pick whichever fits your consumer; they all resolve to the exact same graph queries, so their answers never disagree.
+
+| Interface | For | How | Extra dep |
+| --- | --- | --- | --- |
+| **CLI** | humans, shell/CI scripts | `pwg query howto --host app.example.com --goal "create a team"` → JSON on stdout (or the human-readable `pwg howto …`). `pwg --help` lists every subcommand. | none (pure stdlib) |
+| **MCP server** | LLM agents / MCP hosts (Claude, IDEs) | `pinchtab-webgraph-mcp` over stdio — 6 offline query tools, 2 live tools (`crawl`, `ask_howto`) with streamed progress, and `graph://…` resources. See [MCP server](#-mcp-server). | `pip install 'pinchtab-webgraph[mcp]'` |
+| **UTCP manual** | any UTCP-aware tool-caller | a static [UTCP](https://www.utcp.io) manual (`pwg manual`, `--out`, or `--serve`) whose `cli` call templates invoke `pwg` directly — no wrapper server in the call path. See [UTCP interface](#-utcp-interface). | none to use (`[utcp]` only validates it) |
+
+Only the **base install** (`pip install pinchtab-webgraph`, pure stdlib) is needed for the CLI and the UTCP manual; the MCP server is the one interface with a runtime dependency, kept behind the optional `[mcp]` extra so the base package stays dependency-free.
+
+> On externally-managed Python (Debian/Ubuntu, PEP 668) install the extras into a venv, or use `pip install --user --break-system-packages 'pinchtab-webgraph[mcp]'`.
 
 ## 🔌 MCP server
 

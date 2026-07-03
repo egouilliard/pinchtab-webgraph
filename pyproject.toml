@@ -30,6 +30,7 @@ dependencies = []  # pure stdlib — only needs the external `pinchtab` CLI at r
 [project.optional-dependencies]
 login = ["keyring>=24"]
 test = ["pytest>=7"]
+mcp = ["mcp[cli]>=1.28,<2"]
 
 [project.urls]
 Homepage = "https://github.com/egouilliard/pinchtab-webgraph"
@@ -39,6 +40,7 @@ Issues = "https://github.com/egouilliard/pinchtab-webgraph/issues"
 [project.scripts]
 pinchtab-webgraph = "pinchtab_webgraph.cli:main"
 pwg = "pinchtab_webgraph.cli:main"
+pinchtab-webgraph-mcp = "pinchtab_webgraph.mcp_server:main"
 
 [tool.setuptools]
 packages = ["pinchtab_webgraph"]

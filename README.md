@@ -106,6 +106,33 @@ also run any tool without installing: `python3 -m pinchtab_webgraph.cli crawl �
 | `login.py` (`pinchtab-webgraph login`) | Open a persistent browser session and sign in to a host (credentials from the OS keyring) so subsequent crawls run authenticated. Needs the optional `login` extra (`keyring`). |
 | `cache_cmd.py` (`pinchtab-webgraph cache`) | Inspect / manage the per-host interaction-graph caches `ask.py` writes back: `cache list`, `cache path <host>`, `cache show <host>`, `cache clear <host>` / `--all` (destructive, dry-run unless `--yes`). |
 
+## 🔌 MCP server
+
+An optional [Model Context Protocol](https://modelcontextprotocol.io) server exposes
+the same offline queries — plus two live browser-driven tools — to any MCP client
+(Claude Desktop, Claude Code, …). It's a thin binding onto the `api.py` query surface,
+so answers are identical. The base install stays **mcp-free**: the server lives behind
+its own extra and console script, and nothing in the base package imports it.
+
+```bash
+pip install 'pinchtab-webgraph[mcp]'   # on Ubuntu/PEP-668: add --user --break-system-packages, or use a venv
+```
+
+```json
+{ "mcpServers": { "pinchtab-webgraph": { "command": "pinchtab-webgraph-mcp" } } }
+```
+
+- **Offline tools** (`graph_summary`, `howto`, `find_content`, `list_content`,
+  `list_forms`, `link_paths`) take either `host=` (cache routing) or `graph=` (a path);
+  no browser, no network.
+- **Resources** `graph://hosts`, `graph://{host}/summary`, `graph://{host}` browse the
+  interaction-graph cache.
+- **Live tools** `crawl` (replaces a host's cache) and `ask_howto` (cache-first,
+  merges) need a running PinchTab bridge; offline tools don't. The crawler's
+  restart/login shell hooks are **operator-only** (env/config), never tool parameters.
+
+Full inventory, env vars, and `.mcp.json` example: **[docs/mcp-server.md](docs/mcp-server.md)**.
+
 ## 🔎 How interaction crawling works
 
 For each state the crawler reads every link and clickable widget (stable structural CSS selectors, not framework-generated refs), plus the state's data collections. Then, for each non-skipped widget, it **re-materializes** the state (replay the click-path from a known start), clicks the widget, and classifies the result:

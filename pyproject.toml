@@ -29,8 +29,9 @@ dependencies = []  # pure stdlib — only needs the external `pinchtab` CLI at r
 # install stays pure-stdlib; only add this if you use `--login-config`.
 [project.optional-dependencies]
 login = ["keyring>=24"]
-test = ["pytest>=7"]
 mcp = ["mcp[cli]>=1.28,<2"]
+test = ["pytest>=7"]
+utcp = ["utcp>=1.1,<2"]
 
 [project.urls]
 Homepage = "https://github.com/egouilliard/pinchtab-webgraph"

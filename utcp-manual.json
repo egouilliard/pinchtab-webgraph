@@ -1,0 +1,389 @@
+{
+  "utcp_version": "1.1",
+  "manual_version": "0.1.0",
+  "tools": [
+    {
+      "name": "graph_summary",
+      "description": "Detect a cached graph's kind and return its meta + element counts. Answers OFFLINE from the per-host cache (no browser, no network). Returns JSON with `graph_kind` in {interaction, link, unknown}.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "hostname to route through the per-host cache (e.g. app.example.com)"
+          }
+        },
+        "required": [
+          "host"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "graph_kind": {
+            "type": "string",
+            "enum": [
+              "interaction",
+              "link",
+              "unknown"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        }
+      },
+      "tags": [
+        "offline",
+        "graph",
+        "summary"
+      ],
+      "tool_call_template": {
+        "name": "graph_summary",
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "pwg query graph_summary --host UTCP_ARG_host_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "howto",
+      "description": "Shortest click-path(s) to a create-trigger matching a natural-language goal, plus the fields of the form it opens. Answers OFFLINE from the per-host cache (no browser, no network). Returns JSON with a `status` in {ok, no_match, unreachable, invalid_args}.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "hostname to route through the per-host cache (e.g. app.example.com)"
+          },
+          "goal": {
+            "type": "string",
+            "description": "natural-language goal, e.g. \"create role\""
+          }
+        },
+        "required": [
+          "host",
+          "goal"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "no_match",
+              "unreachable",
+              "invalid_args"
+            ]
+          },
+          "results": {
+            "type": "array"
+          },
+          "candidates": {
+            "type": "array"
+          }
+        }
+      },
+      "tags": [
+        "offline",
+        "howto",
+        "path"
+      ],
+      "tool_call_template": {
+        "name": "howto",
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "pwg query howto --host UTCP_ARG_host_UTCP_END --goal UTCP_ARG_goal_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "find_content",
+      "description": "Search every captured data collection for text and route each matching view (what matched, which view, the click-path to it). Answers OFFLINE from the per-host cache (no browser, no network). Returns JSON with a `status` in {ok, no_match}.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "hostname to route through the per-host cache (e.g. app.example.com)"
+          },
+          "text": {
+            "type": "string",
+            "description": "text to search for across captured collections"
+          }
+        },
+        "required": [
+          "host",
+          "text"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "no_match"
+            ]
+          },
+          "views": {
+            "type": "array"
+          }
+        }
+      },
+      "tags": [
+        "offline",
+        "content",
+        "search"
+      ],
+      "tool_call_template": {
+        "name": "find_content",
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "pwg query find_content --host UTCP_ARG_host_UTCP_END --text UTCP_ARG_text_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "list_content",
+      "description": "Per-view inventory of captured data collections (kinds, counts, a sample). Answers OFFLINE from the per-host cache (no browser, no network). Returns JSON with a `status` in {ok, empty}.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "hostname to route through the per-host cache (e.g. app.example.com)"
+          }
+        },
+        "required": [
+          "host"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "empty"
+            ]
+          },
+          "views": {
+            "type": "array"
+          }
+        }
+      },
+      "tags": [
+        "offline",
+        "content",
+        "inventory"
+      ],
+      "tool_call_template": {
+        "name": "list_content",
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "pwg query list_content --host UTCP_ARG_host_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "list_forms",
+      "description": "Every create-form in the cache: label, host, click-depth, field count. Answers OFFLINE from the per-host cache (no browser, no network). Returns JSON `{meta, forms}` (no `status` key on success).",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "hostname to route through the per-host cache (e.g. app.example.com)"
+          }
+        },
+        "required": [
+          "host"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "meta": {
+            "type": "object"
+          },
+          "forms": {
+            "type": "array"
+          }
+        }
+      },
+      "tags": [
+        "offline",
+        "forms",
+        "inventory"
+      ],
+      "tool_call_template": {
+        "name": "list_forms",
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "pwg query list_forms --host UTCP_ARG_host_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "link_paths",
+      "description": "Shortest / all click-paths between two pages of a crawled LINK graph, matched by URL/title substring. Answers OFFLINE from the per-host cache (no browser, no network). Returns JSON with a `status` in {ok, no_path, not_found_from, not_found_to, ambiguous_from, ambiguous_to}.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "hostname to route through the per-host cache (e.g. app.example.com)"
+          },
+          "frm": {
+            "type": "string",
+            "description": "source page (URL / title substring)"
+          },
+          "to": {
+            "type": "string",
+            "description": "target page (URL / title substring)"
+          }
+        },
+        "required": [
+          "host",
+          "frm",
+          "to"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "no_path",
+              "not_found_from",
+              "not_found_to",
+              "ambiguous_from",
+              "ambiguous_to"
+            ]
+          },
+          "shortest": {
+            "type": "object"
+          },
+          "all_paths": {
+            "type": "array"
+          },
+          "candidates": {
+            "type": "array"
+          }
+        }
+      },
+      "tags": [
+        "offline",
+        "paths",
+        "link-graph"
+      ],
+      "tool_call_template": {
+        "name": "link_paths",
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "pwg query link_paths --host UTCP_ARG_host_UTCP_END --from UTCP_ARG_frm_UTCP_END --to UTCP_ARG_to_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "crawl",
+      "description": "Crawl a site ONCE into its per-host interaction+content graph cache (states, action edges, forms, data). Needs a running PinchTab bridge; drives a real browser. Emits narrated progress.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "string",
+            "description": "full start URL including a scheme, e.g. https://app.example.com/home"
+          }
+        },
+        "required": [
+          "start"
+        ]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "narrated text output (crawl/ask emit human-readable progress + result today, not structured JSON)"
+      },
+      "tags": [
+        "live",
+        "crawl",
+        "browser"
+      ],
+      "tool_call_template": {
+        "name": "crawl",
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "pwg crawl --start UTCP_ARG_start_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "ask",
+      "description": "Cache-first how-to: answer offline if cached, else run a live discovery through the browser and write the result back. Needs a running PinchTab bridge on a cache miss. Emits narrated text.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "string",
+            "description": "full start URL including a scheme, e.g. https://app.example.com/home"
+          },
+          "goal": {
+            "type": "string",
+            "description": "natural-language goal, e.g. \"create role\""
+          }
+        },
+        "required": [
+          "start",
+          "goal"
+        ]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "narrated text output (crawl/ask emit human-readable progress + result today, not structured JSON)"
+      },
+      "tags": [
+        "live",
+        "howto",
+        "browser"
+      ],
+      "tool_call_template": {
+        "name": "ask",
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "pwg ask --start UTCP_ARG_start_UTCP_END --goal UTCP_ARG_goal_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    }
+  ]
+}

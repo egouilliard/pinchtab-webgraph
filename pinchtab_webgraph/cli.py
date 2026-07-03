@@ -28,9 +28,15 @@ SUBS = {
                   "page->page LINK graph + a self-contained Cytoscape HTML viewer"),
     "paths":     ("pinchtab_webgraph.paths",
                   "offline shortest / all click-paths over a crawled link graph"),
+    "query":     ("pinchtab_webgraph.query_cmd",
+                  "query a graph and print JSON — machine-readable howto/find/list/paths; the UTCP substrate"),
     "cache":     ("pinchtab_webgraph.cache_cmd",
                   "manage the per-host interaction-graph caches: list / path / show / clear"),
+    "manual":    ("pinchtab_webgraph.utcp_manual",
+                  "print / serve the UTCP tool-calling manual for external tool-callers"),
 }
+# NOTE: `query` slots after `paths` (it is the offline query surface); `manual`
+# is appended last (it advertises the query surface to external tool-callers).
 
 
 def _help():

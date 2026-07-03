@@ -28,6 +28,8 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - [Requirements](#-requirements)
 - [Quickstart](#-quickstart)
 - [The tools](#️-the-tools)
+- [MCP server](#-mcp-server)
+- [UTCP interface](#-utcp-interface)
 - [How interaction crawling works](#-how-interaction-crawling-works)
 - [Architecture](#️-architecture)
 - [Graph shape](#-graph-shape)
@@ -105,6 +107,8 @@ also run any tool without installing: `python3 -m pinchtab_webgraph.cli crawl �
 | `paths.py` | Offline shortest / all click-paths over a crawled link graph (`--from`, `--to`, `--structural`, `--all`). |
 | `login.py` (`pinchtab-webgraph login`) | Open a persistent browser session and sign in to a host (credentials from the OS keyring) so subsequent crawls run authenticated. Needs the optional `login` extra (`keyring`). |
 | `cache_cmd.py` (`pinchtab-webgraph cache`) | Inspect / manage the per-host interaction-graph caches `ask.py` writes back: `cache list`, `cache path <host>`, `cache show <host>`, `cache clear <host>` / `--all` (destructive, dry-run unless `--yes`). |
+| `query_cmd.py` (`pinchtab-webgraph query`) | **Machine-readable** twin of `howto.py` / `paths.py`: runs the offline `api.*` queries (`graph_summary`, `howto`, `find_content`, `list_content`, `list_forms`, `link_paths`) and prints the result as JSON on stdout. Takes `--host` (cache) or `--graph` (path). The substrate the UTCP manual shells out to. |
+| `utcp_manual.py` (`pinchtab-webgraph manual`) | Build / print / serve the [UTCP](https://www.utcp.io) tool-calling manual so external tool-callers can invoke the `query` (and live `crawl`/`ask`) surface by running the CLI directly — no wrapper server. `manual --out FILE` / `manual --serve`. |
 
 ## 🔌 MCP server
 
@@ -132,6 +136,26 @@ pip install 'pinchtab-webgraph[mcp]'   # on Ubuntu/PEP-668: add --user --break-s
   restart/login shell hooks are **operator-only** (env/config), never tool parameters.
 
 Full inventory, env vars, and `.mcp.json` example: **[docs/mcp-server.md](docs/mcp-server.md)**.
+
+## 🔌 UTCP interface
+
+Prefer to call the CLI directly, with **no server running**? `pinchtab-webgraph` also
+ships a [UTCP](https://www.utcp.io) manual: a description of each tool's JSON-schema
+inputs/outputs plus the exact `pwg …` command to run, with args injected as
+`UTCP_ARG_<name>_UTCP_END`. A UTCP-aware caller runs the command itself — the same
+`api.py` queries as MCP, no wrapper process. Manual generation is **pure stdlib**.
+
+```bash
+pwg manual                        # print the manual JSON
+pwg manual --out utcp-manual.json # write it (a committed copy lives at repo root)
+pwg manual --serve                # serve at /utcp + /.well-known/utcp (default :9872)
+
+pwg query howto --host app.example.com --goal "create role"   # the substrate, prints JSON
+```
+
+The exposed surface is a deliberate **subset** — required core args only, `--host`
+routing only — so every command string is placeholder-free. Full tool table, exit-code
+convention, and endpoints: **[docs/utcp.md](docs/utcp.md)**.
 
 ## 🔎 How interaction crawling works
 

@@ -32,6 +32,7 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - [Three ways to call it](#-three-ways-to-call-it)
 - [MCP server](#-mcp-server)
 - [UTCP interface](#-utcp-interface)
+- [Documentation](#-documentation)
 - [How interaction crawling works](#-how-interaction-crawling-works)
 - [Architecture](#️-architecture)
 - [Graph shape](#-graph-shape)
@@ -172,6 +173,17 @@ pwg query howto --host app.example.com --goal "create role"   # the substrate, p
 The exposed surface is a deliberate **subset** — required core args only, `--host`
 routing only — so every command string is placeholder-free. Full tool table, exit-code
 convention, and endpoints: **[docs/utcp.md](docs/utcp.md)**.
+
+## 📚 Documentation
+
+Deep-dive guides live in **[`docs/`](docs/README.md)** — start at the **[documentation index](docs/README.md)**, which links everything below:
+
+| Guide | What it covers |
+| --- | --- |
+| **[MCP server](docs/mcp-server.md)** | Run `pinchtab-webgraph-mcp`: the `[mcp]` extra, `.mcp.json` registration, the tool + resource inventory, env vars, and the live-tool safety model. |
+| **[UTCP interface](docs/utcp.md)** | The `pwg query` JSON surface + the `pwg manual` / `--serve` UTCP manual, the 8 tools, the scope subset, and the exit-code convention. |
+| **[Authenticated login](docs/authenticated-login.md)** | Crawl behind a login safely: hand-login vs. keyring automation, the threat model, sandbox/bot-account isolation, and how to test it. |
+| **[Contributing](CONTRIBUTING.md)** | Branch model, Conventional Commits, the stay-generic rule, safety, security, and PRs. |
 
 ## 🔎 How interaction crawling works
 

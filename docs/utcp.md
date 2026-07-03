@@ -1,5 +1,7 @@
 # UTCP interface
 
+> **Docs:** [← README](../README.md) · [📚 Index](README.md) · [MCP server](mcp-server.md) · [Authenticated login](authenticated-login.md)
+
 `pinchtab-webgraph` ships a [UTCP](https://www.utcp.io) (Universal Tool Calling
 Protocol) manual that lets any UTCP-aware tool-caller invoke the offline graph
 queries — and the two live browser-driven tools — by shelling out to the `pwg` CLI

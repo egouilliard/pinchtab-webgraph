@@ -1,5 +1,7 @@
 # Safe login for authenticated apps
 
+> **Docs:** [← README](../README.md) · [📚 Index](README.md) · [MCP server](mcp-server.md) · [UTCP interface](utcp.md)
+
 `pinchtab-webgraph` can crawl sites that sit behind a login. This document explains
 **exactly** what is implemented, where credentials live, the security properties it
 guarantees, its limits, and how to test it yourself.

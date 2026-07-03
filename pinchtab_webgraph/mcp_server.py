@@ -237,6 +237,14 @@ def _parse_progress(line):
     return int(m.group(1)), int(m.group(2))
 
 
+# Failure markers the `pinchtab health` CLI prints to stdout/stderr while STILL
+# exiting 0 when the bridge is unreachable — so rc==0 alone can't be trusted.
+_BRIDGE_DOWN_MARKERS = (
+    "request failed", "connection refused", "econnrefused", "dial tcp",
+    "could not connect", "no such host", "connect: connection",
+)
+
+
 def _bridge_health(server):
     """Sync preflight: is the PinchTab bridge reachable? None if healthy, else an error.
 
@@ -257,12 +265,19 @@ def _bridge_health(server):
                 "detail": "the `pinchtab` CLI is not on PATH; install it to run live tools"}
     except subprocess.TimeoutExpired:
         return {"status": "bridge_unreachable", "reason": "health_timeout", "server": server}
+    low = ((r.stderr or "") + (r.stdout or "")).lower()
     if r.returncode != 0:
-        low = ((r.stderr or "") + (r.stdout or "")).lower()
         if "token" in low or "auth" in low or "unauthor" in low:
             return {"status": "bridge_no_token", "reason": "no_token_configured",
                     "server": server}
         return {"status": "bridge_unreachable", "reason": "health_failed", "server": server,
+                "detail": ((r.stderr or r.stdout) or "").strip()[:200]}
+    # rc==0 is NOT sufficient: the `pinchtab health` CLI exits 0 even when the
+    # bridge is down, printing the failure (e.g. "connection refused") to
+    # stdout/stderr. Inspect the output so a dead bridge is caught by the
+    # preflight instead of letting a live tool run against nothing.
+    if any(m in low for m in _BRIDGE_DOWN_MARKERS):
+        return {"status": "bridge_unreachable", "reason": "health_no_connect", "server": server,
                 "detail": ((r.stderr or r.stdout) or "").strip()[:200]}
     return None
 

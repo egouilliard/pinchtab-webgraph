@@ -487,6 +487,19 @@ def test_bridge_health_healthy_returns_none(monkeypatch):
     assert mcp_server._bridge_health("http://localhost:9871") is None
 
 
+def test_bridge_health_rc0_but_connection_refused(monkeypatch):
+    # The real `pinchtab health` CLI exits 0 even when the bridge is DOWN,
+    # printing the failure to stdout. rc==0 alone must NOT be read as healthy.
+    _patch_run(monkeypatch, result=_FakeCompleted(
+        returncode=0,
+        stdout='Request failed: Get "http://localhost:9871/health": '
+               "dial tcp 127.0.0.1:9871: connect: connection refused"))
+    out = mcp_server._bridge_health("http://localhost:9871")
+    assert out is not None, "a down bridge that exits 0 must still be caught"
+    assert out["status"] == "bridge_unreachable"
+    assert out["reason"] == "health_no_connect"
+
+
 def test_bridge_health_which_missing(monkeypatch):
     # which() returns None -> the first guard fires before any subprocess.run.
     monkeypatch.setattr(mcp_server.shutil, "which", lambda name: None)

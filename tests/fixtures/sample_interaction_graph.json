@@ -1,0 +1,149 @@
+{
+  "meta": {
+    "start": "https://example.test/dashboard",
+    "host": "example.test",
+    "states": 5,
+    "edges": 3,
+    "triggers": 3,
+    "max_depth": 2,
+    "tool": "interaction_crawl.py"
+  },
+  "states": [
+    {
+      "id": "s0",
+      "url": "https://example.test/dashboard",
+      "label": "/dashboard",
+      "depth": 0
+    },
+    {
+      "id": "s1",
+      "url": "https://example.test/team",
+      "label": "Team",
+      "depth": 1,
+      "collections": [
+        {
+          "kind": "list",
+          "count": 1,
+          "items": [
+            {"t": "Alice Martin", "cells": [], "level": 0}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "s2",
+      "url": "https://example.test/team/roles",
+      "label": "Roles",
+      "depth": 2
+    },
+    {
+      "id": "s3",
+      "url": "https://example.test/reports",
+      "label": "Reports",
+      "depth": 1,
+      "collections": [
+        {
+          "kind": "table",
+          "count": 2,
+          "items": [
+            {"t": "", "cells": ["Q1 Report", "2026-01-05"], "level": 0},
+            {"t": "", "cells": ["Q2 Report", "2026-04-05"], "level": 0}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "s4",
+      "url": "https://example.test/orphan",
+      "label": "Orphan",
+      "depth": 1
+    }
+  ],
+  "state_index": {
+    "https://example.test/dashboard": "s0",
+    "https://example.test/team": "s1",
+    "https://example.test/team/roles": "s2",
+    "https://example.test/reports": "s3",
+    "https://example.test/orphan": "s4"
+  },
+  "edges": [
+    {
+      "from": "s0",
+      "to": "s1",
+      "label": "Team",
+      "selector": "nav>a:nth-of-type(1)",
+      "kind": "link"
+    },
+    {
+      "from": "s1",
+      "to": "s2",
+      "label": "Roles tab",
+      "selector": "div>div>button:nth-of-type(2)",
+      "kind": "click"
+    },
+    {
+      "from": "s0",
+      "to": "s3",
+      "label": "Reports",
+      "selector": "nav>a:nth-of-type(2)",
+      "kind": "link"
+    }
+  ],
+  "triggers": [
+    {
+      "label": "Create Role",
+      "state": "s2",
+      "path": [
+        {"label": "Team", "selector": "nav>a:nth-of-type(1)", "href": "https://example.test/team"},
+        {"label": "Roles tab", "selector": "div>div>button:nth-of-type(2)", "href": null}
+      ],
+      "form": {
+        "title": "Create Role",
+        "isDialog": true,
+        "fields": [
+          {"label": "Role Name", "type": "text", "required": true, "options": null, "value": null, "placeholder": "e.g. Manager"}
+        ],
+        "submitButtons": ["Create Role"],
+        "fieldCount": 1
+      },
+      "opensAt": null
+    },
+    {
+      "label": "Add Report",
+      "state": "s3",
+      "path": [
+        {"label": "Reports", "selector": "nav>a:nth-of-type(2)", "href": "https://example.test/reports"}
+      ],
+      "form": {
+        "title": "New Report",
+        "isDialog": false,
+        "fields": [
+          {"label": "Report Name", "type": "text", "required": true, "options": null, "value": null, "placeholder": "Quarterly summary"},
+          {"label": "Period", "type": "select", "required": false, "options": ["Q1", "Q2", "Q3", "Q4"], "value": null, "placeholder": ""},
+          {"label": "Notes", "type": "textarea", "required": false, "options": null, "value": null, "placeholder": "Optional notes"}
+        ],
+        "submitButtons": ["Create Report"],
+        "fieldCount": 3
+      },
+      "opensAt": "https://example.test/reports/new"
+    },
+    {
+      "label": "Add Widget",
+      "state": "s4",
+      "path": [
+        {"label": "Orphan", "selector": "nav>a:nth-of-type(9)", "href": "https://example.test/orphan"}
+      ],
+      "form": {
+        "title": "Add Widget",
+        "isDialog": true,
+        "fields": [
+          {"label": "Widget Title", "type": "text", "required": true, "options": null, "value": null, "placeholder": "Title"},
+          {"label": "Type", "type": "select", "required": false, "options": ["Chart", "Table"], "value": null, "placeholder": ""}
+        ],
+        "submitButtons": ["Add"],
+        "fieldCount": 2
+      },
+      "opensAt": null
+    }
+  ]
+}

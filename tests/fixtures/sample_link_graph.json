@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "start": "https://site.test/home",
+    "host": "site.test",
+    "pages": 9,
+    "tool": "crawl.py"
+  },
+  "nodes": [
+    {"id": "home", "url": "https://site.test/home", "title": "Home", "type": "page"},
+    {"id": "docs", "url": "https://site.test/docs", "title": "Docs", "type": "page"},
+    {"id": "guide", "url": "https://site.test/guide", "title": "Guide", "type": "page"},
+    {"id": "reports", "url": "https://site.test/reports", "title": "Reports", "type": "page"},
+    {"id": "billing", "url": "https://site.test/billing", "title": "Billing", "type": "page"},
+    {"id": "help", "url": "https://site.test/help", "title": "Help", "type": "page"},
+    {"id": "faq", "url": "https://site.test/faq", "title": "FAQ", "type": "page"},
+    {"id": "import-center", "url": "https://site.test/import-center", "title": "Import Center", "type": "page"},
+    {"id": "dashboard", "url": "https://site.test/dashboard", "title": "Dashboard", "type": "page"}
+  ],
+  "edges": [
+    {"source": "home", "target": "docs", "label": "Docs", "kind": "link"},
+    {"source": "docs", "target": "guide", "label": "Guide", "kind": "link"},
+    {"source": "home", "target": "guide", "label": "Guide (direct)", "kind": "link"},
+
+    {"source": "home", "target": "dashboard", "label": "Dashboard", "kind": "link"},
+    {"source": "docs", "target": "dashboard", "label": "Dashboard", "kind": "link"},
+    {"source": "guide", "target": "dashboard", "label": "Dashboard", "kind": "link"},
+    {"source": "reports", "target": "dashboard", "label": "Dashboard", "kind": "link"},
+    {"source": "billing", "target": "dashboard", "label": "Dashboard", "kind": "link"},
+    {"source": "help", "target": "dashboard", "label": "Dashboard", "kind": "link"},
+    {"source": "faq", "target": "dashboard", "label": "Dashboard", "kind": "link"},
+    {"source": "import-center", "target": "dashboard", "label": "Dashboard", "kind": "link"}
+  ]
+}

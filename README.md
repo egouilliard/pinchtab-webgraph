@@ -103,6 +103,8 @@ also run any tool without installing: `python3 -m pinchtab_webgraph.cli crawl �
 | `recipe.py` / `run-recipe.sh` | **Live** how-to finder: priority-BFS over the running UI to a goal's trigger, opens the form, reads the fields, never submits. The live fallback for cache misses. |
 | `crawl.py` / `run-crawl.sh <url>` | Page→page **link graph** → `<out>.json` + a self-contained Cytoscape.js `<out>.html` viewer. |
 | `paths.py` | Offline shortest / all click-paths over a crawled link graph (`--from`, `--to`, `--structural`, `--all`). |
+| `login.py` (`pinchtab-webgraph login`) | Open a persistent browser session and sign in to a host (credentials from the OS keyring) so subsequent crawls run authenticated. Needs the optional `login` extra (`keyring`). |
+| `cache_cmd.py` (`pinchtab-webgraph cache`) | Inspect / manage the per-host interaction-graph caches `ask.py` writes back: `cache list`, `cache path <host>`, `cache show <host>`, `cache clear <host>` / `--all` (destructive, dry-run unless `--yes`). |
 
 ## 🔎 How interaction crawling works
 
@@ -239,6 +241,13 @@ PRs welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide (b
 - Cut feature branches from **`dev`** and open PRs against it. `main`, `release`, and `hotfix` are protected — every PR into them needs a Code Owner review (see [`CODEOWNERS`](CODEOWNERS)); force-pushes and deletions are blocked.
 - **The one hard rule: stay generic** — no hardcoded app routes, labels, or vocabulary in the crawler; structural heuristics only.
 - Discovery stays **safe** (never submits) and **secrets stay out of git**. Please open an issue before a large refactor.
+
+**Development.** The runtime is pure stdlib; tests use `pytest`, added via the `test` extra:
+
+```bash
+pip install -e '.[test]'   # editable install + pytest
+pytest                     # runs the suite in tests/
+```
 
 ## ⭐ Star History
 

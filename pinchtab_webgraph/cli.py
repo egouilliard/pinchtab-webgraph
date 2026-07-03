@@ -16,6 +16,8 @@ from . import __version__
 SUBS = {
     "crawl":     ("pinchtab_webgraph.interaction_crawl",
                   "crawl a site ONCE into a nav+content graph (states, actions, forms, data) — the main tool"),
+    "login":     ("pinchtab_webgraph.login",
+                  "open a persistent browser session and sign in to a host (keyring-backed) for authenticated crawls"),
     "howto":     ("pinchtab_webgraph.howto",
                   "query a graph OFFLINE: --goal <how-to> / --find <data> / --list-content"),
     "ask":       ("pinchtab_webgraph.ask",
@@ -26,6 +28,8 @@ SUBS = {
                   "page->page LINK graph + a self-contained Cytoscape HTML viewer"),
     "paths":     ("pinchtab_webgraph.paths",
                   "offline shortest / all click-paths over a crawled link graph"),
+    "cache":     ("pinchtab_webgraph.cache_cmd",
+                  "manage the per-host interaction-graph caches: list / path / show / clear"),
 }
 
 

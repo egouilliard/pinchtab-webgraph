@@ -85,7 +85,7 @@ The sign-off appends a `Signed-off-by: Your Name <your@email>` trailer.
 
 ## 6. The One Hard Rule: Stay Generic
 
-**This is non-negotiable and the most common reason a PR is sent back.** The crawler and path-finder must work on *any* website. Do **not** hardcode app-specific routes, labels, selectors, or vocabulary in the discovery/logic code (`interaction_crawl.py`, `recipe.py`, `howto.py`, `crawl.py`, `paths.py`). Use structural signals only:
+**This is non-negotiable and the most common reason a PR is sent back.** The crawler and path-finder must work on *any* website. Do **not** hardcode app-specific routes, labels, selectors, or vocabulary in the discovery/logic code (`interaction_crawl.py`, `recipe.py`, `howto.py`, `crawl.py`, `paths.py`, `api.py`). Use structural signals only:
 
 - ARIA roles and states (`role=grid/table/tree/list/feed`, `aria-selected/pressed/current`, …)
 - Repeated-sibling / cluster detection

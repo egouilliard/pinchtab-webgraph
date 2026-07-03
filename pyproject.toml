@@ -7,7 +7,7 @@ name = "pinchtab-webgraph"
 version = "0.1.0"
 description = "Deterministic (no-LLM) crawler that maps ANY website into a nav+content graph via the PinchTab browser CLI, then answers how-to and where-is queries offline."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Edouard Gouilliard" }]
 keywords = ["browser-automation", "web-crawler", "site-map", "accessibility", "how-to", "pinchtab", "navigation-graph"]
@@ -16,7 +16,10 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Testing",
     "Topic :: Internet :: WWW/HTTP :: Browsers",
 ]
@@ -26,6 +29,7 @@ dependencies = []  # pure stdlib — only needs the external `pinchtab` CLI at r
 # install stays pure-stdlib; only add this if you use `--login-config`.
 [project.optional-dependencies]
 login = ["keyring>=24"]
+test = ["pytest>=7"]
 
 [project.urls]
 Homepage = "https://github.com/egouilliard/pinchtab-webgraph"
@@ -38,3 +42,6 @@ pwg = "pinchtab_webgraph.cli:main"
 
 [tool.setuptools]
 packages = ["pinchtab_webgraph"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

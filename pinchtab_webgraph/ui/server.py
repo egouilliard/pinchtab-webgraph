@@ -404,7 +404,10 @@ def main():
     ap = argparse.ArgumentParser(
         description="Serve the offline pinchtab-webgraph web UI + read-only REST API.")
     ap.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1)")
-    ap.add_argument("--port", type=int, default=8765, help="bind port (default 8765)")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or 8765),
+                    help="bind port (default: $PORT if set, else 8765). Honouring $PORT "
+                         "lets `portless <name> python -m pinchtab_webgraph.ui.server` "
+                         "assign a free port and serve it at https://<name>.localhost.")
     ap.add_argument("--open", action="store_true",
                     help="open the UI in a browser once the server is up")
     a = ap.parse_args()

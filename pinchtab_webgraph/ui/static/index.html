@@ -28,6 +28,17 @@
       </form>
       <div id="results"><p class="muted">Pick a host, type a goal, and hit How-to.</p></div>
 
+      <!-- Phase-3 placeholder chat panel; Phase 5's SPA replaces this too. -->
+      <section class="chat">
+        <h2>Chat agent</h2>
+        <p class="muted" id="chat-status">Pick a host to start a chat session.</p>
+        <div id="chat-log"></div>
+        <form id="chat-form" autocomplete="off">
+          <input id="chat-input" type="text" placeholder="how do I create a role?" disabled />
+          <button type="submit" disabled>Send</button>
+        </form>
+      </section>
+
       <!-- Phase-2 placeholder credentials panel; Phase 5's SPA replaces this too. -->
       <section class="vault">
         <h2>Credentials vault</h2>

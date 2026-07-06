@@ -30,6 +30,7 @@ async function loadHosts() {
           // reflect the selection in the sidebar.
           for (const el of hostsEl.children) el.classList.remove("selected");
           li.classList.add("selected");
+          openChat(h.host);
         });
         hostsEl.appendChild(li);
       }
@@ -214,3 +215,106 @@ document.getElementById("cred-form").addEventListener("submit", async (e) => {
 
 loadVaultStatus();
 loadCredentials();
+
+// --- Phase-3 chat agent (placeholder; Phase 5's SPA replaces this) ------------
+// Streams over a WebSocket to /ws/chat?host=<host>. Plain-DOM, textContent ONLY —
+// server text (model output, tool names, errors) never touches innerHTML.
+const chatLogEl = document.getElementById("chat-log");
+const chatStatusEl = document.getElementById("chat-status");
+const chatFormEl = document.getElementById("chat-form");
+const chatInputEl = document.getElementById("chat-input");
+const chatSendEl = chatFormEl ? chatFormEl.querySelector("button") : null;
+
+let chatWs = null;
+let chatHost = null;
+let currentBubble = null; // the assistant bubble being streamed into
+
+function chatSetEnabled(on) {
+  if (chatInputEl) chatInputEl.disabled = !on;
+  if (chatSendEl) chatSendEl.disabled = !on;
+}
+
+function chatAddLine(cls, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + cls;
+  div.textContent = text;
+  chatLogEl.appendChild(div);
+  chatLogEl.scrollTop = chatLogEl.scrollHeight;
+  return div;
+}
+
+function openChat(host) {
+  // Close any prior socket before opening a new one.
+  if (chatWs) {
+    try { chatWs.close(); } catch (e) { /* ignore */ }
+    chatWs = null;
+  }
+  chatHost = host;
+  currentBubble = null;
+  chatLogEl.innerHTML = "";
+  chatSetEnabled(false);
+  chatStatusEl.textContent = "connecting to " + host + "…";
+
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const url = proto + "//" + location.host + "/ws/chat?host=" +
+    encodeURIComponent(host);
+  const ws = new WebSocket(url);
+  chatWs = ws;
+
+  ws.onopen = () => {
+    chatStatusEl.textContent = "chatting about " + host;
+    chatSetEnabled(true);
+  };
+  ws.onclose = () => {
+    if (chatWs === ws) {
+      chatStatusEl.textContent = "chat closed — pick a host to reconnect.";
+      chatSetEnabled(false);
+    }
+  };
+  ws.onerror = () => {
+    chatStatusEl.textContent = "chat connection error.";
+  };
+  ws.onmessage = (ev) => {
+    let data;
+    try { data = JSON.parse(ev.data); } catch (e) { return; }
+    switch (data.type) {
+      case "text":
+        if (!currentBubble) currentBubble = chatAddLine("msg-assistant", "");
+        // extend the current assistant bubble via textContent (never innerHTML).
+        currentBubble.textContent += (data.delta || "");
+        chatLogEl.scrollTop = chatLogEl.scrollHeight;
+        break;
+      case "tool_use":
+        currentBubble = null;
+        chatAddLine("msg-tool", "used tool " + (data.name || "?"));
+        break;
+      case "tool_result":
+        chatAddLine("msg-tool", "tool " + (data.name || "?") + " → " +
+          (data.status || "?"));
+        break;
+      case "error":
+        currentBubble = null;
+        chatAddLine("msg-error", "error: " + (data.reason || data.status ||
+          "unknown") + (data.detail ? " — " + data.detail : ""));
+        break;
+      case "done":
+        // finalize the current assistant bubble.
+        currentBubble = null;
+        break;
+      default:
+        break;
+    }
+  };
+}
+
+if (chatFormEl) {
+  chatFormEl.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = chatInputEl.value.trim();
+    if (!text || !chatWs || chatWs.readyState !== WebSocket.OPEN) return;
+    chatAddLine("msg-user", text);
+    currentBubble = null;
+    chatWs.send(JSON.stringify({ type: "user_message", text }));
+    chatInputEl.value = "";
+  });
+}

@@ -21,12 +21,14 @@ import os
 import threading
 import webbrowser
 
-from fastapi import Body, FastAPI, Query
+from contextlib import asynccontextmanager
+
+from fastapi import Body, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import api, cache_store, __version__
-from . import vault
+from . import chat, vault
 
 app = FastAPI(title="pinchtab-webgraph UI", version=__version__)
 
@@ -253,6 +255,60 @@ def vault_delete_credential(host: str, delete_secret: bool = True):
     return _respond(vault.delete_credential(host, delete_secret=delete_secret))
 
 
+# --- chat WebSocket (Phase 3: Claude wired to the offline MCP tools) ---------
+#
+# The chat agent drives Claude (Anthropic API) with the pinchtab-webgraph MCP
+# server's OFFLINE, read-only tools (crawl/ask_howto are deliberately excluded —
+# see chat.OFFLINE_TOOL_NAMES). Everything heavy (anthropic/mcp) is lazy inside
+# chat.py, so a base install without those extras degrades to a structured
+# ChatUnavailable frame rather than a crash.
+
+@asynccontextmanager
+async def _open_chat_session(host):
+    """Yield a ready ChatState (key -> anthropic client -> MCP session -> tools).
+
+    Broken out as an @asynccontextmanager so tests can monkeypatch it with a fake
+    that yields a scripted ChatState — no real key, no subprocess, no network.
+    Raises chat.ChatUnavailable when a dep/key is missing (the WS route maps it to a
+    structured close), which is why the require/build calls sit inside the ctx.
+    """
+    chat.require_api_key()
+    client = chat.build_anthropic_client()
+    async with chat.mcp_client_session() as session:
+        tools = await chat.list_allowed_tools(session)
+        yield chat.ChatState(host=host, messages=[], mcp_session=session,
+                             anthropic_client=client, tools=tools)
+
+
+@app.websocket("/ws/chat")
+async def chat_ws(websocket: WebSocket, host: str = Query(...)):
+    await websocket.accept()
+    try:
+        cache_store.validate_host(host)
+    except ValueError:
+        await websocket.send_json({"type": "error", "status": "invalid_host",
+                                   "host": host})
+        await websocket.close(code=1008)
+        return
+    try:
+        async with _open_chat_session(host) as state:
+            while True:
+                try:
+                    msg = await websocket.receive_json()
+                except WebSocketDisconnect:
+                    return
+                if msg.get("type") != "user_message":
+                    continue
+                await chat.handle_user_message(state, msg.get("text", ""),
+                                               emit=websocket.send_json)
+    except chat.ChatUnavailable as e:
+        await websocket.send_json({"type": "error", "status": "chat_unavailable",
+                                   "reason": e.reason, "detail": e.detail})
+        await websocket.close(code=1013)
+    except WebSocketDisconnect:
+        return
+
+
 # Static mount — registered LAST, AFTER every /api route, so it never shadows the
 # API. `html=True` serves index.html at "/".
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
@@ -270,8 +326,10 @@ def main():
     if a.host not in ("127.0.0.1", "localhost", "::1"):
         import sys
         print("WARNING: binding %s exposes the vault WRITE endpoints "
-              "(PUT/DELETE /api/vault/credentials) with NO authentication — anyone "
-              "who can reach this port can store or delete keyring credentials."
+              "(PUT/DELETE /api/vault/credentials) AND the chat agent "
+              "(/ws/chat — a read-only, offline-tool Claude agent) with NO "
+              "authentication — anyone who can reach this port can store or delete "
+              "keyring credentials and drive the chat agent (spending API credits)."
               % a.host, file=sys.stderr)
 
     import uvicorn

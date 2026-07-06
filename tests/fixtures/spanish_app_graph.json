@@ -1,0 +1,69 @@
+{
+  "meta": {
+    "start": "https://tienda.example/",
+    "host": "tienda.example",
+    "states": 4,
+    "edges": 3,
+    "triggers": 3,
+    "max_depth": 1,
+    "tool": "interaction_crawl.py"
+  },
+  "states": [
+    {"id": "s0", "url": "https://tienda.example/", "label": "/", "depth": 0},
+    {"id": "s1", "url": "https://tienda.example/coleccion", "label": "Nueva colección", "depth": 1},
+    {"id": "s2", "url": "https://tienda.example/clientes/nuevo", "label": "Añadir cliente", "depth": 1},
+    {"id": "s3", "url": "https://tienda.example/acceso", "label": "Iniciar sesión", "depth": 1}
+  ],
+  "state_index": {
+    "https://tienda.example/": "s0",
+    "https://tienda.example/coleccion": "s1",
+    "https://tienda.example/clientes/nuevo": "s2",
+    "https://tienda.example/acceso": "s3"
+  },
+  "edges": [
+    {"from": "s0", "to": "s1", "label": "Nueva colección", "selector": "a:nth-of-type(3)", "kind": "link"},
+    {"from": "s0", "to": "s2", "label": "Añadir cliente", "selector": "a:nth-of-type(2)", "kind": "link"},
+    {"from": "s0", "to": "s3", "label": "Iniciar sesión", "selector": "a:nth-of-type(1)", "kind": "link"}
+  ],
+  "triggers": [
+    {
+      "label": "Nueva colección",
+      "state": "s0",
+      "path": [],
+      "form": {"title": "Colección", "isDialog": false, "fields": [], "submitButtons": [], "fieldCount": 0},
+      "opensAt": "https://tienda.example/coleccion"
+    },
+    {
+      "label": "Añadir cliente",
+      "state": "s0",
+      "path": [],
+      "form": {
+        "title": "Nuevo cliente",
+        "isDialog": true,
+        "fields": [
+          {"label": "Nombre", "type": "text", "required": true, "options": null, "value": null, "placeholder": ""},
+          {"label": "Correo electrónico", "type": "text", "required": true, "options": null, "value": null, "placeholder": ""}
+        ],
+        "submitButtons": ["Guardar"],
+        "fieldCount": 2
+      },
+      "opensAt": null
+    },
+    {
+      "label": "Iniciar sesión",
+      "state": "s0",
+      "path": [],
+      "form": {
+        "title": "Iniciar sesión",
+        "isDialog": false,
+        "fields": [
+          {"label": "Correo electrónico", "type": "text", "required": true, "options": null, "value": null, "placeholder": ""},
+          {"label": "Contraseña", "type": "password", "required": true, "options": null, "value": null, "placeholder": ""}
+        ],
+        "submitButtons": ["Iniciar sesión"],
+        "fieldCount": 2
+      },
+      "opensAt": "https://tienda.example/acceso"
+    }
+  ]
+}

@@ -38,6 +38,52 @@ def same_host(u, ref):
 # create-style verbs (EN + ES — covers bilingual apps; extend for other locales)
 VERBS = r"create|add|new|start|crear|nuevo|nueva|añadir|anadir|agregar|generar"
 
+# Tokens dropped from a goal before we match it against trigger labels: articles /
+# prepositions, the create-VERBS themselves (they are matched via VERBS, not as a
+# noun), and their ES equivalents. Short (≤2-char) tokens are ALSO dropped in
+# goal_nouns() — they cause spurious substring hits ("in" inside "Find", "a"/"to"
+# everywhere). Generic, no app/section vocabulary.
+GOAL_STOPWORDS = {
+    "a", "an", "the", "to", "of", "for", "in", "on", "at", "by", "with", "and",
+    "or", "my", "me", "i", "do", "how", "some", "this", "that",
+    "create", "add", "new", "make", "start", "generate",
+    "crear", "nuevo", "nueva", "añadir", "anadir", "agregar", "generar",
+    "un", "una", "el", "la", "los", "las", "de", "para",
+}
+
+
+def goal_nouns(goal):
+    """Content tokens of a goal: lowercase word tokens minus GOAL_STOPWORDS and any
+    ≤2-char token. These are the meaningful words a trigger label must share for a
+    match — keying on them (not the raw goal) is what stops `in`/`a`/`to` and the
+    generic create-VERBS from producing false positives. Generic, stdlib only."""
+    return [w for w in re.findall(r"\w+", (goal or "").lower())
+            if w not in GOAL_STOPWORDS and len(w) > 2]
+
+
+def noun_alt(nouns):
+    """Alternation that matches any goal noun as a WHOLE WORD, tolerating a trailing
+    English plural (report→reports, box→boxes, cliente→clientes). The LEADING boundary
+    blocks a short noun matching inside a longer word ("in" inside "Find"); the optional
+    plural + TRAILING boundary blocks prefix matches ("sign" inside "signature") while
+    still catching plurals. Lexical, not a stemmer — generic, no app vocabulary."""
+    alt = "|".join(re.escape(n) for n in nouns)
+    return r"\b(?:%s)(?:es|s)?\b" % alt
+
+
+def goal_needle(goal, match=None):
+    """The trigger-label regex for a live search: a create-VERB adjacent (≤30 chars)
+    to a goal noun, in either order, with noun_alt()'s word-boundary/plural handling so
+    a short noun can't match inside an unrelated word. Falls back to bare VERBS when the
+    goal has no content nouns. `match` (an explicit user regex) overrides."""
+    if match:
+        return match
+    nouns = goal_nouns(goal)
+    if not nouns:
+        return r"\b(?:%s)\b" % VERBS
+    np = noun_alt(nouns)
+    return r"(?:%s)\b.{0,30}%s|%s.{0,30}\b(?:%s)" % (VERBS, np, np, VERBS)
+
 # --- stable CSS selector + form introspection, injected into the page ---------
 TRIGGER_JS = r"""
 (needle => {
@@ -430,10 +476,8 @@ def main():
     except Exception:
         pass
 
-    nouns = "|".join(w for w in a.goal.split() if w.lower() not in
-                     ("a", "the", "create", "add", "new", "make", "to"))
-    needle = a.match or (r"(?:%s).{0,30}(?:%s)|(?:%s).{0,30}(?:%s)" % (VERBS, nouns, nouns, VERBS)) \
-        if nouns else a.match or "(%s)" % VERBS
+    noun_list = goal_nouns(a.goal)
+    needle = goal_needle(a.goal, a.match)
     graph = json.load(open(a.graph)) if a.graph else None
 
     # 1) DISCOVER via interaction-aware BREADTH-FIRST search over the live UI:
@@ -444,7 +488,7 @@ def main():
     #    last link target, replay only trailing clicks).
     import re as _re
     needle_re = _re.compile(needle, _re.I)
-    goal_re = _re.compile("|".join(filter(None, nouns.split("|"))) or ".", _re.I)
+    goal_re = _re.compile(noun_alt(noun_list) if noun_list else ".", _re.I)
 
     start_url = a.start or a.page
     if not start_url:

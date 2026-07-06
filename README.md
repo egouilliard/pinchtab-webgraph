@@ -194,6 +194,8 @@ For each state the crawler reads every link and clickable widget (stable structu
 - **create-trigger** → the form/modal is opened, its fields are read (label / type / required / options / confirm button), then Escape — nothing is persisted.
 - **no change** → ignored.
 
+Two kinds of state become **trigger targets** for the offline `howto` query: a control whose label carries a create-verb (`create` / `add` / `new` / …), **and** a state that *structurally is a form* — it renders real `input`/`select`/`textarea` fields plus a submit control — even when nothing on it carries a create-verb. That second, structural signal (`--capture-form-states`, on by default) is how sign-in / sign-up / contact pages become answerable (e.g. "how do I sign in" → `/login` with its email + password form), and it's fully generic — form shape, no app vocabulary. On the query side, a matched trigger whose form has **no fields** is treated as low-confidence and `howto` prefers `no_match` over surfacing it, so a nav link that merely shares a verb (say "Find a **new** job" for "post a job") is never returned as a confident match.
+
 Re-materializing per probe keeps every click starting from a known state and avoids stale element references across reloads. State signatures fold in ARIA view markers so same-URL views don't collapse into one node.
 
 ## 🏗️ Architecture

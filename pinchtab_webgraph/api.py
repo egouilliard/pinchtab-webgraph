@@ -77,62 +77,77 @@ def howto(
     triggers = graph.get("triggers", [])
     pattern = match or (goal or "")
 
-    # keep in sync with howto.py:main() L209-217 — goal/match trigger selection
+    # keep in sync with howto.py:main() — goal/match trigger selection. The regex hooks
+    # a create-VERB adjacent to a goal noun; the fallback UNION adds any trigger whose
+    # label shares a goal noun as a WHOLE WORD (so form-bearing states like "Sign in" /
+    # "Join now", which carry no create-VERB, are still matchable). Both paths are
+    # word-boundaried + stopword/short-token filtered → no `in`-inside-"Find" hits.
     rx = re.compile(match, re.I) if match else howto_graph.goal_regex(goal or "")
     matches = [t for t in triggers if rx.search(t["label"])]
-    if not matches and goal:
-        nouns = [w for w in goal.lower().split()
-                 if w not in ("a", "the", "create", "add", "new", "make", "to")]
-        matches = [t for t in triggers if any(n in t["label"].lower() for n in nouns)]
+    if goal:
+        from . import recipe
+        nouns = recipe.goal_nouns(goal)
+        if nouns:
+            nrx = re.compile(recipe.noun_alt(nouns), re.I)
+            have = {id(t) for t in matches}
+            matches += [t for t in triggers if id(t) not in have and nrx.search(t["label"])]
     if not matches:
         return {"status": "no_match", "goal": goal, "match_pattern": pattern,
-                "start_url": None, "results": [], "candidates": []}
+                "start_url": None, "results": [], "candidates": [], "low_confidence": []}
 
-    # keep in sync with howto.py:main() L224-228 — start-state resolution
+    # keep in sync with howto.py:main() — start-state resolution
     adj = howto_graph.build_adj(graph)
     start_id = howto_graph.find_start_state(graph, start)
     if start_id is None:
         start_id = howto_graph.find_start_state(graph, None)
+    start_url = states[start_id]["url"] if start_id in states else None
 
-    # keep in sync with howto.py:main() L231-248 — group by state, route, reachability
-    goal_states: dict = {}
-    for t in matches:
-        goal_states.setdefault(t["state"], []).append(t)
+    # keep in sync with howto.py:main() — route each trigger, tag confidence. A match
+    # whose form has NO fields is LOW confidence (a nav control that merely shares a
+    # create-VERB, not a real form); route by trigger so confidence is per-trigger.
+    def _result(epath, t):
+        steps = (["Go to %s" % start_url]
+                 + ["Click “%s”" % e["label"] for e in epath]
+                 + ["Click the “%s” button" % t["label"]])
+        st = states.get(t["state"], {})
+        return {"trigger_label": t["label"], "state_id": t["state"],
+                "state_url": st.get("url"), "clicks": len(steps) - 1, "steps": steps,
+                "opens_at": t.get("opensAt"), "form": t.get("form"),
+                "confidence": howto_graph.form_confidence(t)}
+
+    dist_cache: dict = {}
     routed = []
-    for sid, ts in goal_states.items():
+    for t in matches:
+        sid = t.get("state")
         if sid is None:
             continue
-        gid, epath = howto_graph.bfs(adj, start_id, {sid})
+        if sid not in dist_cache:
+            dist_cache[sid] = howto_graph.bfs(adj, start_id, {sid})
+        gid, epath = dist_cache[sid]
         if gid is None:
             continue
-        routed.append((len(epath), epath, ts))
+        routed.append((len(epath), epath, t, howto_graph.form_confidence(t)))
     if not routed:
         return {"status": "unreachable", "goal": goal, "match_pattern": pattern,
-                "start_url": states[start_id]["url"] if start_id in states else None,
-                "results": [], "candidates": [t["label"] for t in matches]}
+                "start_url": start_url, "results": [],
+                "candidates": [t["label"] for t in matches], "low_confidence": []}
 
-    # keep in sync with howto.py:main() L250-265 — sort, limit, build step list
     routed.sort(key=lambda x: x[0])
-    show = routed if all else routed[:1]
-    start_url = states[start_id]["url"]
-    results = []
-    for _dist, epath, ts in show:
-        t = ts[0]
-        steps = ["Go to %s" % start_url]
-        steps += ["Click “%s”" % e["label"] for e in epath]
-        steps.append("Click the “%s” button" % t["label"])
-        st = states.get(t["state"], {})
-        results.append({
-            "trigger_label": t["label"],
-            "state_id": t["state"],
-            "state_url": st.get("url"),
-            "clicks": len(steps) - 1,
-            "steps": steps,
-            "opens_at": t.get("opensAt"),
-            "form": t.get("form"),
-        })
+    low = [_result(ep, t) for _d, ep, t, c in routed if c == "low"]
+    high = [(d, ep, t) for d, ep, t, c in routed if c == "high"]
+    if not high:
+        # only zero-field / low-confidence matches — prefer no_match over surfacing a
+        # route the user probably didn't ask for (the false-positive guard). The
+        # flagged candidates are still returned under `low_confidence`.
+        return {"status": "no_match", "goal": goal, "match_pattern": pattern,
+                "start_url": start_url, "results": [], "candidates": [],
+                "low_confidence": low}
+
+    show = high if all else high[:1]
+    results = [_result(ep, t) for _d, ep, t in show]
     return {"status": "ok", "goal": goal, "match_pattern": pattern,
-            "start_url": start_url, "results": results, "candidates": []}
+            "start_url": start_url, "results": results, "candidates": [],
+            "low_confidence": low}
 
 
 def _item_text(it: dict) -> str:

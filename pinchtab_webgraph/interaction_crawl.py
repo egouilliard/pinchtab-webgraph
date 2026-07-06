@@ -64,6 +64,29 @@ same_host = recipe.same_host
 # them. NOT destructive (no delete/remove) — we only ever open CREATE forms.
 TRIGGER_RE = re.compile(r"\b(%s)\b" % VERBS, re.I)
 
+# STRUCTURAL form-bearing detection (Finding 2 of issue #11). A create-VERB in a
+# control label is only ONE kind of trigger; many important forms — sign-in, sign-up,
+# contact — carry no create-verb anywhere. So we ALSO treat a state as a trigger
+# target when it structurally IS a form: it renders real input/select/textarea fields
+# PLUS a submit-like control. Generic + structural — keys on form shape (fields +
+# submit affordance), never on app/section vocabulary. Returns {fields, hasPassword,
+# submit} so the caller can gate (≥2 fields, or ≥1 field + a password, + a submit).
+FORM_BEARING_JS = r"""
+(() => {
+  const vis=el=>{const r=el.getBoundingClientRect();return r.width>0&&r.height>0;};
+  const SKIP=new Set(['hidden','submit','button','image','reset','search']);
+  const inputs=[...document.querySelectorAll('input,select,textarea')].filter(el=>{
+    if(!vis(el)) return false;
+    const t=(el.getAttribute('type')||'text').toLowerCase();
+    return !SKIP.has(t);
+  });
+  const hasPw=inputs.some(el=>(el.getAttribute('type')||'').toLowerCase()==='password');
+  const submit=[...document.querySelectorAll(
+    'button,input[type=submit],[type=submit],[role=button]')].some(vis);
+  return {fields:inputs.length, hasPassword:hasPw, submit:submit};
+})()
+"""
+
 NAV_ROLES = ("tab", "menuitem", "menuitemradio", "menuitemcheckbox")
 
 # Single-URL app-shells (e.g. MS Teams) swap views in place WITHOUT changing the URL,
@@ -291,6 +314,15 @@ def main():
                     help="open+read each create form (default on)")
     ap.add_argument("--no-read-forms", dest="read_forms", action="store_false",
                     help="record triggers but skip opening their forms (faster, no form specs)")
+    ap.add_argument("--capture-form-states", dest="capture_form_states",
+                    action="store_true", default=True,
+                    help="ALSO register a state that structurally IS a form (input/select/"
+                         "textarea fields + a submit control) as a trigger target, even "
+                         "when no control carries a create-VERB — so sign-in / sign-up / "
+                         "contact forms are reachable via howto (default ON, generic).")
+    ap.add_argument("--no-capture-form-states", dest="capture_form_states",
+                    action="store_false",
+                    help="only register create-VERB-labeled triggers (legacy behavior)")
     ap.add_argument("--restart-cmd", default="",
                     help="shell command to relaunch the bridge after a wedge "
                          "(empty = no relaunch, just kill the stale PID)")
@@ -402,6 +434,7 @@ def main():
     edges = []             # {from: sig, to: sig, label, selector, kind}
     triggers = []          # {label, state: sig, path: [actions], form, opensAt}
     forms_by_label = {}    # trigger-label -> (form, opensAt): read each unique form ONCE
+    form_state_urls = set()  # norm(url) already registered as a form-bearing trigger (dedup)
     order = [0]
 
     def register(sig, url, label, depth):
@@ -480,6 +513,56 @@ def main():
             triggers.append(rec)
             print("    ✓ trigger %r%s" % (lab, " + form" if rec["form"] else ""),
                   file=sys.stderr)
+
+    # ---- Finding 2: register a state that structurally IS a form (fields + submit)
+    #      as a trigger target, even with no create-VERB anywhere. The "trigger" is the
+    #      nav control that OPENED this form (it lives on the PARENT state) — same shape
+    #      as a create-trigger whose click opens a form: howto routes to the parent,
+    #      then "Click <label>" lands on the form. MUST run BEFORE capture_triggers,
+    #      while the browser is cleanly materialized at this state (capture_triggers may
+    #      navigate away opening full-page create forms). Reached-by-nav only: a pure
+    #      root/inline form is skipped (its /login route, if crawled, is the clean answer). --
+    def capture_form_state(path, sig, psig, pact):
+        if not a.capture_form_states or not path or pact is None or psig is None:
+            return
+        try:
+            fb = pt_json(FORM_BEARING_JS, a.server)
+        except Exception:
+            return
+        fields = fb.get("fields", 0) if isinstance(fb, dict) else 0
+        # a real form: ≥2 fields, or ≥1 field guarded by a password (auth form) — plus a
+        # submit affordance. One search box or a lone filter input won't qualify.
+        if not (fb and fb.get("submit") and
+                (fields >= 2 or (fields >= 1 and fb.get("hasPassword")))):
+            return
+        cur = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
+        nurl = norm(cur)
+        if nurl in form_state_urls:
+            return                                           # this form already registered
+        if any(norm(t.get("opensAt") or "") == nurl for t in triggers if t.get("opensAt")):
+            return                                           # a create-trigger already opens it
+        form = None
+        if a.read_forms:
+            try:
+                form = pt_json(FORM_JS, a.server)            # the form IS the page — no click
+            except Exception as e:
+                print("  ! form-state read failed @ %s (%s)" % (nurl, str(e)[:50]),
+                      file=sys.stderr)
+        # label = what the user clicked to get here ("Sign in"/"Join now"); fall back to
+        # the form title / first submit button when the nav label is empty.
+        label = (pact.get("label") or "").strip()
+        if not label and form:
+            label = (form.get("title") or
+                     (form.get("submitButtons") or [""])[0] or "").strip()
+        if not label:
+            return
+        form_state_urls.add(nurl)
+        triggers.append({"label": label, "state": psig,        # trigger lives on the parent
+                         "path": [{"label": x["label"], "selector": x["selector"],
+                                   "href": x.get("href")} for x in path[:-1]],
+                         "form": form, "opensAt": cur})
+        print("    ✓ form-state trigger %r @ %s (%d fields)"
+              % (label, nurl, (form or {}).get("fieldCount", fields)), file=sys.stderr)
 
     # ---- nav children of a state (what we enqueue to explore) ----
     def nav_children(cur, controls, iframes=()):
@@ -696,6 +779,7 @@ def main():
               % (len(states), visits, len(path), cur, len(controls),
                  (", %d items" % ncol) if a.capture_content else ""), file=sys.stderr)
 
+        capture_form_state(path, sig, psig, pact)   # BEFORE capture_triggers (clean DOM)
         capture_triggers(path, sig, controls)
 
         if a.checkpoint_every > 0 and len(states) % a.checkpoint_every == 0:

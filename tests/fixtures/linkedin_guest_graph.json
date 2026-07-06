@@ -1,0 +1,96 @@
+{
+  "meta": {
+    "start": "https://www.linkedin.com/",
+    "host": "www.linkedin.com",
+    "states": 4,
+    "edges": 3,
+    "triggers": 3,
+    "max_depth": 1,
+    "tool": "interaction_crawl.py"
+  },
+  "states": [
+    {
+      "id": "s0",
+      "url": "https://www.linkedin.com/",
+      "label": "/",
+      "depth": 0
+    },
+    {
+      "id": "s1",
+      "url": "https://www.linkedin.com/jobs",
+      "label": "Find a new job",
+      "depth": 1
+    },
+    {
+      "id": "s2",
+      "url": "https://www.linkedin.com/login",
+      "label": "Sign in",
+      "depth": 1
+    },
+    {
+      "id": "s3",
+      "url": "https://www.linkedin.com/signup",
+      "label": "Join now",
+      "depth": 1
+    }
+  ],
+  "state_index": {
+    "https://www.linkedin.com/": "s0",
+    "https://www.linkedin.com/jobs": "s1",
+    "https://www.linkedin.com/login": "s2",
+    "https://www.linkedin.com/signup": "s3"
+  },
+  "edges": [
+    {"from": "s0", "to": "s1", "label": "Find a new job", "selector": "a:nth-of-type(3)", "kind": "link"},
+    {"from": "s0", "to": "s2", "label": "Sign in", "selector": "a:nth-of-type(1)", "kind": "link"},
+    {"from": "s0", "to": "s3", "label": "Join now", "selector": "a:nth-of-type(2)", "kind": "link"}
+  ],
+  "triggers": [
+    {
+      "label": "Find a new job",
+      "state": "s0",
+      "path": [],
+      "form": {
+        "title": "Jobs",
+        "isDialog": false,
+        "fields": [],
+        "submitButtons": [],
+        "fieldCount": 0
+      },
+      "opensAt": "https://www.linkedin.com/jobs"
+    },
+    {
+      "label": "Sign in",
+      "state": "s0",
+      "path": [],
+      "form": {
+        "title": "Sign in",
+        "isDialog": false,
+        "fields": [
+          {"label": "Email or phone", "type": "text", "required": true, "options": null, "value": null, "placeholder": ""},
+          {"label": "Password", "type": "password", "required": true, "options": null, "value": null, "placeholder": ""}
+        ],
+        "submitButtons": ["Sign in"],
+        "fieldCount": 2
+      },
+      "opensAt": "https://www.linkedin.com/login"
+    },
+    {
+      "label": "Join now",
+      "state": "s0",
+      "path": [],
+      "form": {
+        "title": "Make the most of your professional life",
+        "isDialog": false,
+        "fields": [
+          {"label": "Email", "type": "text", "required": true, "options": null, "value": null, "placeholder": ""},
+          {"label": "Password (6+ characters)", "type": "password", "required": true, "options": null, "value": null, "placeholder": ""},
+          {"label": "First name", "type": "text", "required": true, "options": null, "value": null, "placeholder": ""}
+        ],
+        "submitButtons": ["Agree & Join"],
+        "fieldCount": 3
+      },
+      "opensAt": "https://www.linkedin.com/signup"
+    }
+  ]
+}

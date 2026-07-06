@@ -61,14 +61,25 @@ def bfs(adj, start_id, goal_ids):
 
 
 def goal_regex(goal):
-    nouns = "|".join(w for w in goal.split() if w.lower() not in
-                     ("a", "the", "create", "add", "new", "make", "to"))
-    # match the goal's create-trigger label the same way recipe.py does
-    if nouns:
-        pat = r"(?:%s).{0,30}(?:%s)|(?:%s).{0,30}(?:%s)" % (recipe.VERBS, nouns, nouns, recipe.VERBS)
-    else:
-        pat = r"(?:%s)" % recipe.VERBS
-    return re.compile(pat, re.I)
+    # Match the goal's create-trigger label the same way recipe.py does: a create-VERB
+    # adjacent to a goal noun, in either order. recipe.goal_needle() carries the
+    # WORD-BOUNDARY + short-token/stopword filtering that stops false positives (a
+    # short noun matching inside an unrelated word, or `in`/`a`/`to` matching anywhere).
+    return re.compile(recipe.goal_needle(goal), re.I)
+
+
+def form_field_count(trigger):
+    """How many fields the trigger's captured form has (0 if none / not captured)."""
+    form = trigger.get("form") or {}
+    fc = form.get("fieldCount")
+    return fc if fc is not None else len(form.get("fields") or [])
+
+
+def form_confidence(trigger):
+    """`high` when the trigger opens a real (non-empty) form, else `low`. A zero-field
+    match is typically a nav control that merely shares a create-VERB with the goal
+    ("Find a NEW job"), not a form the user wants — we de-prioritize those."""
+    return "high" if form_field_count(trigger) > 0 else "low"
 
 
 def find_start_state(graph, start_url):
@@ -208,13 +219,15 @@ def main():
 
     rx = re.compile(a.match, re.I) if a.match else goal_regex(a.goal)
     matches = [t for t in triggers if rx.search(t["label"])]
-    if not matches:
-        # generic fallback: any create-verb trigger whose label shares a goal noun
-        if a.goal:
-            nouns = [w for w in a.goal.lower().split()
-                     if w not in ("a", "the", "create", "add", "new", "make", "to")]
-            matches = [t for t in triggers
-                       if any(n in t["label"].lower() for n in nouns)]
+    if a.goal:
+        # generic fallback (UNION, not just on empty): a trigger whose label shares a
+        # goal noun as a whole word — catches form-bearing states (e.g. "Sign in",
+        # "Join now") whose labels carry no create-VERB for the regex to hook onto.
+        nouns = recipe.goal_nouns(a.goal)
+        nrx = re.compile(recipe.noun_alt(nouns), re.I) if nouns else None
+        if nrx:
+            have = {id(t) for t in matches}
+            matches += [t for t in triggers if id(t) not in have and nrx.search(t["label"])]
     if not matches:
         print("✗ No cached trigger matches %r." % (a.match or a.goal))
         print("  → cache miss: refresh with interaction_crawl.py, or run live:")
@@ -227,19 +240,22 @@ def main():
         print("! --start %r not in cache; using the crawl root instead." % a.start, file=sys.stderr)
         start_id = find_start_state(graph, None)
 
-    # for each matching trigger, find the shortest path from start to its state
-    goal_states = {}
-    for t in matches:
-        goal_states.setdefault(t["state"], []).append(t)
-
+    # route each matching trigger, tagging its confidence. A match whose form carries
+    # NO fields (fieldCount 0 / no form) is LOW confidence — usually a nav control that
+    # merely happened to share a create-VERB (e.g. "Find a NEW job"), not a real form.
+    # We route by trigger (not by state) so confidence is per-trigger.
+    dist_cache = {}
     routed = []
-    for sid, ts in goal_states.items():
+    for t in matches:
+        sid = t.get("state")
         if sid is None:
             continue
-        gid, epath = bfs(adj, start_id, {sid})
+        if sid not in dist_cache:
+            dist_cache[sid] = bfs(adj, start_id, {sid})
+        gid, epath = dist_cache[sid]
         if gid is None:
             continue
-        routed.append((len(epath), epath, ts))
+        routed.append((len(epath), epath, t, form_confidence(t)))
     if not routed:
         # trigger exists but unreachable from this start in the cached graph
         print("✗ Matching form(s) exist but no cached path from %s."
@@ -247,11 +263,21 @@ def main():
         print("  Triggers: %s" % ", ".join("“%s”" % t["label"] for t in matches))
         sys.exit(2)
 
+    high = [r for r in routed if r[3] == "high"]
+    if not high:
+        # only zero-field / low-confidence matches survive — prefer no_match over
+        # narrating a route the user probably didn't ask for.
+        routed.sort(key=lambda x: x[0])
+        print("✗ No confident match for %r." % (a.match or a.goal))
+        print("  Low-confidence (zero-field) candidates: %s"
+              % ", ".join("“%s”" % r[2]["label"] for r in routed))
+        sys.exit(2)
+
+    routed = high
     routed.sort(key=lambda x: x[0])
     show = routed if a.all else routed[:1]
     start_url = states[start_id]["url"]
-    for dist, epath, ts in show:
-        t = ts[0]
+    for dist, epath, t, _conf in show:
         steps = ["Go to %s" % start_url]
         steps += ["Click “%s”" % e["label"] for e in epath]
         steps.append("Click the “%s” button" % t["label"])

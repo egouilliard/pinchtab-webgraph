@@ -27,6 +27,29 @@ def sample_link_graph_path():
 
 
 @pytest.fixture
+def linkedin_guest_graph_path():
+    # Models the FIXED interaction crawl of linkedin.com's guest surface (issue #11):
+    # a low-confidence create-VERB nav ("Find a NEW job", 0-field) plus two structurally
+    # detected form-bearing states ("Sign in" -> /login, "Join now" -> /signup).
+    return FIXTURES_DIR / "linkedin_guest_graph.json"
+
+
+@pytest.fixture
+def saas_generic_graph_path():
+    # A DIFFERENT site archetype (generic SaaS, no brand): a 0-field create-VERB nav
+    # ("New Releases"), a form-bearing sign-up, and a form-bearing contact page — proving
+    # the same structural logic generalizes off LinkedIn.
+    return FIXTURES_DIR / "saas_generic_graph.json"
+
+
+@pytest.fixture
+def spanish_app_graph_path():
+    # Spanish-language site: exercises the ES create-VERBs ("nueva"/"añadir") and a
+    # form-bearing "Iniciar sesión" whose label carries NO create-VERB — same code path.
+    return FIXTURES_DIR / "spanish_app_graph.json"
+
+
+@pytest.fixture
 def isolated_cache_home(tmp_path, monkeypatch):
     """Point cache_store at an empty tmp home; return that home Path."""
     monkeypatch.setenv("PINCHTAB_WEBGRAPH_HOME", str(tmp_path))

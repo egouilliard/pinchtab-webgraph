@@ -1,0 +1,70 @@
+{
+  "meta": {
+    "start": "https://app.acme-generic.example/",
+    "host": "app.acme-generic.example",
+    "states": 4,
+    "edges": 3,
+    "triggers": 3,
+    "max_depth": 1,
+    "tool": "interaction_crawl.py"
+  },
+  "states": [
+    {"id": "s0", "url": "https://app.acme-generic.example/", "label": "/", "depth": 0},
+    {"id": "s1", "url": "https://app.acme-generic.example/releases", "label": "New Releases", "depth": 1},
+    {"id": "s2", "url": "https://app.acme-generic.example/register", "label": "Sign up", "depth": 1},
+    {"id": "s3", "url": "https://app.acme-generic.example/contact", "label": "Contact us", "depth": 1}
+  ],
+  "state_index": {
+    "https://app.acme-generic.example/": "s0",
+    "https://app.acme-generic.example/releases": "s1",
+    "https://app.acme-generic.example/register": "s2",
+    "https://app.acme-generic.example/contact": "s3"
+  },
+  "edges": [
+    {"from": "s0", "to": "s1", "label": "New Releases", "selector": "a:nth-of-type(4)", "kind": "link"},
+    {"from": "s0", "to": "s2", "label": "Sign up", "selector": "a:nth-of-type(1)", "kind": "link"},
+    {"from": "s0", "to": "s3", "label": "Contact us", "selector": "a:nth-of-type(2)", "kind": "link"}
+  ],
+  "triggers": [
+    {
+      "label": "New Releases",
+      "state": "s0",
+      "path": [],
+      "form": {"title": "Releases", "isDialog": false, "fields": [], "submitButtons": [], "fieldCount": 0},
+      "opensAt": "https://app.acme-generic.example/releases"
+    },
+    {
+      "label": "Sign up",
+      "state": "s0",
+      "path": [],
+      "form": {
+        "title": "Create your account",
+        "isDialog": false,
+        "fields": [
+          {"label": "Work email", "type": "text", "required": true, "options": null, "value": null, "placeholder": ""},
+          {"label": "Password", "type": "password", "required": true, "options": null, "value": null, "placeholder": ""}
+        ],
+        "submitButtons": ["Sign up"],
+        "fieldCount": 2
+      },
+      "opensAt": "https://app.acme-generic.example/register"
+    },
+    {
+      "label": "Contact us",
+      "state": "s0",
+      "path": [],
+      "form": {
+        "title": "Get in touch",
+        "isDialog": false,
+        "fields": [
+          {"label": "Name", "type": "text", "required": true, "options": null, "value": null, "placeholder": ""},
+          {"label": "Email", "type": "text", "required": true, "options": null, "value": null, "placeholder": ""},
+          {"label": "Message", "type": "textarea", "required": true, "options": null, "value": null, "placeholder": ""}
+        ],
+        "submitButtons": ["Send"],
+        "fieldCount": 3
+      },
+      "opensAt": "https://app.acme-generic.example/contact"
+    }
+  ]
+}

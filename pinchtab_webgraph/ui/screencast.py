@@ -208,6 +208,46 @@ def top_frame_url(msg):
     return frame.get("url") or None
 
 
+def top_frame_id(msg):
+    """The MAIN frame's id from a top-frame ``Page.frameNavigated`` message, else None.
+
+    We record this from the initial hard load so `navigated_within_document_url` can tell a
+    main-frame SPA route change from a subframe one. Pure."""
+    if top_frame_url(msg) is None:
+        return None
+    return (msg.get("params") or {}).get("frame", {}).get("id")
+
+
+def frame_tree_main_frame(msg):
+    """Return the main-frame dict (`{"id","url",…}`) from a CDP ``Page.getFrameTree``
+    reply, else None. The reply shape is ``{"id":…,"result":{"frameTree":{"frame":{…}}}}``.
+    Pure; used to bootstrap the main frame id + initial position. Never raises."""
+    if not isinstance(msg, dict):
+        return None
+    result = msg.get("result")
+    tree = result.get("frameTree") if isinstance(result, dict) else None
+    frame = tree.get("frame") if isinstance(tree, dict) else None
+    return frame if isinstance(frame, dict) else None
+
+
+def navigated_within_document_url(msg, main_frame_id):
+    """Return the URL from a CDP ``Page.navigatedWithinDocument`` message, else None.
+
+    Same-document navigations (SPA ``history.pushState`` / ``replaceState`` / hash changes)
+    do NOT fire ``Page.frameNavigated`` — so a React/Vue app switching tabs would silently
+    leave the tracked position stale. This event catches them. Emits only for the MAIN frame
+    (``frameId == main_frame_id``); a subframe's soft navigation is not "where the user is".
+    When ``main_frame_id`` is None (no hard load seen yet) it accepts best-effort. Pure."""
+    if not isinstance(msg, dict) or msg.get("method") != "Page.navigatedWithinDocument":
+        return None
+    params = msg.get("params")
+    if not isinstance(params, dict):
+        return None
+    if main_frame_id is not None and params.get("frameId") != main_frame_id:
+        return None
+    return params.get("url") or None
+
+
 async def relay_screencast(cdp_ws_or_dispatcher, *, emit, fmt="jpeg", quality=70,
                            max_width=1600, max_height=1000, every_nth_frame=1):
     """Drive Chrome's screencast over a CDP socket and stream frames out through ``emit``.
@@ -237,8 +277,21 @@ async def relay_screencast(cdp_ws_or_dispatcher, *, emit, fmt="jpeg", quality=70
             "maxHeight": max_height,
             "everyNthFrame": every_nth_frame,
         })
+        # Bootstrap the frame model. Page.enable does NOT replay the page's
+        # already-committed navigation — and in the real flow the initial hard load
+        # happened during Chrome startup, long before this socket connected — so we ask
+        # for the current frame tree explicitly (Puppeteer does the same). Its reply gives
+        # us the main frame id (to scope SPA soft-navs below to the main frame, NOT a
+        # third-party iframe) AND the current URL (the initial position). Sent
+        # fire-and-forget because relay is the SOLE reader of cdp_ws — a dispatcher.request
+        # here would deadlock (nothing else drains recv); the reply is matched by id in the
+        # loop instead.
+        frame_tree_id = await dispatcher.send_nowait("Page.getFrameTree")
+
         # width/height are unknown until the first frame's metadata arrives.
         await emit({"type": "status", "state": "live", "width": None, "height": None})
+
+        main_frame_id = None   # learned from the frame tree / first hard load
 
         while True:
             try:
@@ -255,10 +308,30 @@ async def relay_screencast(cdp_ws_or_dispatcher, *, emit, fmt="jpeg", quality=70
             # never mistaken for a screencast frame.
             if dispatcher._resolve(msg):
                 continue
-            # A top-frame navigation (the user clicked to a new page) → tell the client
-            # where the live browser now is, so it can feed the chat agent the position.
+            # The bootstrap Page.getFrameTree reply: seed the main frame id + emit the
+            # current position. Matched by its own id (send_nowait replies are not routed
+            # through _resolve, which only tracks request() futures).
+            if msg.get("id") == frame_tree_id:
+                frame = frame_tree_main_frame(msg)
+                if frame:
+                    main_frame_id = frame.get("id") or main_frame_id
+                    if frame.get("url"):
+                        await emit({"type": "location", "url": frame["url"]})
+                continue
+            # A hard top-frame navigation (initial load / full page load) → tell the client
+            # where the live browser now is, and remember the main frame id so we can scope
+            # the SPA soft-navigations below to it.
             if msg.get("method") == "Page.frameNavigated":
                 loc = top_frame_url(msg)
+                if loc:
+                    main_frame_id = top_frame_id(msg) or main_frame_id
+                    await emit({"type": "location", "url": loc})
+                continue
+            # A same-document navigation (SPA route change via history.pushState — how most
+            # apps switch tabs/pages WITHOUT reloading). frameNavigated never fires for these,
+            # so without this the tracked position goes stale the moment the user clicks a tab.
+            if msg.get("method") == "Page.navigatedWithinDocument":
+                loc = navigated_within_document_url(msg, main_frame_id)
                 if loc:
                     await emit({"type": "location", "url": loc})
                 continue

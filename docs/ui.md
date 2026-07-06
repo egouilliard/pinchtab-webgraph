@@ -312,10 +312,15 @@ is no arbitrary client eval, and CDP stays loopback-only.
 The chat agent knows **where the live browser currently is**, so it routes from your
 current page instead of always from the crawl root:
 
-1. As the live pane's headless Chrome navigates (you click around, or a tour advances),
-   its top-frame `Page.frameNavigated` events (`screencast.top_frame_url`, main frame only —
-   subframe/iframe navigations are ignored) are relayed out as `{"type":"location","url":…}`
-   frames.
+1. As the live pane's headless Chrome navigates (you click around, or a tour advances) its
+   position is relayed out as `{"type":"location","url":…}` frames, main frame only
+   (subframe/iframe navigations are ignored). BOTH navigation kinds are tracked:
+   - hard loads / full page navigations → CDP `Page.frameNavigated` (`screencast.top_frame_url`);
+   - **SPA soft navigations** (a React/Vue app switching tabs via `history.pushState` /
+     `replaceState` / hash changes, which do NOT fire `frameNavigated`) → CDP
+     `Page.navigatedWithinDocument` (`screencast.navigated_within_document_url`), scoped to
+     the main frame via the id learned from the first hard load. Without this the tracked
+     position would go stale the moment you switched tabs inside a single-page app.
 2. The SPA stores the latest as `currentLiveUrl` (reset on host switch) and sends it as
    `live_url` on the next `user_message`.
 3. The server threads `live_url` into the turn via `chat.augment_with_location` (shared by

@@ -566,11 +566,16 @@ def test_real_chrome_emits_jpeg_frame():
 
 # --- top_frame_url + relay location frames (live-position awareness) ----------
 
-def _frame_navigated_msg(url="https://site.test/settings", parent_id=None):
-    frame = {"url": url}
+def _frame_navigated_msg(url="https://site.test/settings", parent_id=None, frame_id="MAIN"):
+    frame = {"url": url, "id": frame_id}
     if parent_id is not None:
         frame["parentId"] = parent_id
     return json.dumps({"method": "Page.frameNavigated", "params": {"frame": frame}})
+
+
+def _within_doc_msg(url="https://site.test/settings?tab=team", frame_id="MAIN"):
+    return json.dumps({"method": "Page.navigatedWithinDocument",
+                       "params": {"frameId": frame_id, "url": url}})
 
 
 def test_top_frame_url_returns_main_frame_url():
@@ -610,3 +615,94 @@ def test_relay_emits_location_on_top_frame_navigation():
     assert locs and locs[0]["url"] == "https://site.test/settings"
     # the screencast frame still flows normally after the location frame.
     assert any(f["type"] == "frame" for f in frames)
+
+
+# --- SPA soft-navigation tracking (Page.navigatedWithinDocument) --------------
+
+def test_top_frame_id_returns_main_frame_id():
+    assert screencast.top_frame_id(json.loads(_frame_navigated_msg(frame_id="F0"))) == "F0"
+    # subframe / non-frameNavigated -> None
+    assert screencast.top_frame_id(json.loads(_frame_navigated_msg(parent_id="P"))) is None
+    assert screencast.top_frame_id(json.loads(_screencast_frame_msg())) is None
+
+
+def test_navigated_within_document_url_main_frame_match():
+    msg = json.loads(_within_doc_msg("https://site.test/settings?tab=team", frame_id="MAIN"))
+    assert screencast.navigated_within_document_url(msg, "MAIN") == "https://site.test/settings?tab=team"
+
+
+def test_navigated_within_document_url_ignores_subframe():
+    msg = json.loads(_within_doc_msg("https://site.test/x", frame_id="SUB"))
+    assert screencast.navigated_within_document_url(msg, "MAIN") is None
+
+
+def test_navigated_within_document_url_accepts_when_main_unknown():
+    # before any hard load, main_frame_id is None -> accept best-effort.
+    msg = json.loads(_within_doc_msg("https://site.test/y", frame_id="ANY"))
+    assert screencast.navigated_within_document_url(msg, None) == "https://site.test/y"
+
+
+def test_navigated_within_document_url_none_for_other_messages():
+    assert screencast.navigated_within_document_url(json.loads(_screencast_frame_msg()), "MAIN") is None
+    assert screencast.navigated_within_document_url({"method": "Page.navigatedWithinDocument",
+                                                     "params": "oops"}, None) is None
+    assert screencast.navigated_within_document_url("not a dict", None) is None
+
+
+def test_relay_emits_location_on_spa_soft_navigation():
+    # hard load (learns main frame id) then a pushState soft-nav on the SAME frame.
+    ws = FakeCDPWebSocket([
+        _frame_navigated_msg("https://site.test/", frame_id="MAIN"),
+        _within_doc_msg("https://site.test/settings?tab=team", frame_id="MAIN"),
+        _screencast_frame_msg(),
+    ])
+    frames = []
+    asyncio.run(screencast.relay_screencast(ws, emit=lambda f: frames.append(f) or _aw()))
+    urls = [f["url"] for f in frames if f["type"] == "location"]
+    assert urls == ["https://site.test/", "https://site.test/settings?tab=team"]
+
+
+def test_relay_ignores_subframe_soft_navigation():
+    ws = FakeCDPWebSocket([
+        _frame_navigated_msg("https://site.test/", frame_id="MAIN"),
+        _within_doc_msg("https://ads.test/frame", frame_id="SUBFRAME"),  # subframe -> ignored
+    ])
+    frames = []
+    asyncio.run(screencast.relay_screencast(ws, emit=lambda f: frames.append(f) or _aw()))
+    urls = [f["url"] for f in frames if f["type"] == "location"]
+    assert urls == ["https://site.test/"]   # only the hard load, not the subframe soft-nav
+
+
+async def _aw():
+    return None
+
+
+# --- bootstrap the main frame id + initial position from Page.getFrameTree ----
+
+def test_frame_tree_main_frame_extracts_frame():
+    reply = {"id": 3, "result": {"frameTree": {"frame": {"id": "MAIN", "url": "https://s/"}}}}
+    assert screencast.frame_tree_main_frame(reply) == {"id": "MAIN", "url": "https://s/"}
+    # malformed / missing shapes -> None, never raises.
+    assert screencast.frame_tree_main_frame({"id": 3, "result": "oops"}) is None
+    assert screencast.frame_tree_main_frame({"id": 3, "result": {"frameTree": {}}}) is None
+    assert screencast.frame_tree_main_frame("not a dict") is None
+
+
+def test_relay_bootstraps_position_and_scopes_soft_navs_from_frame_tree():
+    # relay sends Page.enable(1), Page.startScreencast(2), Page.getFrameTree(3); the reply
+    # with id==3 seeds the initial position + main frame id, so a subsequent SUBFRAME
+    # soft-nav is filtered while a MAIN-frame soft-nav is emitted.
+    ws = FakeCDPWebSocket([
+        json.dumps({"id": 3, "result": {"frameTree": {"frame": {"id": "MAIN",
+                                                                 "url": "https://site.test/dash"}}}}),
+        _within_doc_msg("https://ads.test/x", frame_id="SUB"),                     # filtered
+        _within_doc_msg("https://site.test/settings?tab=team", frame_id="MAIN"),   # emitted
+    ])
+    frames = []
+    asyncio.run(screencast.relay_screencast(ws, emit=lambda f: frames.append(f) or _aw2()))
+    urls = [f["url"] for f in frames if f["type"] == "location"]
+    assert urls == ["https://site.test/dash", "https://site.test/settings?tab=team"]
+
+
+async def _aw2():
+    return None

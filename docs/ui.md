@@ -159,7 +159,7 @@ filesystem-path parameter over HTTP.
 | `GET /api/hosts/{host}/summary` | `api.graph_summary` | graph kind + meta + element counts |
 | `GET /api/hosts/{host}/graph` | `cache_store.load` | the full raw interaction graph (the large payload, on demand) |
 | `GET /api/hosts/{host}/forms` | `api.list_forms` | every create-form: label, host, depth, field count |
-| `GET /api/hosts/{host}/howto?goal=&start=&match=&all=` | `api.howto` | shortest click-path(s) to a create-trigger + its form |
+| `GET /api/hosts/{host}/howto?goal=&start=&match=&all=` | `api.howto` | shortest click-path(s) to a create-trigger + its form; each result also carries an additive `tour` field (the [Show Me How](#show-me-how-guided-tour) highlight steps) |
 | `GET /api/hosts/{host}/content` | `api.list_content` | per-view inventory of captured collections |
 | `GET /api/hosts/{host}/content/search?text=&start=&limit=` | `api.find_content` | search captured collections for text; `text` required, `limit` default 40 |
 
@@ -231,6 +231,7 @@ the same frames below and enforce the same offline-only tool lockdown.
 | `{"type":"text","delta":<str>}` | a streamed text delta of the reply |
 | `{"type":"tool_use","name":<str>,"input":<dict>}` | the agent is about to call a tool |
 | `{"type":"tool_result","name":<str>,"status":"ok"\|"error"}` | a tool returned |
+| `{"type":"tour","data":{"goal","start_url","trigger_label","opens_at","form","steps":[…]}}` | a **"Show Me How"** guided tour — emitted once after an OK `howto` tool result (from its FIRST result's `tour` field). `steps` is the ordered highlight list; the SPA replays it on the live pane. See [Show Me How guided tour](#show-me-how-guided-tour). |
 | `{"type":"done"}` | end of the turn (exactly once) |
 | `{"type":"error","detail":<str>}` | a per-turn error (e.g. tool-iteration limit) |
 | `{"type":"error","status":"invalid_host",…}` | bad host token; the socket then closes |
@@ -243,8 +244,18 @@ headless Chrome** (`--remote-debugging-port`, loopback-only — never
 `--remote-debugging-address`), navigates it to the host's home page, best-effort logs it
 in via `login.py` + the vault **only if** a bridge is configured via
 `PINCHTAB_WEBGRAPH_BRIDGE`, then relays Chrome's `Page.startScreencast` frames (base64
-JPEG) out to an `<img>`. This direction is **read-only**: Phase 4 does not wire
-client→server input or resize (deferred). `MAX_LIVE_SESSIONS` (3) caps concurrency.
+JPEG) out to an `<img>`. The socket is **bidirectional**: the client also sends `input`
+frames (mouse / wheel / keyboard) and `locate` probes for the guided tour, which a single
+`CdpDispatcher` turns into CDP commands on the one shared CDP socket (demuxing id-bearing
+command replies from method-bearing screencast events). `MAX_LIVE_SESSIONS` (3) caps
+concurrency.
+
+**Client → server:**
+
+| Frame | Meaning |
+| --- | --- |
+| `{"type":"input","kind":<str>,…}` | one input event, coords already in viewport CSS pixels; mapped to a CDP `Input.*` command via a tight allow-list (`kind`: `mousemoved` / `mousepressed` / `mousereleased` / `wheel` / `text` / `keydown` / `keyup`). Fire-and-forget; an unknown `kind` is a silent no-op |
+| `{"type":"locate","stepId":<int>,"selector":<str\|null>,"label":<str>}` | resolve a tour step's element in the live page; the server replies with a `located` frame. Used by [Show Me How](#show-me-how-guided-tour) |
 
 **Server → client:**
 
@@ -253,6 +264,7 @@ client→server input or resize (deferred). `MAX_LIVE_SESSIONS` (3) caps concurr
 | `{"type":"status","state":"live","authenticated":<bool\|None>,"reason":<str\|None>}` | session is up; whether best-effort login succeeded |
 | `{"type":"status","state":"live","width":…,"height":…}` | screencast started (dimensions arrive with the first frame) |
 | `{"type":"frame","data":<base64 str>,"metadata":<dict>}` | one screencast frame |
+| `{"type":"located","stepId":<int>,"rect":{x,y,width,height}\|null}` | reply to a `locate`: the resolved element's rect in viewport CSS pixels, or `null` when not found (the overlay then falls back to "click it yourself" and keeps Next enabled). Best-effort — never an error |
 | `{"type":"stopped"}` | the CDP stream ended |
 | `{"type":"error","status":"invalid_host",…}` | bad host token; the socket closes |
 | `{"type":"error","status":"too_many_sessions","max":3}` | at the `MAX_LIVE_SESSIONS` cap |
@@ -260,6 +272,39 @@ client→server input or resize (deferred). `MAX_LIVE_SESSIONS` (3) caps concurr
 
 The CDP URL, the debugging port, and the bridge URL/token **never** appear in any frame —
 only frame/status/error dicts leave the relay loop.
+
+### Show Me How guided tour
+
+When the chat answers a "how do I get to X" question, its reply carries a **"Show me How"**
+button (from the `tour` frame above). Clicking it starts an onboarding overlay **on the
+live browser pane**: step `1..n`, each highlighting exactly where to click on the live
+preview, with **Prev / Next / Done**. **Next performs the real click** — it drives the live
+browser forward via the existing `input` channel and moves the highlight to the next
+target — until the user lands on the target form. The tour **stops there: it never
+auto-submits the form**. That guarantee is structural — the terminal `form` step (and the
+`trigger` step) carries no selector, so there is nothing for Next to click past the form.
+
+Each step is resolved with a `locate` → `located` round-trip: the SPA sends the step's
+`selector` + `label`, and the server resolves the element in the live headless Chrome via a
+single CDP `Runtime.evaluate` — CSS selector first, then a case-insensitive text match of
+`label` against a fixed interactive allow-list (`a, button, [role=button], [role=link],
+[role=menuitem]`) — and replies with the element's `rect` in viewport CSS pixels (or `null`
+when not found, which drops the step to a "click it yourself" fallback with Next still
+enabled). The SPA's `rectToDisplay()` (the inverse of the pane's `liveCoords()`
+`object-fit: contain` math) maps that rect to a highlight box over the displayed `<img>`.
+
+The steps come from the `tour` field now on every `api.howto()` result (and the REST
+`/api/hosts/{host}/howto` response): an ordered list derived from the same offline routing
+edges as the text `steps` — zero+ `nav` steps (`{"kind":"nav","label","selector","href"}`,
+one per routing edge) → one `trigger` step (`{"kind":"trigger","label","selector":null,
+"href":null}`, the trigger's own click, resolved by label) → a terminal `{"kind":"form"}`
+marker. It is purely **additive**: the existing `steps` / `form` / `opens_at` fields are
+unchanged.
+
+The locate expression is a **fixed, injection-safe JS template**
+(`screencast.build_locate_expression`): `selector` and `label` are embedded only as
+`json.dumps()`-escaped, length-capped string literals — never as executable code — so there
+is no arbitrary client eval, and CDP stays loopback-only.
 
 ## Environment variables
 
@@ -309,8 +354,9 @@ only frame/status/error dicts leave the relay loop.
 - **Live login needs a running bridge.** Without `PINCHTAB_WEBGRAPH_BRIDGE` (or a stored
   credential) the live pane still opens, just unauthenticated. Login is best-effort and
   never load-bearing: any failure degrades silently to an unauthenticated session.
-- **The live pane is view-only for now.** Client→server input and resize are deferred
-  (Phase 4 relays frames one way).
+- **The live pane is interactive.** Client→server input (mouse / wheel / keyboard) is
+  wired, and the [Show Me How guided tour](#show-me-how-guided-tour) drives real clicks over
+  the live page. Resize is still deferred.
 - **One Chrome + one MCP subprocess per connection.** Each live-pane socket launches a
   private headless Chrome; each chat socket spawns a pinchtab-webgraph MCP stdio
   subprocess. `MAX_LIVE_SESSIONS` (3) caps concurrent Chrome instances.

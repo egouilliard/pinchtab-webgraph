@@ -156,6 +156,8 @@ For a point-and-click front end there's also an **optional local web UI** — a 
 
 The chat pane can reach Claude two ways: the **Anthropic API** (`ANTHROPIC_API_KEY`, the default when a key is set) or your **locally-logged-in Claude Code** with no API key (add the separate `[ui-claude-code]` extra + a logged-in `claude` CLI). Both are locked to the same six offline graph tools. See [Chat backends](docs/ui.md#chat-backends).
 
+A "how do I get to X" chat answer also offers a **"Show me How"** button: a guided tour that highlights each step directly on the live browser pane and, on **Next**, performs the real click to advance — stopping at the target form without ever submitting it. See [Show Me How guided tour](docs/ui.md#show-me-how-guided-tour).
+
 Only the **base install** (`pip install pinchtab-webgraph`, pure stdlib) is needed for the CLI and the UTCP manual; the MCP server and the web UI each live behind an optional extra (`[mcp]` / `[ui]`) so the base package stays dependency-free.
 
 > On externally-managed Python (Debian/Ubuntu, PEP 668) install the extras into a venv, or use `pip install --user --break-system-packages 'pinchtab-webgraph[mcp]'`.

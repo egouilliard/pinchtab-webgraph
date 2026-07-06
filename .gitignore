@@ -17,6 +17,8 @@ __pycache__/
 
 # generated outputs (graphs, how-tos, screenshots, benchmarks)
 *.html
+# ...but DO track the packaged web-UI static assets (shipped in the wheel)
+!pinchtab_webgraph/ui/static/*.html
 *.png
 *.output
 leytongo-*.json

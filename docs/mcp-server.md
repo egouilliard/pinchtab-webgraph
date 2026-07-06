@@ -1,6 +1,6 @@
 # MCP server
 
-> **Docs:** [← README](../README.md) · [📚 Index](README.md) · [UTCP interface](utcp.md) · [Authenticated login](authenticated-login.md)
+> **Docs:** [← README](../README.md) · [📚 Index](README.md) · [UTCP interface](utcp.md) · [Web UI](ui.md) · [Authenticated login](authenticated-login.md)
 
 `pinchtab-webgraph` ships an optional [Model Context Protocol](https://modelcontextprotocol.io)
 server that exposes the offline graph queries — and two live browser-driven tools —

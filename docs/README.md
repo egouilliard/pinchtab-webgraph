@@ -11,6 +11,7 @@ Start with the **[main README](../README.md)** for what the project is, install,
 | **[Main README](../README.md)** | Overview, requirements, install, quickstart, the tools, [three ways to call it](../README.md#-three-ways-to-call-it), architecture, graph shape, safety model, roadmap. |
 | **[MCP server](mcp-server.md)** | Run the Model Context Protocol server (`pinchtab-webgraph-mcp`): the `[mcp]` extra, `.mcp.json` registration, the tool + resource inventory, env vars, and the safety model for the live tools. |
 | **[UTCP interface](utcp.md)** | The Universal Tool Calling Protocol manual: `pwg query` (JSON) + `pwg manual` / `--serve`, the 8 exposed tools, the deliberate scope subset, and the `query` exit-code convention. |
+| **[Web UI](ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the two-pane SPA, the REST API + vault endpoints, the chat + screencast WebSockets, env vars, and the loopback-only security model. |
 | **[Authenticated login](authenticated-login.md)** | Crawl sites behind a login safely: hand-login vs. keyring-backed automated login, where secrets live, the threat model, sandbox/bot-account isolation, and how to test it. |
 
 ## The three interfaces at a glance

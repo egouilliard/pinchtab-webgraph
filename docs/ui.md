@@ -222,7 +222,7 @@ the same frames below and enforce the same offline-only tool lockdown.
 
 | Frame | Meaning |
 | --- | --- |
-| `{"type":"user_message","text":<str>}` | a user turn; any other `type` is ignored |
+| `{"type":"user_message","text":<str>,"live_url":<str\|null>}` | a user turn; the optional `live_url` is the live pane's current page (tracked by the SPA from screencast `location` frames). When present it is folded into the turn so the agent calls `howto` with `start=<live_url>` and routes **from where the user is**, not the crawl root. See [Live-position awareness](#live-position-awareness). Any other `type` is ignored |
 
 **Server → client:**
 
@@ -264,6 +264,7 @@ concurrency.
 | `{"type":"status","state":"live","authenticated":<bool\|None>,"reason":<str\|None>}` | session is up; whether best-effort login succeeded |
 | `{"type":"status","state":"live","width":…,"height":…}` | screencast started (dimensions arrive with the first frame) |
 | `{"type":"frame","data":<base64 str>,"metadata":<dict>}` | one screencast frame |
+| `{"type":"location","url":<str>}` | the live page navigated (top frame only) — the SPA tracks it as the current position and sends it as `live_url` on the next chat message. See [Live-position awareness](#live-position-awareness) |
 | `{"type":"located","stepId":<int>,"rect":{x,y,width,height}\|null}` | reply to a `locate`: the resolved element's rect in viewport CSS pixels, or `null` when not found (the overlay then falls back to "click it yourself" and keeps Next enabled). Best-effort — never an error |
 | `{"type":"stopped"}` | the CDP stream ended |
 | `{"type":"error","status":"invalid_host",…}` | bad host token; the socket closes |
@@ -305,6 +306,27 @@ The locate expression is a **fixed, injection-safe JS template**
 (`screencast.build_locate_expression`): `selector` and `label` are embedded only as
 `json.dumps()`-escaped, length-capped string literals — never as executable code — so there
 is no arbitrary client eval, and CDP stays loopback-only.
+
+### Live-position awareness
+
+The chat agent knows **where the live browser currently is**, so it routes from your
+current page instead of always from the crawl root:
+
+1. As the live pane's headless Chrome navigates (you click around, or a tour advances),
+   its top-frame `Page.frameNavigated` events (`screencast.top_frame_url`, main frame only —
+   subframe/iframe navigations are ignored) are relayed out as `{"type":"location","url":…}`
+   frames.
+2. The SPA stores the latest as `currentLiveUrl` (reset on host switch) and sends it as
+   `live_url` on the next `user_message`.
+3. The server threads `live_url` into the turn via `chat.augment_with_location` (shared by
+   **both** chat backends): the message is prefixed with the current URL and an instruction
+   to call `howto` with `start=<live_url>`, so the click-path and the **Show Me How** tour
+   begin from where you are.
+
+It is fully additive and degrades cleanly: when `live_url` is absent (the client didn't send
+one, or the pane hasn't navigated yet) the agent routes from the crawl's default start, exactly
+as before. The live URL is untrusted site data, but it only ever travels to the model as text —
+it is never rendered as HTML.
 
 ## Environment variables
 

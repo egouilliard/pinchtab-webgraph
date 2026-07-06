@@ -538,3 +538,33 @@ def test_ws_chat_invalid_host_error_and_close():
         frame = ws.receive_json()
         assert frame["type"] == "error"
         assert frame["status"] == "invalid_host"
+
+
+# --- augment_with_location (live-position awareness) ---------------------------
+
+def test_augment_with_location_none_returns_text_unchanged():
+    assert chat.augment_with_location("hello", None) == "hello"
+    assert chat.augment_with_location("hello", "") == "hello"
+
+
+def test_augment_with_location_prefixes_url_and_start_instruction():
+    out = chat.augment_with_location("how do I add a CAE?", "https://site.test/settings")
+    assert "https://site.test/settings" in out
+    assert 'start="https://site.test/settings"' in out
+    assert out.endswith("how do I add a CAE?")   # original text preserved at the end
+
+
+def test_handle_user_message_folds_live_url_into_the_turn():
+    # handle_user_message should append a user turn whose content carries the live URL.
+    async def fake_turn(state, *, emit):
+        pass
+
+    import asyncio
+    from unittest import mock
+    state = chat.ChatState(host="site.test")
+    with mock.patch.object(chat, "run_conversation_turn", side_effect=fake_turn):
+        asyncio.run(chat.handle_user_message(state, "where are stages?",
+                                             emit=lambda f: None,
+                                             live_url="https://site.test/settings"))
+    assert state.messages[-1]["role"] == "user"
+    assert "https://site.test/settings" in state.messages[-1]["content"]

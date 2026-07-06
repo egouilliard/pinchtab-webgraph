@@ -299,14 +299,17 @@ async def run_conversation_turn(client, text, *, emit):
         # SystemMessage (and its task/hook subclasses) and anything else: no-op.
 
 
-async def handle_user_message(client, text, *, emit):
+async def handle_user_message(client, text, *, emit, live_url=None):
     """Run one turn. NEVER raises into the WebSocket; the client survives for reuse.
 
     Mirrors chat.handle_user_message: any ChatUnavailable / SDK / transport error is
-    reported as a single structured {"type":"error", ...} frame.
+    reported as a single structured {"type":"error", ...} frame. ``live_url`` (the live
+    pane's current page) is folded in via the SHARED ``chat.augment_with_location`` so
+    both backends learn the user's position identically.
     """
     try:
-        await run_conversation_turn(client, text, emit=emit)
+        await run_conversation_turn(client, chat.augment_with_location(text, live_url),
+                                    emit=emit)
     except chat.ChatUnavailable as e:
         await emit({"type": "error", "status": "chat_unavailable",
                     "reason": e.reason, "detail": e.detail})

@@ -562,3 +562,51 @@ def test_real_chrome_emits_jpeg_frame():
             await screencast.terminate_chrome(proc, udir)
 
     asyncio.run(run())
+
+
+# --- top_frame_url + relay location frames (live-position awareness) ----------
+
+def _frame_navigated_msg(url="https://site.test/settings", parent_id=None):
+    frame = {"url": url}
+    if parent_id is not None:
+        frame["parentId"] = parent_id
+    return json.dumps({"method": "Page.frameNavigated", "params": {"frame": frame}})
+
+
+def test_top_frame_url_returns_main_frame_url():
+    msg = json.loads(_frame_navigated_msg("https://site.test/x"))
+    assert screencast.top_frame_url(msg) == "https://site.test/x"
+
+
+def test_top_frame_url_ignores_subframe():
+    msg = json.loads(_frame_navigated_msg("https://site.test/iframe", parent_id="F1"))
+    assert screencast.top_frame_url(msg) is None
+
+
+def test_top_frame_url_none_for_other_messages():
+    assert screencast.top_frame_url(json.loads(_screencast_frame_msg())) is None
+    assert screencast.top_frame_url({"method": "Page.frameNavigated"}) is None  # no frame
+    assert screencast.top_frame_url({"method": "Page.frameNavigated",
+                                     "params": {"frame": {}}}) is None          # no url
+    assert screencast.top_frame_url("not a dict") is None
+    # malformed (non-dict) params / frame must not raise, just return None.
+    assert screencast.top_frame_url({"method": "Page.frameNavigated",
+                                     "params": "oops"}) is None
+    assert screencast.top_frame_url({"method": "Page.frameNavigated",
+                                     "params": {"frame": "oops"}}) is None
+
+
+def test_relay_emits_location_on_top_frame_navigation():
+    ws = FakeCDPWebSocket([_frame_navigated_msg("https://site.test/settings"),
+                           _screencast_frame_msg()])
+    frames = []
+
+    async def emit(f):
+        frames.append(f)
+
+    asyncio.run(screencast.relay_screencast(ws, emit=emit))
+
+    locs = [f for f in frames if f["type"] == "location"]
+    assert locs and locs[0]["url"] == "https://site.test/settings"
+    # the screencast frame still flows normally after the location frame.
+    assert any(f["type"] == "frame" for f in frames)

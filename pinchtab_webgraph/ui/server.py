@@ -287,6 +287,7 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...)):
                 if msg.get("type") != "user_message":
                     continue
                 await session.handle(msg.get("text", ""),
+                                     live_url=msg.get("live_url"),
                                      emit=websocket.send_json)
     except chat_backend.ChatUnavailable as e:
         await websocket.send_json({"type": "error", "status": "chat_unavailable",

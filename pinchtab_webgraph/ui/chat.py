@@ -328,13 +328,32 @@ async def run_conversation_turn(state, *, emit, model=None, max_tokens=1024,
     await emit({"type": "done"})
 
 
-async def handle_user_message(state, text, *, emit):
+def augment_with_location(text, live_url):
+    """Prefix the user's message with the live browser's current URL when known.
+
+    This is how the agent learns "where the user is": the client tracks the live pane's
+    position (from screencast `location` frames) and sends it with each message; we fold
+    it into the turn so the agent calls `howto` with start=<live_url> and the steps +
+    tour begin from the current page, not the crawl root. Pure + shared by BOTH chat
+    backends; returns `text` unchanged when live_url is falsy. Live-site text is
+    untrusted, but this only ever travels to the model (never rendered as HTML).
+    """
+    if not live_url:
+        return text
+    return ("[Context: the live browser pane is currently on %s. If I ask how to reach "
+            "or do something, call the howto tool with start=\"%s\" so the click-path "
+            "and tour start from this page.]\n\n%s" % (live_url, live_url, text))
+
+
+async def handle_user_message(state, text, *, emit, live_url=None):
     """Append a user message and run one conversation turn. NEVER raises into the WS.
 
     Any ChatUnavailable / anthropic error / mcp transport error is reported as a
     single {"type":"error", ...} frame so the WebSocket route never sees an exception.
+    ``live_url`` (the live browser pane's current page, when known) is folded into the
+    turn so the agent routes from where the user actually is.
     """
-    state.messages.append({"role": "user", "content": text})
+    state.messages.append({"role": "user", "content": augment_with_location(text, live_url)})
     try:
         await run_conversation_turn(state, emit=emit)
     except ChatUnavailable as e:

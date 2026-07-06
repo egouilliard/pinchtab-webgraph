@@ -67,9 +67,10 @@ def test_open_chat_session_claude_code_dispatch(monkeypatch):
 
     recorded = {}
 
-    async def fake_handle(client, text, *, emit):
+    async def fake_handle(client, text, *, emit, live_url=None):
         recorded["client"] = client
         recorded["text"] = text
+        recorded["live_url"] = live_url
         await emit({"type": "done"})
 
     monkeypatch.setattr(chat_backend.chat_claude_code, "open_client", fake_open_client)
@@ -84,12 +85,13 @@ def test_open_chat_session_claude_code_dispatch(monkeypatch):
         async with chat_backend.open_chat_session(
                 "example.test", backend_name="claude_code") as session:
             assert isinstance(session, chat_backend._ClaudeCodeSession)
-            await session.handle("hi there", emit=emit)
+            await session.handle("hi there", emit=emit, live_url="https://example.test/y")
 
     _run(go())
     assert opened == ["example.test"]
     assert recorded["client"] is fake_client
     assert recorded["text"] == "hi there"
+    assert recorded["live_url"] == "https://example.test/y"   # threaded through
     assert frames == [{"type": "done"}]
 
 
@@ -104,9 +106,10 @@ def test_open_chat_session_api_dispatch(monkeypatch):
 
     recorded = {}
 
-    async def fake_handle(state, text, *, emit):
+    async def fake_handle(state, text, *, emit, live_url=None):
         recorded["state"] = state
         recorded["text"] = text
+        recorded["live_url"] = live_url
         await emit({"type": "done"})
 
     monkeypatch.setattr(chat_backend, "_open_api_session", fake_open_api)
@@ -121,11 +124,12 @@ def test_open_chat_session_api_dispatch(monkeypatch):
         async with chat_backend.open_chat_session(
                 "example.test", backend_name="api") as session:
             assert isinstance(session, chat_backend._ApiSession)
-            await session.handle("hey", emit=emit)
+            await session.handle("hey", emit=emit, live_url="https://example.test/x")
 
     _run(go())
     assert recorded["state"] is fake_state
     assert recorded["text"] == "hey"
+    assert recorded["live_url"] == "https://example.test/x"   # threaded through
     assert frames == [{"type": "done"}]
 
 

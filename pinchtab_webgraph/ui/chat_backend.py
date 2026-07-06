@@ -73,8 +73,8 @@ class _ApiSession:
     """Uniform session wrapper over the API backend's ChatState."""
     state: object
 
-    async def handle(self, text, *, emit):
-        await chat.handle_user_message(self.state, text, emit=emit)
+    async def handle(self, text, *, emit, live_url=None):
+        await chat.handle_user_message(self.state, text, emit=emit, live_url=live_url)
 
 
 @dataclass
@@ -82,8 +82,9 @@ class _ClaudeCodeSession:
     """Uniform session wrapper over the Claude Code backend's SDK client."""
     client: object
 
-    async def handle(self, text, *, emit):
-        await chat_claude_code.handle_user_message(self.client, text, emit=emit)
+    async def handle(self, text, *, emit, live_url=None):
+        await chat_claude_code.handle_user_message(self.client, text, emit=emit,
+                                                   live_url=live_url)
 
 
 @asynccontextmanager

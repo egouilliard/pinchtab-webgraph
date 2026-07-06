@@ -63,6 +63,7 @@ const CRED_FIELDS = ["url", "username", "userField", "passField", "submit",
 let chatWs = null;
 let liveWs = null;
 let selectedHost = null;
+let currentLiveUrl = null; // the live pane's current page, tracked from `location` frames
 let currentBubble = null; // the assistant bubble currently streaming
 
 // --- guided-tour ("Show me How") state ---------------------------------------
@@ -359,7 +360,7 @@ if (chatFormEl) {
     if (!text || !chatWs || chatWs.readyState !== WebSocket.OPEN) return;
     chatAddLine("msg-user", text);
     currentBubble = null;
-    chatWs.send(JSON.stringify({ type: "user_message", text }));
+    chatWs.send(JSON.stringify({ type: "user_message", text, live_url: currentLiveUrl }));
     chatInputEl.value = "";
   });
 }
@@ -367,6 +368,7 @@ if (chatFormEl) {
 // --- live browser pane -------------------------------------------------------
 function openLiveView(host) {
   endTour();                         // drop any active tour on host switch
+  currentLiveUrl = null;             // forget the prior host's live position
   if (liveWs) {
     try { liveWs.close(); } catch (e) { /* ignore */ }
     liveWs = null;
@@ -401,6 +403,11 @@ function openLiveView(host) {
         if (liveViewEl && data.data) {
           liveViewEl.src = "data:image/jpeg;base64," + data.data;
         }
+        break;
+      case "location":
+        // the live browser navigated (the user clicked to a new page) — remember it so
+        // the next chat message tells the agent where we are.
+        currentLiveUrl = data.url || null;
         break;
       case "located":
         // response to our {type:"locate"} — position the highlight for the step.

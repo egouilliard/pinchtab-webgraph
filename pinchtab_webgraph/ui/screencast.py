@@ -191,6 +191,23 @@ class CdpDispatcher:
                 fut.set_result(None)
 
 
+def top_frame_url(msg):
+    """Return the MAIN-frame URL from a CDP ``Page.frameNavigated`` message, else None.
+
+    Only the top frame (no ``parentId``) counts as "where the user is" — a subframe /
+    iframe navigation does not change the page the user is on. Pure, so it is unit-tested
+    directly; ``relay_screencast`` uses it to emit a ``location`` frame the client tracks
+    as the live position (and passes to the chat agent so ``howto`` re-roots from here).
+    """
+    if not isinstance(msg, dict) or msg.get("method") != "Page.frameNavigated":
+        return None
+    params = msg.get("params")
+    frame = params.get("frame") if isinstance(params, dict) else None
+    if not isinstance(frame, dict) or frame.get("parentId"):
+        return None
+    return frame.get("url") or None
+
+
 async def relay_screencast(cdp_ws_or_dispatcher, *, emit, fmt="jpeg", quality=70,
                            max_width=1600, max_height=1000, every_nth_frame=1):
     """Drive Chrome's screencast over a CDP socket and stream frames out through ``emit``.
@@ -202,6 +219,7 @@ async def relay_screencast(cdp_ws_or_dispatcher, *, emit, fmt="jpeg", quality=70
     effect (mirrors chat.run_conversation_turn). The frame protocol:
       {"type":"status","state":"live","width":<int|None>,"height":<int|None>}
       {"type":"frame","data":<base64 str>,"metadata":<dict>}   per screencast frame
+      {"type":"location","url":<str>}          on each top-frame navigation (live URL)
       {"type":"stopped"}                                       once, when CDP ends
 
     The CDP url / port are NEVER emitted — only frame/status dicts leave this loop.
@@ -236,6 +254,13 @@ async def relay_screencast(cdp_ws_or_dispatcher, *, emit, fmt="jpeg", quality=70
             # A reply to a pending request() (e.g. the locate probe) is consumed here and
             # never mistaken for a screencast frame.
             if dispatcher._resolve(msg):
+                continue
+            # A top-frame navigation (the user clicked to a new page) → tell the client
+            # where the live browser now is, so it can feed the chat agent the position.
+            if msg.get("method") == "Page.frameNavigated":
+                loc = top_frame_url(msg)
+                if loc:
+                    await emit({"type": "location", "url": loc})
                 continue
             if msg.get("method") != "Page.screencastFrame":
                 continue

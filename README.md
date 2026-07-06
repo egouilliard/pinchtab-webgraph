@@ -123,7 +123,13 @@ The same crawl-once-query-offline capability is reachable through three interfac
 | **MCP server** | LLM agents / MCP hosts (Claude, IDEs) | `pinchtab-webgraph-mcp` over stdio — 6 offline query tools, 2 live tools (`crawl`, `ask_howto`) with streamed progress, and `graph://…` resources. See [MCP server](#-mcp-server). | `pip install 'pinchtab-webgraph[mcp]'` |
 | **UTCP manual** | any UTCP-aware tool-caller | a static [UTCP](https://www.utcp.io) manual (`pwg manual`, `--out`, or `--serve`) whose `cli` call templates invoke `pwg` directly — no wrapper server in the call path. See [UTCP interface](#-utcp-interface). | none to use (`[utcp]` only validates it) |
 
-Only the **base install** (`pip install pinchtab-webgraph`, pure stdlib) is needed for the CLI and the UTCP manual; the MCP server is the one interface with a runtime dependency, kept behind the optional `[mcp]` extra so the base package stays dependency-free.
+For a point-and-click front end there's also an **optional local web UI** — a two-pane browser app (graph browsing · a "how do I…" chat agent · a live headless-browser pane) plus a read-only REST API over the same queries, behind the `pinchtab-webgraph-ui` script and the `[ui]` extra:
+
+| Interface | For | How | Extra dep |
+| --- | --- | --- | --- |
+| **Web UI** | humans, at a browser | `pinchtab-webgraph-ui` serves a loopback-only two-pane SPA + `/api/*` REST over the offline graph. See [docs/ui.md](docs/ui.md). | `pip install 'pinchtab-webgraph[ui]'` |
+
+Only the **base install** (`pip install pinchtab-webgraph`, pure stdlib) is needed for the CLI and the UTCP manual; the MCP server and the web UI each live behind an optional extra (`[mcp]` / `[ui]`) so the base package stays dependency-free.
 
 > On externally-managed Python (Debian/Ubuntu, PEP 668) install the extras into a venv, or use `pip install --user --break-system-packages 'pinchtab-webgraph[mcp]'`.
 
@@ -182,6 +188,7 @@ Deep-dive guides live in **[`docs/`](docs/README.md)** — start at the **[docum
 | --- | --- |
 | **[MCP server](docs/mcp-server.md)** | Run `pinchtab-webgraph-mcp`: the `[mcp]` extra, `.mcp.json` registration, the tool + resource inventory, env vars, and the live-tool safety model. |
 | **[UTCP interface](docs/utcp.md)** | The `pwg query` JSON surface + the `pwg manual` / `--serve` UTCP manual, the 8 tools, the scope subset, and the exit-code convention. |
+| **[Web UI](docs/ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the two-pane SPA, the REST API + vault endpoints, the chat + screencast WebSockets, env vars, and the loopback-only security model. |
 | **[Authenticated login](docs/authenticated-login.md)** | Crawl behind a login safely: hand-login vs. keyring automation, the threat model, sandbox/bot-account isolation, and how to test it. |
 | **[Contributing](CONTRIBUTING.md)** | Branch model, Conventional Commits, the stay-generic rule, safety, security, and PRs. |
 

@@ -18,7 +18,7 @@ import pytest
 pytest.importorskip("anthropic")
 pytest.importorskip("mcp")
 
-from pinchtab_webgraph.ui import chat
+from pinchtab_webgraph.ui import chat, chat_backend
 
 
 # --- fakes -------------------------------------------------------------------
@@ -433,10 +433,11 @@ def test_ws_chat_streams_scripted_frames(monkeypatch):
 
     @asynccontextmanager
     async def fake_open(host):
-        yield chat.ChatState(host=host, messages=[], mcp_session=session,
-                             anthropic_client=client, tools=[])
+        state = chat.ChatState(host=host, messages=[], mcp_session=session,
+                               anthropic_client=client, tools=[])
+        yield chat_backend._ApiSession(state)
 
-    monkeypatch.setattr(ui_server, "_open_chat_session", fake_open)
+    monkeypatch.setattr(ui_server.chat_backend, "open_chat_session", fake_open)
 
     with ws_client.websocket_connect("/ws/chat?host=example.test") as ws:
         ws.send_json({"type": "user_message", "text": "hi"})

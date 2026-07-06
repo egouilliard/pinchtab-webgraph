@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import api, cache_store, __version__
-from . import chat, screencast, vault
+from . import chat_backend, screencast, vault
 
 app = FastAPI(title="pinchtab-webgraph UI", version=__version__)
 
@@ -255,30 +255,16 @@ def vault_delete_credential(host: str, delete_secret: bool = True):
     return _respond(vault.delete_credential(host, delete_secret=delete_secret))
 
 
-# --- chat WebSocket (Phase 3: Claude wired to the offline MCP tools) ---------
+# --- chat WebSocket (Phase 3/6: Claude wired to the offline MCP tools) --------
 #
-# The chat agent drives Claude (Anthropic API) with the pinchtab-webgraph MCP
-# server's OFFLINE, read-only tools (crawl/ask_howto are deliberately excluded —
-# see chat.OFFLINE_TOOL_NAMES). Everything heavy (anthropic/mcp) is lazy inside
-# chat.py, so a base install without those extras degrades to a structured
+# The chat agent drives Claude with the pinchtab-webgraph MCP server's OFFLINE,
+# read-only tools (crawl/ask_howto are deliberately excluded — see
+# chat.OFFLINE_TOOL_NAMES). TWO backends live behind chat_backend.open_chat_session:
+# the Anthropic-API backend (chat.py) and the Claude Code backend (chat_claude_code.py,
+# via the Claude Agent SDK). Both emit the SAME frame protocol, so this route and the
+# SPA are backend-agnostic. Everything heavy (anthropic/mcp/claude_agent_sdk) is lazy
+# inside those modules, so a base install without those extras degrades to a structured
 # ChatUnavailable frame rather than a crash.
-
-@asynccontextmanager
-async def _open_chat_session(host):
-    """Yield a ready ChatState (key -> anthropic client -> MCP session -> tools).
-
-    Broken out as an @asynccontextmanager so tests can monkeypatch it with a fake
-    that yields a scripted ChatState — no real key, no subprocess, no network.
-    Raises chat.ChatUnavailable when a dep/key is missing (the WS route maps it to a
-    structured close), which is why the require/build calls sit inside the ctx.
-    """
-    chat.require_api_key()
-    client = chat.build_anthropic_client()
-    async with chat.mcp_client_session() as session:
-        tools = await chat.list_allowed_tools(session)
-        yield chat.ChatState(host=host, messages=[], mcp_session=session,
-                             anthropic_client=client, tools=tools)
-
 
 @app.websocket("/ws/chat")
 async def chat_ws(websocket: WebSocket, host: str = Query(...)):
@@ -291,7 +277,7 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...)):
         await websocket.close(code=1008)
         return
     try:
-        async with _open_chat_session(host) as state:
+        async with chat_backend.open_chat_session(host) as session:
             while True:
                 try:
                     msg = await websocket.receive_json()
@@ -299,9 +285,9 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...)):
                     return
                 if msg.get("type") != "user_message":
                     continue
-                await chat.handle_user_message(state, msg.get("text", ""),
-                                               emit=websocket.send_json)
-    except chat.ChatUnavailable as e:
+                await session.handle(msg.get("text", ""),
+                                     emit=websocket.send_json)
+    except chat_backend.ChatUnavailable as e:
         await websocket.send_json({"type": "error", "status": "chat_unavailable",
                                    "reason": e.reason, "detail": e.detail})
         await websocket.close(code=1013)

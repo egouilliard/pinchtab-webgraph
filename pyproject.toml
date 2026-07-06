@@ -36,6 +36,11 @@ mcp = ["mcp[cli]>=1.28,<2"]
 # `websockets` powers the Phase-4 live browser pane (screencast.py imports it
 # directly to open the CDP DevTools socket).
 ui = ["fastapi>=0.110,<1", "uvicorn[standard]>=0.29,<1", "keyring>=24", "anthropic>=0.80,<1", "websockets>=13,<16", "pinchtab-webgraph[mcp]"]
+# Phase-6 alternative chat backend: drive the user's locally-logged-in Claude Code via
+# the Claude Agent SDK (no ANTHROPIC_API_KEY). Kept as a SEPARATE extra so the ~75MB
+# SDK is NOT forced on a plain [ui] install. Self-references [mcp] because the spawned
+# `claude` subprocess runs `python -m pinchtab_webgraph.mcp_server` as its tool backend.
+ui-claude-code = ["claude-agent-sdk>=0.2,<1", "pinchtab-webgraph[mcp]"]
 test = ["pytest>=7", "httpx>=0.27"]
 utcp = ["utcp>=1.1,<2"]
 

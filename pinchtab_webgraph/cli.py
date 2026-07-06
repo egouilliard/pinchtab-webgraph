@@ -32,6 +32,8 @@ SUBS = {
                   "query a graph and print JSON — machine-readable howto/find/list/paths; the UTCP substrate"),
     "cache":     ("pinchtab_webgraph.cache_cmd",
                   "manage the per-host interaction-graph caches: list / path / show / clear"),
+    "test":      ("pinchtab_webgraph.selftest",
+                  "interactively self-test a crawled graph → HTML report → opt-in GitHub issue"),
     "manual":    ("pinchtab_webgraph.utcp_manual",
                   "print / serve the UTCP tool-calling manual for external tool-callers"),
 }

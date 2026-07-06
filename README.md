@@ -29,6 +29,7 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - [Requirements](#-requirements)
 - [Quickstart](#-quickstart)
 - [The tools](#️-the-tools)
+- [Self-test & report](#-self-test--report)
 - [Three ways to call it](#-three-ways-to-call-it)
 - [MCP server](#-mcp-server)
 - [UTCP interface](#-utcp-interface)
@@ -72,7 +73,7 @@ pipx install git+https://github.com/egouilliard/pinchtab-webgraph
 ```
 
 This installs the **`pinchtab-webgraph`** command (short alias **`pwg`**) with subcommands
-`crawl · howto · ask · recipe · linkcrawl · paths`. Run `pinchtab-webgraph --help` for the map.
+`crawl · howto · ask · recipe · linkcrawl · paths · test`. Run `pinchtab-webgraph --help` for the map.
 
 ## 🚀 Quickstart
 
@@ -112,6 +113,30 @@ also run any tool without installing: `python3 -m pinchtab_webgraph.cli crawl �
 | `cache_cmd.py` (`pinchtab-webgraph cache`) | Inspect / manage the per-host interaction-graph caches `ask.py` writes back: `cache list`, `cache path <host>`, `cache show <host>`, `cache clear <host>` / `--all` (destructive, dry-run unless `--yes`). |
 | `query_cmd.py` (`pinchtab-webgraph query`) | **Machine-readable** twin of `howto.py` / `paths.py`: runs the offline `api.*` queries (`graph_summary`, `howto`, `find_content`, `list_content`, `list_forms`, `link_paths`) and prints the result as JSON on stdout. Takes `--host` (cache) or `--graph` (path). The substrate the UTCP manual shells out to. |
 | `utcp_manual.py` (`pinchtab-webgraph manual`) | Build / print / serve the [UTCP](https://www.utcp.io) tool-calling manual so external tool-callers can invoke the `query` (and live `crawl`/`ask`) surface by running the CLI directly — no wrapper server. `manual --out FILE` / `manual --serve`. |
+| `selftest.py` (`pinchtab-webgraph test`) | **Self-improvement loop.** Interactively throw your hardest "how do I do X?" goals at a crawled graph — each is answered **offline** via `api.howto`, you judge whether it's right, and every miss/wrong answer becomes a captured gap. Writes a self-contained HTML report; with `--repo OWNER/NAME` it can (after you confirm) file the report as a GitHub issue. See [Self-test & report](#-self-test--report). |
+
+## 🧪 Self-test & report
+
+Right after you crawl a site, sanity-check that the graph actually answers the questions you care about — and turn every gap into feedback:
+
+```bash
+# Interactive: describe your hardest goals, judge each answer, keep going until done.
+pwg test --start https://app.example.com/dashboard
+
+#   Scenario #1 — describe a hard goal (blank to finish): create a team
+#     ✓ graph found a path (3 clicks): … / form: 4 fields at the trigger
+#   Is that correct / what you expected? [Y/n] y
+#   Test another scenario? [Y/n] y
+#   …blank line finishes → writes test-report-app.example.com-<ts>.html
+
+# Non-interactive (CI / scripting): seed goals, get the HTML report unattended.
+pwg test --graph app.json --goal "create role" --goal "add invoice" --out report.html
+
+# Opt-in issue: only with an explicit --repo, and only after you confirm the (public!) preview.
+pwg test --start https://app.example.com/dashboard --repo egouilliard/pinchtab-webgraph
+```
+
+Each scenario is answered **offline** against the graph (no browser, deterministic) — a "miss" *is* the finding: it means the crawl didn't capture that path. The report groups scenarios by your verdict (pass / fail / unrated) with the returned click-path, form field count, and your "what's wrong" notes. **The report can contain target-app labels, URLs and form details** — issue creation is therefore off by default, requires you to name `--repo`, and shows the full body plus a PUBLIC-repo warning before posting.
 
 ## 🔌 Three ways to call it
 

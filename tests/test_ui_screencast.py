@@ -127,8 +127,8 @@ def test_relay_sends_enable_start_and_acks_frame():
     assert methods[1] == "Page.startScreencast"
     start_params = sent[1]["params"]
     assert start_params["format"] == "jpeg"
-    assert start_params["quality"] == 60
-    assert start_params["maxWidth"] == 1280
+    assert start_params["quality"] == 70
+    assert start_params["maxWidth"] == 1600
     assert start_params["everyNthFrame"] == 1
     # ids are incrementing.
     assert sent[0]["id"] == 1 and sent[1]["id"] == 2

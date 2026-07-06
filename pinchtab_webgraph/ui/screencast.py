@@ -107,8 +107,8 @@ def home_url_for(host):
     return "https://%s/" % host
 
 
-async def relay_screencast(cdp_ws, *, emit, fmt="jpeg", quality=60, max_width=1280,
-                           max_height=800, every_nth_frame=1):
+async def relay_screencast(cdp_ws, *, emit, fmt="jpeg", quality=70, max_width=1600,
+                           max_height=1000, every_nth_frame=1):
     """Drive Chrome's screencast over ``cdp_ws`` and stream frames out through ``emit``.
 
     ``cdp_ws`` is a duck-typed CDP client exposing ``async send(str)`` and
@@ -167,6 +167,50 @@ async def relay_screencast(cdp_ws, *, emit, fmt="jpeg", quality=60, max_width=12
                     "metadata": params.get("metadata")})
 
     await emit({"type": "stopped"})
+
+
+# --- interactive input: client event -> CDP Input.* command -------------------
+
+_CDP_MOUSE_TYPE = {"mousemoved": "mouseMoved", "mousepressed": "mousePressed",
+                   "mousereleased": "mouseReleased"}
+_CDP_BUTTON = {0: "left", 1: "middle", 2: "right"}
+
+
+def build_input_command(frame):
+    """Map ONE client input frame to a CDP ``{method, params}`` (no id). Pure.
+
+    Returns None for anything unrecognized (so a bad/unknown frame is a silent no-op,
+    never a crash). Coordinates arrive already translated to viewport CSS pixels by the
+    front-end. This is the only place raw client input becomes a browser action, so it
+    is deliberately a tight allow-list of Input.* methods — no eval, no navigation.
+    """
+    if not isinstance(frame, dict):
+        return None
+    kind = frame.get("kind")
+    if kind in _CDP_MOUSE_TYPE:
+        p = {"type": _CDP_MOUSE_TYPE[kind],
+             "x": float(frame.get("x", 0)), "y": float(frame.get("y", 0)),
+             "button": _CDP_BUTTON.get(frame.get("button", 0), "left"),
+             "buttons": int(frame.get("buttons", 0))}
+        if kind != "mousemoved":
+            p["clickCount"] = int(frame.get("clickCount", 1))
+        return {"method": "Input.dispatchMouseEvent", "params": p}
+    if kind == "wheel":
+        return {"method": "Input.dispatchMouseEvent",
+                "params": {"type": "mouseWheel",
+                           "x": float(frame.get("x", 0)), "y": float(frame.get("y", 0)),
+                           "deltaX": float(frame.get("dx", 0)),
+                           "deltaY": float(frame.get("dy", 0))}}
+    if kind == "text":
+        text = frame.get("text", "")
+        return {"method": "Input.insertText", "params": {"text": str(text)}} if text else None
+    if kind in ("keydown", "keyup"):
+        return {"method": "Input.dispatchKeyEvent",
+                "params": {"type": "keyDown" if kind == "keydown" else "keyUp",
+                           "key": str(frame.get("key", "")),
+                           "code": str(frame.get("code", "")),
+                           "windowsVirtualKeyCode": int(frame.get("keyCode", 0) or 0)}}
+    return None
 
 
 # --- CDP / HTTP glue (lazy imports; raise ScreencastUnavailable) --------------
@@ -236,6 +280,8 @@ def build_chrome_argv(binary, port, user_data_dir, headless=True, url=None):
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-gpu",
+        "--hide-scrollbars",
+        "--window-size=1600,1000",   # a large viewport so the screencast fills a wide pane crisply
     ]
     if url:
         argv.append(url)
@@ -336,12 +382,20 @@ async def terminate_chrome(process, user_data_dir):
 # --- best-effort auth (reuse login.py UNCHANGED) ------------------------------
 
 def _post_attach(bridge_url, ws_dbg):
-    """POST /instances/attach to the bridge; True on a 2xx. Sync — run via to_thread."""
+    """POST /instances/attach to the bridge; True on a 2xx. Sync — run via to_thread.
+
+    The bridge requires ``Authorization: Bearer <token>`` on its API; send it from
+    PINCHTAB_TOKEN when set (the same env var login.py/recipe.py read), else the attach
+    would 401 and login would silently fall through to unauthenticated.
+    """
     body = json.dumps({"name": "pinchtab-webgraph-ui",
                        "cdpUrl": ws_dbg}).encode("utf-8")
     req = urllib.request.Request(
         bridge_url.rstrip("/") + "/instances/attach", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
+    token = os.environ.get("PINCHTAB_TOKEN")
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
     with urllib.request.urlopen(req, timeout=10.0) as resp:
         return 200 <= resp.status < 300
 

@@ -188,7 +188,7 @@ button {
 /* --- panes: chat | live --------------------------------------------------- */
 .panes {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 3fr;   /* chat 25% · live browser 75% */
   gap: 1rem;
   flex: 1 1 auto;
   min-height: 0;
@@ -256,6 +256,30 @@ button {
   align-self: stretch;
   max-width: 100%;
 }
+/* rendered-markdown elements inside an assistant bubble */
+.msg-assistant > :first-child { margin-top: 0; }
+.msg-assistant > :last-child { margin-bottom: 0; }
+.msg-assistant p { margin: 0 0 0.5rem; }
+.msg-assistant ul, .msg-assistant ol { margin: 0 0 0.5rem; padding-left: 1.35rem; }
+.msg-assistant li { margin: 0.15rem 0; }
+.msg-assistant h4 { margin: 0.5rem 0 0.3rem; font-size: 0.92rem; }
+.msg-assistant strong { font-weight: 650; }
+.msg-assistant a { color: var(--accent); }
+.msg-assistant code {
+  background: var(--tool-bg);
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82em;
+}
+.msg-assistant pre {
+  background: var(--tool-bg);
+  padding: 0.5rem 0.7rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 0 0 0.5rem;
+}
+.msg-assistant pre code { background: none; padding: 0; font-size: 0.8em; }
 .chat-form {
   display: flex;
   gap: 0.5rem;
@@ -296,9 +320,17 @@ button {
   overflow: auto;
 }
 #live-view {
-  max-width: 100%;
-  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;      /* fill the pane, keep aspect (no distortion) */
   display: block;
+  cursor: default;          /* it's driveable — behave like a real browser surface */
+  user-select: none;
+  -webkit-user-drag: none;
+  outline: none;
+}
+#live-view:focus {
+  box-shadow: inset 0 0 0 2px var(--accent);  /* keyboard focus (typeable) */
 }
 
 /* --- modal (credentials vault) -------------------------------------------- */

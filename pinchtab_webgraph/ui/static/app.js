@@ -186,6 +186,59 @@ function chatAddLine(cls, text) {
   return div;
 }
 
+function escapeHtml(s) {
+  // Escape quotes too, not just <>&: the markdown renderer injects text into an
+  // href="..." ATTRIBUTE, so an unescaped " / ' would break out of the attribute
+  // (XSS). Chat content is LLM-echoed crawled-site text — treat it as untrusted.
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// Minimal, SAFE markdown -> HTML. The raw text is HTML-ESCAPED FIRST, so the only
+// markup in the output is the fixed tag set we inject below — no model/server text
+// can inject HTML. Deliberately small: bold/italic/inline+block code, #-headings,
+// ordered/unordered lists, http(s) links, paragraphs.
+function renderMarkdown(raw) {
+  const inline = (t) =>
+    t.replace(/`([^`]+)`/g, "<code>$1</code>")
+     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+     .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)"'<>]+)\)/g,
+              '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  const lines = escapeHtml(raw).replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let listType = null, inCode = false, code = [];
+  const closeList = () => { if (listType) { out.push("</" + listType + ">"); listType = null; } };
+  for (const line of lines) {
+    if (line.trim().startsWith("```")) {
+      if (inCode) { out.push("<pre><code>" + code.join("\n") + "</code></pre>"); code = []; inCode = false; }
+      else { closeList(); inCode = true; }
+      continue;
+    }
+    if (inCode) { code.push(line); continue; }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+    const ul = line.match(/^\s*[-*]\s+(.*)$/);
+    if (h) { closeList(); out.push("<h4>" + inline(h[2]) + "</h4>"); }
+    else if (ol) { if (listType !== "ol") { closeList(); out.push("<ol>"); listType = "ol"; } out.push("<li>" + inline(ol[1]) + "</li>"); }
+    else if (ul) { if (listType !== "ul") { closeList(); out.push("<ul>"); listType = "ul"; } out.push("<li>" + inline(ul[1]) + "</li>"); }
+    else if (line.trim() === "") { closeList(); }
+    else { closeList(); out.push("<p>" + inline(line) + "</p>"); }
+  }
+  if (inCode) out.push("<pre><code>" + code.join("\n") + "</code></pre>");
+  closeList();
+  return out.join("");
+}
+
+// Close the streaming assistant bubble, rendering its accumulated raw text as markdown.
+function finalizeBubble() {
+  if (currentBubble && currentBubble._md) {
+    currentBubble.innerHTML = renderMarkdown(currentBubble._md);
+    chatLogEl.scrollTop = chatLogEl.scrollHeight;
+  }
+  currentBubble = null;
+}
+
 function openChat(host) {
   if (chatWs) {
     try { chatWs.close(); } catch (e) { /* ignore */ }
@@ -219,12 +272,13 @@ function openChat(host) {
     try { data = JSON.parse(ev.data); } catch (e) { return; }
     switch (data.type) {
       case "text":
-        if (!currentBubble) currentBubble = chatAddLine("msg-assistant", "");
-        currentBubble.textContent += (data.delta || "");
+        if (!currentBubble) { currentBubble = chatAddLine("msg-assistant", ""); currentBubble._md = ""; }
+        currentBubble._md += (data.delta || "");
+        currentBubble.textContent = currentBubble._md; // plaintext while streaming
         chatLogEl.scrollTop = chatLogEl.scrollHeight;
         break;
       case "tool_use":
-        currentBubble = null;
+        finalizeBubble();
         chatAddLine("msg-tool", "→ " + (data.name || "tool"));
         break;
       case "tool_result":
@@ -232,7 +286,7 @@ function openChat(host) {
           (data.status || "?"));
         break;
       case "error":
-        currentBubble = null;
+        finalizeBubble();
         if (data.status === "chat_unavailable") {
           // graceful no-key (or missing-dep) case — the rest of the UI still works.
           chatSetEnabled(false);
@@ -243,7 +297,7 @@ function openChat(host) {
           (data.detail ? " — " + data.detail : ""));
         break;
       case "done":
-        currentBubble = null;
+        finalizeBubble();
         break;
       default:
         break;
@@ -311,6 +365,70 @@ function openLiveView(host) {
         break;
     }
   };
+}
+
+// --- interactive input: forward mouse/keyboard to the live browser -----------
+// Any embedded live browser is a pixel stream; these handlers make it DRIVEABLE by
+// sending CDP Input.* events back over the same socket. Coordinates are mapped from
+// the displayed <img> to the browser's viewport via the frame's natural pixel size.
+function sendInput(frame) {
+  if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+    liveWs.send(JSON.stringify(Object.assign({ type: "input" }, frame)));
+  }
+}
+
+function liveCoords(ev) {
+  // The <img> is object-fit:contain, so the actual frame is scaled to fit and
+  // letterboxed inside the element box. Undo the scale AND the centering offset so a
+  // click maps to the right browser-viewport pixel (else clicks land off-target).
+  const rect = liveViewEl.getBoundingClientRect();
+  const nw = liveViewEl.naturalWidth, nh = liveViewEl.naturalHeight;
+  if (!nw || !nh || !rect.width || !rect.height) return { x: 0, y: 0 };
+  const scale = Math.min(rect.width / nw, rect.height / nh);
+  const offX = (rect.width - nw * scale) / 2;
+  const offY = (rect.height - nh * scale) / 2;
+  const x = Math.max(0, Math.min(nw, (ev.clientX - rect.left - offX) / scale));
+  const y = Math.max(0, Math.min(nh, (ev.clientY - rect.top - offY) / scale));
+  return { x, y };
+}
+
+if (liveViewEl) {
+  liveViewEl.tabIndex = 0;            // focusable, so it can receive keystrokes
+  liveViewEl.draggable = false;
+  let lastMove = 0;
+  liveViewEl.addEventListener("mousemove", (e) => {
+    const now = (window.performance && performance.now()) || Date.now();
+    if (now - lastMove < 40) return;  // ~25fps of move events is plenty
+    lastMove = now;
+    const { x, y } = liveCoords(e);
+    sendInput({ kind: "mousemoved", x, y, buttons: e.buttons });
+  });
+  liveViewEl.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    liveViewEl.focus();
+    const { x, y } = liveCoords(e);
+    sendInput({ kind: "mousepressed", x, y, button: e.button, buttons: e.buttons, clickCount: e.detail || 1 });
+  });
+  liveViewEl.addEventListener("mouseup", (e) => {
+    e.preventDefault();
+    const { x, y } = liveCoords(e);
+    sendInput({ kind: "mousereleased", x, y, button: e.button, buttons: e.buttons, clickCount: e.detail || 1 });
+  });
+  liveViewEl.addEventListener("contextmenu", (e) => e.preventDefault()); // allow right-click
+  liveViewEl.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const { x, y } = liveCoords(e);
+    sendInput({ kind: "wheel", x, y, dx: e.deltaX, dy: e.deltaY });
+  }, { passive: false });
+  liveViewEl.addEventListener("keydown", (e) => {
+    if (e.metaKey) return;            // leave OS/browser shortcuts alone
+    e.preventDefault();
+    if (e.key.length === 1 && !e.ctrlKey && !e.altKey) {
+      sendInput({ kind: "text", text: e.key });      // printable char -> insertText
+    } else {
+      sendInput({ kind: "keydown", key: e.key, code: e.code, keyCode: e.keyCode });
+    }
+  });
 }
 
 // --- credentials vault (modal) -----------------------------------------------

@@ -16,6 +16,7 @@ STRUCTURALLY fastapi-free base install: reached only via its own console script
 for the same discipline with `mcp`).
 """
 import argparse
+import asyncio
 import json
 import os
 import threading
@@ -335,7 +336,36 @@ async def screencast_ws(websocket: WebSocket, host: str = Query(...)):
                 "type": "status", "state": "live",
                 "authenticated": live.auth.get("authenticated"),
                 "reason": live.auth.get("reason")})
-            await screencast.relay_screencast(live.cdp_ws, emit=websocket.send_json)
+            # Frames stream OUT via a background task; client input events (mouse/key)
+            # stream IN on the same socket and are dispatched as CDP Input.* commands on
+            # the SAME cdp_ws (websockets serializes concurrent sends). This is what makes
+            # the pane a driveable live session, not a passive view.
+            relay = asyncio.create_task(
+                screencast.relay_screencast(live.cdp_ws, emit=websocket.send_json))
+            input_id = 100000  # high, ignored-response CDP ids — never clash with relay's
+            try:
+                while True:
+                    if relay.done():
+                        break
+                    msg = await websocket.receive_json()
+                    if msg.get("type") != "input":
+                        continue
+                    cmd = screencast.build_input_command(msg)
+                    if cmd is None:
+                        continue
+                    input_id += 1
+                    try:
+                        await live.cdp_ws.send(json.dumps({"id": input_id, **cmd}))
+                    except Exception:  # cdp socket died — end the session
+                        break
+            except WebSocketDisconnect:
+                pass
+            finally:
+                relay.cancel()
+                try:
+                    await relay
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
     except screencast.ScreencastUnavailable as e:
         await websocket.send_json({"type": "error", "status": "screencast_unavailable",
                                    "reason": e.reason, "detail": e.detail})

@@ -93,3 +93,124 @@ document.getElementById("howto-form").addEventListener("submit", async (e) => {
 });
 
 loadHosts();
+
+// --- Phase-2 credentials vault (placeholder; Phase 5's SPA replaces this) -----
+// Plain-DOM, textContent only (never innerHTML with server data). The password is
+// write-only: we never receive it back, never prefill it, and clear the input the
+// instant a save request returns — success or failure.
+const credsEl = document.getElementById("creds");
+const vaultStatusEl = document.getElementById("vault-status");
+const credMsgEl = document.getElementById("cred-msg");
+const credHost = document.getElementById("cred-host");
+const credPassword = document.getElementById("cred-password");
+
+const CRED_FIELDS = ["url", "username", "userField", "passField", "submit",
+  "successUrl", "keyringService"];
+
+async function loadVaultStatus() {
+  try {
+    const res = await fetch("/api/vault/status");
+    const data = await res.json();
+    if (data.available) {
+      vaultStatusEl.textContent = "keyring backend: " + (data.backend || "ok");
+    } else {
+      vaultStatusEl.textContent = "keyring unavailable (" + (data.reason || "?") +
+        ") — " + (data.detail || "");
+    }
+  } catch (err) {
+    vaultStatusEl.textContent = "could not read keyring status";
+  }
+}
+
+async function loadCredentials() {
+  try {
+    const res = await fetch("/api/vault/credentials");
+    const data = await res.json();
+    credsEl.innerHTML = "";
+    const rows = data.credentials || [];
+    if (rows.length === 0) {
+      credsEl.innerHTML = '<li class="muted">no stored credentials yet</li>';
+      return;
+    }
+    for (const c of rows) {
+      const li = document.createElement("li");
+      const main = document.createElement("span");
+      main.className = "cred-main";
+      main.textContent = c.host + "  ·  " + (c.username || "?") +
+        (c.url ? "  ·  " + c.url : "");
+      li.appendChild(main);
+
+      const badge = document.createElement("span");
+      // has_password: true (stored) / false (missing) / null (keyring unreadable).
+      badge.className = "badge " + (c.has_password === true ? "ok" :
+        c.has_password === false ? "warn" : "unknown");
+      badge.textContent = c.has_password === true ? "has password" :
+        c.has_password === false ? "no password" : "keyring ?";
+      li.appendChild(badge);
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "cred-del";
+      del.textContent = "delete";
+      del.addEventListener("click", () => deleteCredential(c.host));
+      li.appendChild(del);
+
+      credsEl.appendChild(li);
+    }
+  } catch (err) {
+    credsEl.innerHTML = '<li class="muted">failed to load credentials</li>';
+  }
+}
+
+async function deleteCredential(host) {
+  credMsgEl.textContent = "deleting " + host + "…";
+  try {
+    const res = await fetch("/api/vault/credentials/" + encodeURIComponent(host),
+      { method: "DELETE" });
+    const data = await res.json();
+    credMsgEl.textContent = "deleted " + host + " (routing_removed=" +
+      data.routing_removed + ", secret_removed=" + data.secret_removed + ")";
+  } catch (err) {
+    credMsgEl.textContent = "delete failed";
+  }
+  loadCredentials();
+}
+
+document.getElementById("cred-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const host = credHost.value.trim();
+  if (!host) {
+    credMsgEl.textContent = "enter a host first.";
+    return;
+  }
+  const payload = { password: credPassword.value };
+  for (const f of CRED_FIELDS) {
+    const el = document.getElementById("cred-" + f);
+    const v = el ? el.value.trim() : "";
+    if (v) payload[f] = v;
+  }
+  credMsgEl.textContent = "saving…";
+  try {
+    const res = await fetch("/api/vault/credentials/" + encodeURIComponent(host), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.status === "ok") {
+      credMsgEl.textContent = "saved " + host;
+    } else {
+      credMsgEl.textContent = "save failed: " + (data.status || "?") +
+        (data.detail ? " — " + data.detail : "");
+    }
+  } catch (err) {
+    credMsgEl.textContent = "save request failed";
+  } finally {
+    // Clear the password input immediately, regardless of the outcome.
+    credPassword.value = "";
+  }
+  loadCredentials();
+});
+
+loadVaultStatus();
+loadCredentials();

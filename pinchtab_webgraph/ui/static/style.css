@@ -113,3 +113,60 @@ pre {
 }
 
 .muted { color: #999; }
+
+/* Phase-2 credentials vault placeholder */
+.vault { margin-top: 2rem; border-top: 1px solid #ddd; padding-top: 1rem; }
+.vault h2 { margin: 0 0 0.25rem; font-size: 0.9rem; text-transform: uppercase; color: #888; }
+.vault-status { font-size: 0.8rem; margin: 0 0 0.75rem; }
+#creds { list-style: none; margin: 0 0 1rem; padding: 0; }
+#creds li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #eee;
+  border-radius: 4px;
+  margin-bottom: 0.3rem;
+  background: #fff;
+}
+#creds .cred-main { flex: 1 1 auto; }
+#creds .badge.ok { background: #dcfce7; color: #166534; }
+#creds .badge.warn { background: #fef3c7; color: #92400e; }
+#creds .badge.unknown { background: #eee; color: #555; }
+.cred-del {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background: #fff;
+  color: #b91c1c;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.15rem 0.5rem;
+}
+.cred-del:hover { background: #fee2e2; }
+#cred-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+#cred-form label { display: flex; flex-direction: column; font-size: 0.8rem; color: #666; }
+#cred-form input {
+  margin-top: 0.2rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font: inherit;
+}
+#cred-form .advanced { flex: 1 1 100%; font-size: 0.8rem; color: #666; }
+#cred-form .advanced label { margin-top: 0.4rem; }
+#cred-form button {
+  padding: 0.4rem 0.9rem;
+  border: 0;
+  border-radius: 4px;
+  background: #2563eb;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+#cred-form button:hover { background: #1d4ed8; }
+.vault-msg { font-size: 0.8rem; margin-top: 0.5rem; }

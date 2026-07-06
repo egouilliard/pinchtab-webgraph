@@ -21,11 +21,12 @@ import os
 import threading
 import webbrowser
 
-from fastapi import FastAPI, Query
+from fastapi import Body, FastAPI, Query
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import api, cache_store, __version__
+from . import vault
 
 app = FastAPI(title="pinchtab-webgraph UI", version=__version__)
 
@@ -42,6 +43,12 @@ _STATUS_CODE = {
     "invalid_host": 400,
     "no_cache_for_host": 404,
     "invalid_graph": 422,
+    "no_credential_for_host": 404,
+    "vault_unavailable": 503,
+    # NOTE: "invalid_args" is deliberately NOT here. It is an OVERLOADED status — a
+    # 200 structured MISS for the read surface (howto with no goal/match), but a 400
+    # for a vault PUT with a bad body. The vault PUT route maps it to 400 locally so
+    # the read-side contract (test_howto_invalid_args_is_200) is preserved.
 }
 
 
@@ -79,6 +86,33 @@ def _call(fn, path, **kwargs):
         return fn(path, **kwargs)
     except (OSError, ValueError, json.JSONDecodeError, KeyError) as e:
         return {"status": "invalid_graph", "path": path, "error": str(e)}
+
+
+def _resolve_vault_host(host):
+    """Validate the host TOKEN only — unlike _resolve_host there is deliberately no
+    filesystem-existence precondition, since "no credential yet" is the normal state
+    for the vault write path. Returns None on success, else an invalid_host error dict.
+    """
+    try:
+        cache_store.validate_host(host)
+    except ValueError:
+        return {"status": "invalid_host", "host": host}
+    return None
+
+
+def _vault_fields(payload):
+    """Pull the routing fields out of a PUT body. NEVER logs `payload` — it carries
+    the plaintext password, which must travel no further than vault.set_credential."""
+    return {
+        "url": payload.get("url"),
+        "username": payload.get("username"),
+        "password": payload.get("password"),
+        "userField": payload.get("userField"),
+        "passField": payload.get("passField"),
+        "submit": payload.get("submit"),
+        "successUrl": payload.get("successUrl"),
+        "keyringService": payload.get("keyringService"),
+    }
 
 
 # --- routes (all offline; answer from a cached graph) ------------------------
@@ -165,6 +199,60 @@ def host_content_search(host: str, text: str = Query(...), start: str | None = N
     return _respond(_call(api.find_content, path, text=text, start=start, limit=limit))
 
 
+# --- vault routes (Phase 2: the credentials write side, feeds login.py) ------
+#
+# Password discipline: the plaintext secret enters ONLY via the PUT JSON body and
+# leaves this process ONLY through vault.set_credential -> keyring.set_password. GET
+# and DELETE never carry it; every response body is a masked, has_password-only view.
+
+@app.get("/api/vault/status")
+def vault_status():
+    """Keyring backend health + where the routing file lives. Never non-200."""
+    return {**vault.backend_status(), "config_path": vault.config_path()}
+
+
+@app.get("/api/vault/credentials")
+def vault_credentials():
+    """Masked list of every stored credential (routing + has_password). Never non-200."""
+    return vault.list_credentials()
+
+
+@app.get("/api/vault/credentials/{host}")
+def vault_get_credential(host: str):
+    err = _resolve_vault_host(host)
+    if err is not None:
+        return _respond(err)
+    r = vault.get_routing(host)
+    if r is None:
+        return _respond({"status": "no_credential_for_host", "host": host})
+    return _respond(r)
+
+
+@app.put("/api/vault/credentials/{host}")
+def vault_put_credential(host: str, payload: dict = Body(...)):
+    err = _resolve_vault_host(host)
+    if err is not None:
+        return _respond(err)
+    try:
+        result = vault.set_credential(host, **_vault_fields(payload))
+        return _respond({"status": "ok", **result})
+    except ValueError as e:
+        # 400 mapped locally (not via _STATUS_CODE) — see the note on invalid_args there.
+        return JSONResponse({"status": "invalid_args", "detail": str(e)},
+                            status_code=400)
+    except vault.VaultUnavailable as e:
+        return _respond({"status": "vault_unavailable", "reason": e.reason,
+                         "detail": e.detail})
+
+
+@app.delete("/api/vault/credentials/{host}")
+def vault_delete_credential(host: str, delete_secret: bool = True):
+    err = _resolve_vault_host(host)
+    if err is not None:
+        return _respond(err)
+    return _respond(vault.delete_credential(host, delete_secret=delete_secret))
+
+
 # Static mount — registered LAST, AFTER every /api route, so it never shadows the
 # API. `html=True` serves index.html at "/".
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
@@ -178,6 +266,13 @@ def main():
     ap.add_argument("--open", action="store_true",
                     help="open the UI in a browser once the server is up")
     a = ap.parse_args()
+
+    if a.host not in ("127.0.0.1", "localhost", "::1"):
+        import sys
+        print("WARNING: binding %s exposes the vault WRITE endpoints "
+              "(PUT/DELETE /api/vault/credentials) with NO authentication — anyone "
+              "who can reach this port can store or delete keyring credentials."
+              % a.host, file=sys.stderr)
 
     import uvicorn
     if a.open:

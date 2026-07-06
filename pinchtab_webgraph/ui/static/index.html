@@ -27,6 +27,29 @@
         <button type="submit">How-to</button>
       </form>
       <div id="results"><p class="muted">Pick a host, type a goal, and hit How-to.</p></div>
+
+      <!-- Phase-2 placeholder credentials panel; Phase 5's SPA replaces this too. -->
+      <section class="vault">
+        <h2>Credentials vault</h2>
+        <p class="muted vault-status" id="vault-status">checking keyring…</p>
+        <ul id="creds"><li class="muted">loading…</li></ul>
+        <form id="cred-form" autocomplete="off">
+          <label>Host <input id="cred-host" type="text" placeholder="app.example.com" /></label>
+          <label>Login URL <input id="cred-url" type="text" placeholder="https://app.example.com/login" /></label>
+          <label>Username <input id="cred-username" type="text" placeholder="me@example.com" /></label>
+          <label>Password <input id="cred-password" type="password" placeholder="stored in the OS keyring only" /></label>
+          <details class="advanced">
+            <summary>Advanced (optional selector overrides)</summary>
+            <label>userField <input id="cred-userField" type="text" placeholder="input[name=email]" /></label>
+            <label>passField <input id="cred-passField" type="text" placeholder="input[type=password]" /></label>
+            <label>submit <input id="cred-submit" type="text" placeholder="button[type=submit]" /></label>
+            <label>successUrl <input id="cred-successUrl" type="text" placeholder="/dashboard" /></label>
+            <label>keyringService <input id="cred-keyringService" type="text" placeholder="pinchtab-webgraph" /></label>
+          </details>
+          <button type="submit">Save credential</button>
+        </form>
+        <p class="muted vault-msg" id="cred-msg"></p>
+      </section>
     </section>
   </main>
   <script src="app.js"></script>

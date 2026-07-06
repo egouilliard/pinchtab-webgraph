@@ -30,16 +30,24 @@ from urllib.parse import urlparse
 _HOST_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
+def home_dir():
+    return os.path.expanduser(os.environ.get("PINCHTAB_WEBGRAPH_HOME", "~/.pinchtab-webgraph"))
+
+
 def caches_dir():
-    return os.path.expanduser(os.environ.get("PINCHTAB_WEBGRAPH_HOME", "~/.pinchtab-webgraph") + "/caches")
+    return os.path.join(home_dir(), "caches")
 
 
-def cache_path(host):
+def validate_host(host):
     # VALIDATE at the choke point: path/show/clear all route through here, so
     # rejecting a non-hostname token here blocks path-traversal for every caller
     # (e.g. `cache clear "../../etc/passwd"`) before any filesystem access.
     if not isinstance(host, str) or not _HOST_RE.match(host):
         raise ValueError("invalid cache host: %r" % host)
+
+
+def cache_path(host):
+    validate_host(host)
     return os.path.join(caches_dir(), "%s.json" % host)
 
 

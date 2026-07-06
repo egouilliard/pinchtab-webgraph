@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import api, cache_store, __version__
-from . import chat, vault
+from . import chat, screencast, vault
 
 app = FastAPI(title="pinchtab-webgraph UI", version=__version__)
 
@@ -309,6 +309,57 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...)):
         return
 
 
+# --- live browser pane WebSocket (Phase 4: a CDP screencast of headless Chrome) --
+#
+# For the selected host we launch a PRIVATE headless Chrome, navigate it to the
+# host's home page (best-effort logged in via login.py through the PinchTab bridge),
+# and relay Chrome's screencast frames (base64 JPEG) out over this socket. Everything
+# heavy (websockets) + every Chrome/CDP failure is lazy/structured inside
+# screencast.py, so a base install without those extras / without Chrome degrades to
+# a structured ScreencastUnavailable frame rather than a crash. The CDP endpoint is
+# loopback-only by construction (see screencast.build_chrome_argv).
+
+# A process-wide cap on concurrently launched Chrome instances. Guarded by app.state
+# so it is per-app (a fresh TestClient app starts at 0) and reset cleanly in finally.
+app.state.live_sessions = 0
+
+
+@app.websocket("/ws/screencast")
+async def screencast_ws(websocket: WebSocket, host: str = Query(...)):
+    await websocket.accept()
+    try:
+        cache_store.validate_host(host)
+    except ValueError:
+        await websocket.send_json({"type": "error", "status": "invalid_host",
+                                   "host": host})
+        await websocket.close(code=1008)
+        return
+
+    if app.state.live_sessions >= screencast.MAX_LIVE_SESSIONS:
+        await websocket.send_json({"type": "error", "status": "too_many_sessions",
+                                   "max": screencast.MAX_LIVE_SESSIONS})
+        await websocket.close(code=1013)
+        return
+
+    bridge_url = os.environ.get("PINCHTAB_WEBGRAPH_BRIDGE")
+    app.state.live_sessions += 1
+    try:
+        async with screencast.open_live_session(host, bridge_url=bridge_url) as live:
+            await websocket.send_json({
+                "type": "status", "state": "live",
+                "authenticated": live.auth.get("authenticated"),
+                "reason": live.auth.get("reason")})
+            await screencast.relay_screencast(live.cdp_ws, emit=websocket.send_json)
+    except screencast.ScreencastUnavailable as e:
+        await websocket.send_json({"type": "error", "status": "screencast_unavailable",
+                                   "reason": e.reason, "detail": e.detail})
+        await websocket.close(code=1013)
+    except WebSocketDisconnect:
+        return
+    finally:
+        app.state.live_sessions -= 1
+
+
 # Static mount — registered LAST, AFTER every /api route, so it never shadows the
 # API. `html=True` serves index.html at "/".
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
@@ -326,10 +377,14 @@ def main():
     if a.host not in ("127.0.0.1", "localhost", "::1"):
         import sys
         print("WARNING: binding %s exposes the vault WRITE endpoints "
-              "(PUT/DELETE /api/vault/credentials) AND the chat agent "
-              "(/ws/chat — a read-only, offline-tool Claude agent) with NO "
-              "authentication — anyone who can reach this port can store or delete "
-              "keyring credentials and drive the chat agent (spending API credits)."
+              "(PUT/DELETE /api/vault/credentials), the chat agent "
+              "(/ws/chat — a read-only, offline-tool Claude agent), AND the live "
+              "browser pane (/ws/screencast) with NO authentication — anyone who can "
+              "reach this port can store or delete keyring credentials, drive the "
+              "chat agent (spending API credits), and, biggest of all, make the "
+              "server LAUNCH LOCAL HEADLESS CHROME processes that best-effort drive "
+              "the credential-bearing PinchTab bridge to log in. This is the single "
+              "strongest reason to keep --host 127.0.0.1."
               % a.host, file=sys.stderr)
 
     import uvicorn

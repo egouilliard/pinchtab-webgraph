@@ -31,6 +31,7 @@ async function loadHosts() {
           for (const el of hostsEl.children) el.classList.remove("selected");
           li.classList.add("selected");
           openChat(h.host);
+          openLiveView(h.host);
         });
         hostsEl.appendChild(li);
       }
@@ -317,4 +318,67 @@ if (chatFormEl) {
     chatWs.send(JSON.stringify({ type: "user_message", text }));
     chatInputEl.value = "";
   });
+}
+
+// --- Phase-4 live browser pane (placeholder; Phase 5 owns the two-pane layout) --
+// A CDP screencast of a headless Chrome streams over /ws/screencast?host=<host> as
+// base64 JPEG frames; we paint each into an <img>. Read-only: no client->server
+// input. Server text (status/reason) never touches innerHTML — textContent only.
+const liveViewEl = document.getElementById("live-view");
+const liveStatusEl = document.getElementById("live-status");
+
+let liveWs = null;
+
+function openLiveView(host) {
+  // Close any prior live socket before opening a new one.
+  if (liveWs) {
+    try { liveWs.close(); } catch (e) { /* ignore */ }
+    liveWs = null;
+  }
+  if (liveViewEl) liveViewEl.removeAttribute("src");
+  if (liveStatusEl) liveStatusEl.textContent = "connecting to " + host + "…";
+
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const url = proto + "//" + location.host + "/ws/screencast?host=" +
+    encodeURIComponent(host);
+  const ws = new WebSocket(url);
+  liveWs = ws;
+
+  ws.onclose = () => {
+    if (liveWs === ws && liveStatusEl) {
+      liveStatusEl.textContent = "live view closed — pick a host to reconnect.";
+    }
+  };
+  ws.onerror = () => {
+    if (liveStatusEl) liveStatusEl.textContent = "live view connection error.";
+  };
+  ws.onmessage = (ev) => {
+    let data;
+    try { data = JSON.parse(ev.data); } catch (e) { return; }
+    switch (data.type) {
+      case "status":
+        if (liveStatusEl) {
+          liveStatusEl.textContent = "live: " + host +
+            (data.authenticated ? " (authenticated)" :
+              data.reason ? " (" + data.reason + ")" : "");
+        }
+        break;
+      case "frame":
+        if (liveViewEl && data.data) {
+          liveViewEl.src = "data:image/jpeg;base64," + data.data;
+        }
+        break;
+      case "stopped":
+        if (liveStatusEl) liveStatusEl.textContent = "live view stopped.";
+        break;
+      case "error":
+        if (liveStatusEl) {
+          liveStatusEl.textContent = "live view error: " + (data.reason ||
+            data.status || "unknown") + (data.detail ? " — " + data.detail : "");
+        }
+        break;
+      default:
+        break;
+    }
+  };
 }

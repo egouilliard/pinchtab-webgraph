@@ -171,6 +171,19 @@ pre {
 #cred-form button:hover { background: #1d4ed8; }
 .vault-msg { font-size: 0.8rem; margin-top: 0.5rem; }
 
+/* Phase-4 live browser pane placeholder */
+.live { margin-top: 2rem; border-top: 1px solid #ddd; padding-top: 1rem; }
+.live h2 { margin: 0 0 0.5rem; font-size: 0.9rem; text-transform: uppercase; color: #888; }
+#live-view {
+  max-width: 100%;
+  display: block;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #111;
+  min-height: 4rem;
+}
+#live-status { font-size: 0.8rem; margin: 0.5rem 0 0; }
+
 /* Phase-3 chat agent placeholder */
 .chat { margin-top: 2rem; border-top: 1px solid #ddd; padding-top: 1rem; }
 .chat h2 { margin: 0 0 0.25rem; font-size: 0.9rem; text-transform: uppercase; color: #888; }

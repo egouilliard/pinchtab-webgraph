@@ -39,10 +39,45 @@ Selecting a host in the sidebar opens two live WebSocket sessions for it at once
 - **Credentials modal** — the vault: store per-host login routing + a password (password
   goes to the OS keyring, never to disk) so the live pane can best-effort log itself in.
 
-Every capability degrades independently: with no API key the chat pane shows a
-`chat_unavailable` notice while the REST API and graph browsing keep working; with no
-Chrome binary the live pane shows `screencast_unavailable`; with no keyring backend the
+Every capability degrades independently: with no chat backend configured the chat pane
+shows a `chat_unavailable` notice while the REST API and graph browsing keep working; with
+no Chrome binary the live pane shows `screencast_unavailable`; with no keyring backend the
 vault reports `vault_unavailable`.
+
+## Chat backends
+
+The chat pane has **two interchangeable backends**. Both stream the identical frame
+protocol and are locked to the same six offline graph tools — they differ only in *how*
+they reach Claude:
+
+| Backend | Reaches Claude via | Auth | Needs |
+| --- | --- | --- | --- |
+| **`api`** (default when a key is present) | the **Anthropic API** directly | an `ANTHROPIC_API_KEY` | the `[ui]` extra (`anthropic`) |
+| **`claude_code`** | your **locally-logged-in Claude Code**, driven through the Claude Agent SDK | **no API key** — it uses your Claude Code login (`~/.claude/.credentials.json`) | the `claude` CLI on `PATH` + the `[ui-claude-code]` extra |
+
+The `claude_code` backend is the way to use the chat with a **Claude Code subscription and
+no API key at all**: it spawns your logged-in `claude` as a subprocess (via the Claude
+Agent SDK) and points it at the pinchtab-webgraph MCP server as its only tool source.
+
+**Selection logic** (`chat_backend.resolve_backend_name`), first match wins:
+
+1. `PINCHTAB_UI_CHAT_BACKEND` set to `api` or `claude_code` → that backend (explicit override).
+2. `ANTHROPIC_API_KEY` set → `api` (a configured key is the strongest signal).
+3. the `claude` CLI on `PATH` → `claude_code` (a logged-in Claude Code is available).
+4. otherwise → `api` (so you get the actionable `no_api_key` notice).
+
+**Model override:** the `api` backend defaults to `claude-opus-4-8` (override with
+`PINCHTAB_UI_MODEL`); the `claude_code` backend defaults to **your account's Claude Code
+default model** (override with `PINCHTAB_UI_CLAUDE_CODE_MODEL` — deliberately *not* the API
+`claude-opus-4-8` alias, which is an API model id, not necessarily a valid CLI alias).
+
+**Same safety posture, both backends.** The `claude_code` agent is fenced to the exact
+same six offline tools as the `api` backend: every built-in tool (Bash / Write / Edit / …)
+is removed (`tools=[]`), the two live tools (`crawl`, `ask_howto`) are stripped, no
+`~/.claude` / `CLAUDE.md` / project settings are loaded (`setting_sources=[]`,
+`strict_mcp_config=True`), and a deny-by-default `can_use_tool` backstop rejects anything
+not on the allow-list. It can never run a shell command on the host or drive a live crawl.
+See [Security model](#security-model).
 
 ## Prerequisites & install
 
@@ -61,13 +96,24 @@ The `[ui]` extra pulls **fastapi**, **uvicorn** (`uvicorn[standard]`), **keyring
 **anthropic**, **websockets**, and — self-referencing — the **`[mcp]` extra** (the chat
 agent drives the pinchtab-webgraph MCP server as its tool backend).
 
+To use the **Claude Code chat backend** instead of the Anthropic API (drive your local,
+logged-in Claude Code with no API key), also install the separate `[ui-claude-code]` extra:
+
+```bash
+pip install 'pinchtab-webgraph[ui,ui-claude-code]'
+```
+
+It's a **separate** extra on purpose — the Claude Agent SDK it pulls (`claude-agent-sdk`,
+~75MB) is *not* forced onto a plain `[ui]` install. It also needs the `claude` CLI
+installed and logged in (`claude`). See [Chat backends](#chat-backends).
+
 Beyond the extra, each of the three live capabilities needs one more thing at runtime;
 none is required to run the server or use the offline REST API:
 
 | Capability | Additionally needs |
 | --- | --- |
 | **Offline REST API + graph browsing** | only a populated cache (nothing else) |
-| **Chat pane** | an `ANTHROPIC_API_KEY` in the environment |
+| **Chat pane** | **either** an `ANTHROPIC_API_KEY` (the `api` backend) **or** a logged-in `claude` CLI + the `[ui-claude-code]` extra (the `claude_code` backend, no key). See [Chat backends](#chat-backends). |
 | **Live browser pane** | a Chrome/Chromium binary on `PATH` (+ a running PinchTab bridge, via `PINCHTAB_WEBGRAPH_BRIDGE`, for automated login) |
 | **Credentials vault** | a usable OS **keyring** backend (e.g. Secret Service, macOS Keychain, or `keyrings.alt` for a file backend) |
 
@@ -160,12 +206,17 @@ CLI/MCP surface uses.
 
 ### `GET /ws/chat?host=<host>`
 
-The chat agent (Phase 3): Claude (Anthropic API) wired to the pinchtab-webgraph MCP
-server (a stdio subprocess) as tools. It exposes **only the OFFLINE, read-only** tools —
-`graph_summary`, `howto`, `find_content`, `list_content`, `list_forms`, `link_paths`. The
-live `crawl` / `ask_howto` tools are deliberately withheld, so a chat message can never
-launch a crawl or drive a browser. Model default `claude-opus-4-8`, overridable via
-`PINCHTAB_UI_MODEL`.
+The chat agent: Claude wired to the pinchtab-webgraph MCP server (a stdio subprocess) as
+tools. It exposes **only the OFFLINE, read-only** tools — `graph_summary`, `howto`,
+`find_content`, `list_content`, `list_forms`, `link_paths`. The live `crawl` / `ask_howto`
+tools are deliberately withheld, so a chat message can never launch a crawl or drive a
+browser.
+
+The route dispatches through the selected [chat backend](#chat-backends): the **`api`**
+backend (Anthropic API, `ANTHROPIC_API_KEY`, model default `claude-opus-4-8` via
+`PINCHTAB_UI_MODEL`) or the **`claude_code`** backend (your local, logged-in Claude Code
+via the Claude Agent SDK — no key, model via `PINCHTAB_UI_CLAUDE_CODE_MODEL`). Both stream
+the same frames below and enforce the same offline-only tool lockdown.
 
 **Client → server:**
 
@@ -183,7 +234,7 @@ launch a crawl or drive a browser. Model default `claude-opus-4-8`, overridable 
 | `{"type":"done"}` | end of the turn (exactly once) |
 | `{"type":"error","detail":<str>}` | a per-turn error (e.g. tool-iteration limit) |
 | `{"type":"error","status":"invalid_host",…}` | bad host token; the socket then closes |
-| `{"type":"error","status":"chat_unavailable","reason":…,"detail":…}` | no key / dep missing (`no_api_key` / `no_anthropic_package` / `no_mcp_package`); the socket closes |
+| `{"type":"error","status":"chat_unavailable","reason":…,"detail":…}` | key / dep / CLI missing — `api` backend: `no_api_key` / `no_anthropic_package` / `no_mcp_package`; `claude_code` backend: `no_claude_cli` / `no_claude_code_package` / `claude_code_startup_error` |
 
 ### `GET /ws/screencast?host=<host>`
 
@@ -215,8 +266,10 @@ only frame/status/error dicts leave the relay loop.
 | Var | Effect |
 | --- | --- |
 | `PINCHTAB_WEBGRAPH_HOME` | Root of the cache + config dir (`$HOME/.pinchtab-webgraph` by default). The vault's `login-config.json` lives here too. |
-| `ANTHROPIC_API_KEY` | Enables the chat pane. Absent → a `chat_unavailable` frame; the rest of the UI still works. |
-| `PINCHTAB_UI_MODEL` | Override the chat model (default `claude-opus-4-8`). |
+| `ANTHROPIC_API_KEY` | Enables the `api` chat backend. When set it also *selects* the `api` backend by default. Absent → the UI falls back to the `claude_code` backend if a `claude` CLI is on `PATH`, else shows a `chat_unavailable` frame; the rest of the UI still works. |
+| `PINCHTAB_UI_MODEL` | Override the `api`-backend chat model (default `claude-opus-4-8`). |
+| `PINCHTAB_UI_CHAT_BACKEND` | Force the chat backend: `api` or `claude_code` (an explicit override wins over the auto-selection). See [Chat backends](#chat-backends). |
+| `PINCHTAB_UI_CLAUDE_CODE_MODEL` | Override the `claude_code`-backend model. Default: your account's Claude Code default (deliberately *not* the API `claude-opus-4-8` alias). |
 | `PINCHTAB_WEBGRAPH_BRIDGE` | PinchTab bridge URL for the live pane's best-effort automated login. Absent → the live pane still runs, just unauthenticated. |
 
 ## Security model
@@ -235,17 +288,24 @@ only frame/status/error dicts leave the relay loop.
   any process running as your user can read a keyring secret. See the
   [authenticated-login threat model](authenticated-login.md#threat-model--read-this-before-trusting-keyring)
   for the full picture and the sandbox posture that actually confines the automation.
-- **Chat is offline-tools-only.** The chat agent is given only the six read-only offline
-  MCP tools; `crawl` and `ask_howto` (which would drive a live browser) are withheld, so
-  no chat message has side effects beyond reading the already-cached graph.
+- **Chat is offline-tools-only — on both backends.** Whichever [chat backend](#chat-backends)
+  runs, the agent is given only the six read-only offline MCP tools; `crawl` and `ask_howto`
+  (which would drive a live browser) are withheld, so no chat message has side effects beyond
+  reading the already-cached graph. The `claude_code` backend spawns a real `claude`
+  subprocess that *could* otherwise run Bash/Write on the host, so it is fenced harder still:
+  all built-in tools are removed (`tools=[]`), no `~/.claude` / `CLAUDE.md` / project settings
+  are loaded, and a deny-by-default `can_use_tool` backstop rejects anything off the
+  six-tool allow-list.
 - **No endpoint authentication.** There is deliberately none — the design assumes a
   localhost-only deployment. Do not put this behind a public reverse proxy without adding
   your own auth in front.
 
 ## Notes & limitations
 
-- **Chat needs a key.** No `ANTHROPIC_API_KEY` → the chat pane reports `chat_unavailable`;
-  everything else keeps working.
+- **Chat needs a key *or* a local Claude Code.** With an `ANTHROPIC_API_KEY` the `api`
+  backend runs; with no key but a logged-in `claude` CLI (+ the `[ui-claude-code]` extra)
+  the `claude_code` backend runs with no key at all; with neither, the chat pane reports
+  `chat_unavailable` and everything else keeps working. See [Chat backends](#chat-backends).
 - **Live login needs a running bridge.** Without `PINCHTAB_WEBGRAPH_BRIDGE` (or a stored
   credential) the live pane still opens, just unauthenticated. Login is best-effort and
   never load-bearing: any failure degrades silently to an unauthenticated session.

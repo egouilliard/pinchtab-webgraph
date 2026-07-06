@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>pinchtab-webgraph UI</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Phase-1 placeholder: a two-column shell (sidebar of hosts + a how-to form).
+       Phase 5 replaces this whole body with the real two-pane SPA; the .sidebar /
+       .content seam here is where that swap lands. No framework, no build step. -->
+  <header>
+    <h1>pinchtab-webgraph</h1>
+    <span class="tag">offline UI</span>
+  </header>
+  <main>
+    <aside class="sidebar">
+      <h2>Hosts</h2>
+      <ul id="hosts"><li class="muted">loading…</li></ul>
+      <p class="muted" id="caches-dir"></p>
+    </aside>
+    <section class="content">
+      <form id="howto-form">
+        <label>Host <input id="host" type="text" placeholder="app.example.com" /></label>
+        <label>Goal <input id="goal" type="text" placeholder="create role" /></label>
+        <button type="submit">How-to</button>
+      </form>
+      <div id="results"><p class="muted">Pick a host, type a goal, and hit How-to.</p></div>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

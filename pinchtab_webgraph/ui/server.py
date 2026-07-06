@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""FastAPI app serving a minimal front-end + read-only REST over the offline queries.
+
+This is the Phase-1 web binding onto `api.py` (the print-free, dict-returning query
+surface) and `cache_store.py` (the per-host interaction-graph cache). It exposes the
+SAME structured dicts the CLI / MCP surface returns, over HTTP, plus a static
+placeholder UI. Everything is OFFLINE — a cached graph, no browser, no network.
+
+Routing is by URL hostname ONLY — there is deliberately NO `graph=` filesystem-path
+query param over HTTP (an unauthenticated open() of arbitrary paths). We lean on
+`cache_store.cache_path`'s own `^[A-Za-z0-9._-]+$` guard to reject traversal; the
+regex is NOT re-implemented here.
+
+STRUCTURALLY fastapi-free base install: reached only via its own console script
+`pinchtab-webgraph-ui`; nothing in the base package imports it (see mcp_server.py
+for the same discipline with `mcp`).
+"""
+import argparse
+import json
+import os
+import threading
+import webbrowser
+
+from fastapi import FastAPI, Query
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from .. import api, cache_store, __version__
+
+app = FastAPI(title="pinchtab-webgraph UI", version=__version__)
+
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+
+# --- shared helpers ----------------------------------------------------------
+
+# A structured status -> HTTP code map. Single source of truth: only the three
+# resolver statuses get a non-200 code; every structured MISS (no_match,
+# unreachable, empty, invalid_args, no_path, …) is a valid 200 answer with the
+# status carried in the body — the same contract the CLI/MCP surface uses.
+_STATUS_CODE = {
+    "invalid_host": 400,
+    "no_cache_for_host": 404,
+    "invalid_graph": 422,
+}
+
+
+def _respond(result):
+    """Wrap a structured api result in a JSONResponse with the mapped HTTP code."""
+    code = _STATUS_CODE.get(result.get("status"), 200) if isinstance(result, dict) else 200
+    return JSONResponse(result, status_code=code)
+
+
+def _resolve_host(host):
+    """Resolve a hostname to its cache-file path (host-only; no `graph=` escape hatch).
+
+    # keep in sync with mcp_server.py:host_summary/host_graph and query_cmd.py:_resolve_graph
+    Returns (path, None) on success, or (None, error_dict) with a `status` in
+    {invalid_host, no_cache_for_host}.
+    """
+    try:
+        path = cache_store.cache_path(host)
+    except ValueError:
+        return None, {"status": "invalid_host", "host": host}
+    if not os.path.exists(path):
+        return None, {"status": "no_cache_for_host", "host": host,
+                      "caches_dir": cache_store.caches_dir()}
+    return path, None
+
+
+def _call(fn, path, **kwargs):
+    """Call an api.* fn, mapping load/parse errors to an invalid_graph status.
+
+    # keep in sync with mcp_server._call / query_cmd._call — cache_store.load and the
+    # api resource funcs do NOT try/except, so a corrupt cache would otherwise 500;
+    # this converts it to a clean 422.
+    """
+    try:
+        return fn(path, **kwargs)
+    except (OSError, ValueError, json.JSONDecodeError, KeyError) as e:
+        return {"status": "invalid_graph", "path": path, "error": str(e)}
+
+
+# --- routes (all offline; answer from a cached graph) ------------------------
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "version": __version__}
+
+
+@app.get("/api/hosts")
+def hosts():
+    """Index of every host with a persisted cache + a cheap summary.
+
+    Each host's summary is computed independently inside its own try/except so one
+    corrupt cache never breaks the whole index (its entry carries an `error`).
+    # keep in sync with mcp_server.list_cached_hosts.
+    """
+    out = []
+    for h in cache_store.list_hosts():
+        entry = {"host": h,
+                 "summary_url": "/api/hosts/%s/summary" % h,
+                 "graph_url": "/api/hosts/%s/graph" % h,
+                 "forms_url": "/api/hosts/%s/forms" % h,
+                 "howto_url": "/api/hosts/%s/howto" % h,
+                 "content_url": "/api/hosts/%s/content" % h}
+        try:
+            entry["summary"] = api.graph_summary(cache_store.cache_path(h))
+        except (OSError, ValueError, json.JSONDecodeError, KeyError) as e:
+            entry["error"] = str(e)
+        out.append(entry)
+    return {"hosts": out, "caches_dir": cache_store.caches_dir()}
+
+
+@app.get("/api/hosts/{host}/summary")
+def host_summary(host: str):
+    path, err = _resolve_host(host)
+    if err is not None:
+        return _respond(err)
+    return _respond(_call(api.graph_summary, path))
+
+
+@app.get("/api/hosts/{host}/graph")
+def host_graph(host: str):
+    """The full raw interaction graph for one host (the large payload, on demand)."""
+    path, err = _resolve_host(host)
+    if err is not None:
+        return _respond(err)
+    # cache_store.load re-validates the host and re-reads the file; wrap it so a
+    # corrupt cache returns invalid_graph (422), not a 500.
+    return _respond(_call(lambda p: cache_store.load(host), path))
+
+
+@app.get("/api/hosts/{host}/forms")
+def host_forms(host: str):
+    path, err = _resolve_host(host)
+    if err is not None:
+        return _respond(err)
+    return _respond(_call(api.list_forms, path))
+
+
+@app.get("/api/hosts/{host}/howto")
+def host_howto(host: str, goal: str | None = None, start: str | None = None,
+               match: str | None = None, all: bool = False):
+    path, err = _resolve_host(host)
+    if err is not None:
+        return _respond(err)
+    return _respond(_call(api.howto, path, goal=goal, start=start, match=match, all=all))
+
+
+@app.get("/api/hosts/{host}/content")
+def host_content(host: str):
+    path, err = _resolve_host(host)
+    if err is not None:
+        return _respond(err)
+    return _respond(_call(api.list_content, path))
+
+
+@app.get("/api/hosts/{host}/content/search")
+def host_content_search(host: str, text: str = Query(...), start: str | None = None,
+                        limit: int = 40):
+    path, err = _resolve_host(host)
+    if err is not None:
+        return _respond(err)
+    return _respond(_call(api.find_content, path, text=text, start=start, limit=limit))
+
+
+# Static mount — registered LAST, AFTER every /api route, so it never shadows the
+# API. `html=True` serves index.html at "/".
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Serve the offline pinchtab-webgraph web UI + read-only REST API.")
+    ap.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1)")
+    ap.add_argument("--port", type=int, default=8765, help="bind port (default 8765)")
+    ap.add_argument("--open", action="store_true",
+                    help="open the UI in a browser once the server is up")
+    a = ap.parse_args()
+
+    import uvicorn
+    if a.open:
+        url = "http://%s:%d/" % (a.host, a.port)
+        # fire after a short delay so the server is listening before the tab opens.
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    # NOT reload=True: uvicorn's reloader needs an import string, not an app object.
+    uvicorn.run(app, host=a.host, port=a.port)
+
+
+if __name__ == "__main__":
+    main()

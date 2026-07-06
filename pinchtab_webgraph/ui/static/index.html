@@ -3,75 +3,141 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>pinchtab-webgraph UI</title>
+  <title>pinchtab-webgraph</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- Phase-1 placeholder: a two-column shell (sidebar of hosts + a how-to form).
-       Phase 5 replaces this whole body with the real two-pane SPA; the .sidebar /
-       .content seam here is where that swap lands. No framework, no build step. -->
-  <header>
-    <h1>pinchtab-webgraph</h1>
-    <span class="tag">offline UI</span>
-  </header>
-  <main>
+  <!-- The real two-pane SPA. Layout: a top bar, a left sidebar (crawled hosts +
+       a Credentials button), and a main area split into a live CHAT pane (left)
+       and a live BROWSER pane (right). A hidden credentials modal slides over on
+       demand. No framework, no build step, no external assets. -->
+  <div class="app">
+
+    <!-- top bar -------------------------------------------------------------->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">pinchtab</span><span class="brand-sub">webgraph</span>
+      </div>
+      <p class="caches-dir muted" id="caches-dir"></p>
+    </header>
+
+    <!-- sidebar: the list of all crawled graphs (hosts) ---------------------->
     <aside class="sidebar">
-      <h2>Hosts</h2>
-      <ul id="hosts"><li class="muted">loading…</li></ul>
-      <p class="muted" id="caches-dir"></p>
+      <div class="sidebar-head">
+        <h2>Crawled graphs</h2>
+        <button type="button" id="vault-open" class="btn-ghost" title="Manage login credentials">
+          Credentials
+        </button>
+      </div>
+      <ul id="hosts" class="hosts"><li class="muted pad">loading…</li></ul>
     </aside>
-    <section class="content">
-      <form id="howto-form">
-        <label>Host <input id="host" type="text" placeholder="app.example.com" /></label>
-        <label>Goal <input id="goal" type="text" placeholder="create role" /></label>
-        <button type="submit">How-to</button>
-      </form>
-      <div id="results"><p class="muted">Pick a host, type a goal, and hit How-to.</p></div>
 
-      <!-- Phase-3 placeholder chat panel; Phase 5's SPA replaces this too. -->
-      <section class="chat">
-        <h2>Chat agent</h2>
-        <p class="muted" id="chat-status">Pick a host to start a chat session.</p>
-        <div id="chat-log"></div>
-        <form id="chat-form" autocomplete="off">
-          <input id="chat-input" type="text" placeholder="how do I create a role?" disabled />
-          <button type="submit" disabled>Send</button>
-        </form>
-      </section>
+    <!-- main: header + a two-pane split (chat | live browser) ---------------->
+    <main class="main">
+      <div class="host-header" id="host-header" hidden>
+        <h1 class="host-name" id="host-name"></h1>
+        <span class="host-kind badge" id="host-kind"></span>
+        <span class="host-counts muted" id="host-counts"></span>
+      </div>
+      <p class="placeholder muted" id="placeholder">
+        Pick a graph on the left to open a chat and a live browser session for that host.
+      </p>
 
-      <!-- Phase-4 placeholder live browser pane; Phase 5 owns the real two-pane
-           layout that moves this to the right pane. A CDP screencast of a headless
-           Chrome (best-effort logged in) streams here as JPEG frames over a WS. -->
-      <section class="live">
-        <h2>Live browser</h2>
-        <img id="live-view" alt="live browser" />
-        <p class="muted" id="live-status"></p>
-      </section>
+      <div class="panes" id="panes" hidden>
+        <!-- LEFT pane: the live chat -->
+        <section class="pane chat-pane">
+          <div class="pane-head">
+            <h2>Chat</h2>
+            <span class="pane-status muted" id="chat-status">pick a host to start.</span>
+          </div>
+          <div id="chat-log" class="chat-log" aria-live="polite"></div>
+          <form id="chat-form" class="chat-form" autocomplete="off">
+            <input id="chat-input" type="text"
+                   placeholder="how do I create a CAE?" disabled />
+            <button type="submit" disabled>Send</button>
+          </form>
+        </section>
 
-      <!-- Phase-2 placeholder credentials panel; Phase 5's SPA replaces this too. -->
-      <section class="vault">
-        <h2>Credentials vault</h2>
-        <p class="muted vault-status" id="vault-status">checking keyring…</p>
-        <ul id="creds"><li class="muted">loading…</li></ul>
-        <form id="cred-form" autocomplete="off">
-          <label>Host <input id="cred-host" type="text" placeholder="app.example.com" /></label>
-          <label>Login URL <input id="cred-url" type="text" placeholder="https://app.example.com/login" /></label>
-          <label>Username <input id="cred-username" type="text" placeholder="me@example.com" /></label>
-          <label>Password <input id="cred-password" type="password" placeholder="stored in the OS keyring only" /></label>
-          <details class="advanced">
-            <summary>Advanced (optional selector overrides)</summary>
-            <label>userField <input id="cred-userField" type="text" placeholder="input[name=email]" /></label>
-            <label>passField <input id="cred-passField" type="text" placeholder="input[type=password]" /></label>
-            <label>submit <input id="cred-submit" type="text" placeholder="button[type=submit]" /></label>
-            <label>successUrl <input id="cred-successUrl" type="text" placeholder="/dashboard" /></label>
-            <label>keyringService <input id="cred-keyringService" type="text" placeholder="pinchtab-webgraph" /></label>
-          </details>
+        <!-- RIGHT pane: the live PinchTab/browser session -->
+        <section class="pane live-pane">
+          <div class="pane-head">
+            <h2>Live browser</h2>
+            <span class="pane-status muted" id="live-status">pick a host to start.</span>
+          </div>
+          <div class="live-frame">
+            <img id="live-view" alt="live browser session" />
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- credentials vault (modal / slide-over; hidden by default) ------------->
+  <div id="vault-modal" class="modal" hidden>
+    <div class="modal-backdrop" id="vault-backdrop"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="vault-title">
+      <div class="modal-head">
+        <h2 id="vault-title">Credentials vault</h2>
+        <button type="button" id="vault-close" class="btn-ghost" aria-label="Close">✕</button>
+      </div>
+      <p class="vault-status muted" id="vault-status">checking keyring…</p>
+      <p class="vault-note muted">
+        Passwords are stored in your OS keyring only — never written to disk, never
+        shown back here.
+      </p>
+
+      <ul id="creds" class="creds"><li class="muted pad">loading…</li></ul>
+
+      <form id="cred-form" class="cred-form" autocomplete="off">
+        <div class="field-row">
+          <label>Host
+            <input id="cred-host" type="text" placeholder="app.example.com" />
+          </label>
+          <label>Login URL
+            <input id="cred-url" type="text" placeholder="https://app.example.com/login" />
+          </label>
+        </div>
+        <div class="field-row">
+          <label>Username
+            <input id="cred-username" type="text" placeholder="me@example.com" />
+          </label>
+          <label>Password
+            <input id="cred-password" type="password"
+                   placeholder="stored in the OS keyring only" />
+          </label>
+        </div>
+        <details class="advanced">
+          <summary>Advanced (optional selector overrides)</summary>
+          <div class="field-row">
+            <label>userField
+              <input id="cred-userField" type="text" placeholder="input[name=email]" />
+            </label>
+            <label>passField
+              <input id="cred-passField" type="text" placeholder="input[type=password]" />
+            </label>
+          </div>
+          <div class="field-row">
+            <label>submit
+              <input id="cred-submit" type="text" placeholder="button[type=submit]" />
+            </label>
+            <label>successUrl
+              <input id="cred-successUrl" type="text" placeholder="/dashboard" />
+            </label>
+          </div>
+          <div class="field-row">
+            <label>keyringService
+              <input id="cred-keyringService" type="text" placeholder="pinchtab-webgraph" />
+            </label>
+          </div>
+        </details>
+        <div class="form-actions">
           <button type="submit">Save credential</button>
-        </form>
-        <p class="muted vault-msg" id="cred-msg"></p>
-      </section>
-    </section>
-  </main>
+          <span class="vault-msg muted" id="cred-msg"></span>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

@@ -1,235 +1,177 @@
-// Phase-1 placeholder front-end: populate the host sidebar from /api/hosts, let a
-// click pick a host, and run a how-to against /api/hosts/<host>/howto. Vanilla JS,
-// no framework, no build step — Phase 5's SPA replaces this file wholesale.
+// pinchtab-webgraph web UI — a single-page controller.
+//
+// The app is a two-pane workspace: pick a crawled graph (host) in the sidebar and
+// it (1) shows a header with the graph's kind + element counts, (2) opens a live
+// CHAT socket (left pane), and (3) opens a live BROWSER screencast socket (right
+// pane). Switching hosts closes the prior sockets and opens fresh ones. A modal
+// credentials vault stores per-host logins (password write-only).
+//
+// SAFETY DISCIPLINE (kept from the earlier phases):
+//   * textContent ONLY for every server-sourced string — never innerHTML with data.
+//   * encodeURIComponent for host/goal in every URL.
+//   * close prior sockets on host switch; the password input is cleared after submit
+//     and its value is never read back from the server.
 "use strict";
 
-const hostsEl = document.getElementById("hosts");
-const cachesDirEl = document.getElementById("caches-dir");
-const hostInput = document.getElementById("host");
-const goalInput = document.getElementById("goal");
-const resultsEl = document.getElementById("results");
+// --- element handles ---------------------------------------------------------
+const el = (id) => document.getElementById(id);
 
-async function loadHosts() {
-  try {
-    const res = await fetch("/api/hosts");
-    const data = await res.json();
-    hostsEl.innerHTML = "";
-    if (!data.hosts || data.hosts.length === 0) {
-      hostsEl.innerHTML = '<li class="muted">no cached hosts yet</li>';
-    } else {
-      for (const h of data.hosts) {
-        const li = document.createElement("li");
-        const kind = h.summary ? h.summary.graph_kind : (h.error ? "error" : "?");
-        li.textContent = h.host;
-        const badge = document.createElement("span");
-        badge.className = "badge";
-        badge.textContent = kind;
-        li.appendChild(badge);
-        li.addEventListener("click", () => {
-          hostInput.value = h.host;
-          // reflect the selection in the sidebar.
-          for (const el of hostsEl.children) el.classList.remove("selected");
-          li.classList.add("selected");
-          openChat(h.host);
-          openLiveView(h.host);
-        });
-        hostsEl.appendChild(li);
-      }
-    }
-    if (data.caches_dir) cachesDirEl.textContent = "caches: " + data.caches_dir;
-  } catch (err) {
-    hostsEl.innerHTML = '<li class="muted">failed to load hosts</li>';
-  }
-}
+const hostsEl = el("hosts");
+const cachesDirEl = el("caches-dir");
 
-function renderResult(data) {
-  resultsEl.innerHTML = "";
-  const status = document.createElement("p");
-  status.className = "status";
-  status.textContent = "status: " + (data.status || "(none)");
-  resultsEl.appendChild(status);
+const hostHeaderEl = el("host-header");
+const hostNameEl = el("host-name");
+const hostKindEl = el("host-kind");
+const hostCountsEl = el("host-counts");
+const placeholderEl = el("placeholder");
+const panesEl = el("panes");
 
-  // structured render of the first shortest result, if the how-to matched.
-  if (data.status === "ok" && Array.isArray(data.results)) {
-    for (const r of data.results) {
-      const box = document.createElement("div");
-      box.className = "result-box";
-      const h = document.createElement("h3");
-      h.textContent = r.trigger_label + "  (" + r.clicks + " clicks)";
-      box.appendChild(h);
-      const ol = document.createElement("ol");
-      for (const step of r.steps || []) {
-        const li = document.createElement("li");
-        li.textContent = step;
-        ol.appendChild(li);
-      }
-      box.appendChild(ol);
-      resultsEl.appendChild(box);
-    }
-  }
+const chatLogEl = el("chat-log");
+const chatStatusEl = el("chat-status");
+const chatFormEl = el("chat-form");
+const chatInputEl = el("chat-input");
+const chatSendEl = chatFormEl ? chatFormEl.querySelector("button") : null;
 
-  // always show the raw JSON too — this is a debugging placeholder UI.
-  const pre = document.createElement("pre");
-  pre.textContent = JSON.stringify(data, null, 2);
-  resultsEl.appendChild(pre);
-}
+const liveViewEl = el("live-view");
+const liveStatusEl = el("live-status");
 
-document.getElementById("howto-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const host = hostInput.value.trim();
-  const goal = goalInput.value.trim();
-  if (!host) {
-    resultsEl.innerHTML = '<p class="muted">enter a host first.</p>';
-    return;
-  }
-  resultsEl.innerHTML = '<p class="muted">querying…</p>';
-  try {
-    const url = "/api/hosts/" + encodeURIComponent(host) +
-      "/howto?goal=" + encodeURIComponent(goal);
-    const res = await fetch(url);
-    const data = await res.json();
-    renderResult(data);
-  } catch (err) {
-    resultsEl.innerHTML = '<p class="muted">request failed.</p>';
-  }
-});
-
-loadHosts();
-
-// --- Phase-2 credentials vault (placeholder; Phase 5's SPA replaces this) -----
-// Plain-DOM, textContent only (never innerHTML with server data). The password is
-// write-only: we never receive it back, never prefill it, and clear the input the
-// instant a save request returns — success or failure.
-const credsEl = document.getElementById("creds");
-const vaultStatusEl = document.getElementById("vault-status");
-const credMsgEl = document.getElementById("cred-msg");
-const credHost = document.getElementById("cred-host");
-const credPassword = document.getElementById("cred-password");
+// vault modal
+const vaultModalEl = el("vault-modal");
+const vaultOpenEl = el("vault-open");
+const vaultCloseEl = el("vault-close");
+const vaultBackdropEl = el("vault-backdrop");
+const vaultStatusEl = el("vault-status");
+const credsEl = el("creds");
+const credFormEl = el("cred-form");
+const credHostEl = el("cred-host");
+const credPasswordEl = el("cred-password");
+const credMsgEl = el("cred-msg");
 
 const CRED_FIELDS = ["url", "username", "userField", "passField", "submit",
   "successUrl", "keyringService"];
 
-async function loadVaultStatus() {
-  try {
-    const res = await fetch("/api/vault/status");
-    const data = await res.json();
-    if (data.available) {
-      vaultStatusEl.textContent = "keyring backend: " + (data.backend || "ok");
-    } else {
-      vaultStatusEl.textContent = "keyring unavailable (" + (data.reason || "?") +
-        ") — " + (data.detail || "");
-    }
-  } catch (err) {
-    vaultStatusEl.textContent = "could not read keyring status";
-  }
-}
-
-async function loadCredentials() {
-  try {
-    const res = await fetch("/api/vault/credentials");
-    const data = await res.json();
-    credsEl.innerHTML = "";
-    const rows = data.credentials || [];
-    if (rows.length === 0) {
-      credsEl.innerHTML = '<li class="muted">no stored credentials yet</li>';
-      return;
-    }
-    for (const c of rows) {
-      const li = document.createElement("li");
-      const main = document.createElement("span");
-      main.className = "cred-main";
-      main.textContent = c.host + "  ·  " + (c.username || "?") +
-        (c.url ? "  ·  " + c.url : "");
-      li.appendChild(main);
-
-      const badge = document.createElement("span");
-      // has_password: true (stored) / false (missing) / null (keyring unreadable).
-      badge.className = "badge " + (c.has_password === true ? "ok" :
-        c.has_password === false ? "warn" : "unknown");
-      badge.textContent = c.has_password === true ? "has password" :
-        c.has_password === false ? "no password" : "keyring ?";
-      li.appendChild(badge);
-
-      const del = document.createElement("button");
-      del.type = "button";
-      del.className = "cred-del";
-      del.textContent = "delete";
-      del.addEventListener("click", () => deleteCredential(c.host));
-      li.appendChild(del);
-
-      credsEl.appendChild(li);
-    }
-  } catch (err) {
-    credsEl.innerHTML = '<li class="muted">failed to load credentials</li>';
-  }
-}
-
-async function deleteCredential(host) {
-  credMsgEl.textContent = "deleting " + host + "…";
-  try {
-    const res = await fetch("/api/vault/credentials/" + encodeURIComponent(host),
-      { method: "DELETE" });
-    const data = await res.json();
-    credMsgEl.textContent = "deleted " + host + " (routing_removed=" +
-      data.routing_removed + ", secret_removed=" + data.secret_removed + ")";
-  } catch (err) {
-    credMsgEl.textContent = "delete failed";
-  }
-  loadCredentials();
-}
-
-document.getElementById("cred-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const host = credHost.value.trim();
-  if (!host) {
-    credMsgEl.textContent = "enter a host first.";
-    return;
-  }
-  const payload = { password: credPassword.value };
-  for (const f of CRED_FIELDS) {
-    const el = document.getElementById("cred-" + f);
-    const v = el ? el.value.trim() : "";
-    if (v) payload[f] = v;
-  }
-  credMsgEl.textContent = "saving…";
-  try {
-    const res = await fetch("/api/vault/credentials/" + encodeURIComponent(host), {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (data.status === "ok") {
-      credMsgEl.textContent = "saved " + host;
-    } else {
-      credMsgEl.textContent = "save failed: " + (data.status || "?") +
-        (data.detail ? " — " + data.detail : "");
-    }
-  } catch (err) {
-    credMsgEl.textContent = "save request failed";
-  } finally {
-    // Clear the password input immediately, regardless of the outcome.
-    credPassword.value = "";
-  }
-  loadCredentials();
-});
-
-loadVaultStatus();
-loadCredentials();
-
-// --- Phase-3 chat agent (placeholder; Phase 5's SPA replaces this) ------------
-// Streams over a WebSocket to /ws/chat?host=<host>. Plain-DOM, textContent ONLY —
-// server text (model output, tool names, errors) never touches innerHTML.
-const chatLogEl = document.getElementById("chat-log");
-const chatStatusEl = document.getElementById("chat-status");
-const chatFormEl = document.getElementById("chat-form");
-const chatInputEl = document.getElementById("chat-input");
-const chatSendEl = chatFormEl ? chatFormEl.querySelector("button") : null;
-
+// --- shared socket / selection state -----------------------------------------
 let chatWs = null;
-let chatHost = null;
-let currentBubble = null; // the assistant bubble being streamed into
+let liveWs = null;
+let selectedHost = null;
+let currentBubble = null; // the assistant bubble currently streaming
 
+function wsUrl(pathAndQuery) {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return proto + "//" + location.host + pathAndQuery;
+}
+
+// --- sidebar: list of crawled graphs -----------------------------------------
+async function loadHosts() {
+  try {
+    const res = await fetch("/api/hosts");
+    const data = await res.json();
+    hostsEl.textContent = "";
+    const rows = data.hosts || [];
+    if (rows.length === 0) {
+      const li = document.createElement("li");
+      li.className = "muted pad";
+      li.textContent = "no crawled graphs yet";
+      hostsEl.appendChild(li);
+    } else {
+      for (const h of rows) {
+        hostsEl.appendChild(buildHostRow(h));
+      }
+    }
+    if (data.caches_dir) cachesDirEl.textContent = data.caches_dir;
+  } catch (err) {
+    hostsEl.textContent = "";
+    const li = document.createElement("li");
+    li.className = "muted pad";
+    li.textContent = "failed to load graphs";
+    hostsEl.appendChild(li);
+  }
+}
+
+function summaryCount(summary) {
+  // interaction graphs report states/edges/triggers; link graphs report nodes/edges.
+  if (!summary) return null;
+  if (typeof summary.states === "number") return summary.states + " states";
+  if (typeof summary.nodes === "number") return summary.nodes + " pages";
+  return null;
+}
+
+function buildHostRow(h) {
+  const li = document.createElement("li");
+  li.className = "host-row";
+
+  const label = document.createElement("span");
+  label.className = "host-label";
+  label.textContent = h.host;
+  li.appendChild(label);
+
+  const meta = document.createElement("span");
+  meta.className = "host-meta";
+  const kind = h.summary ? h.summary.graph_kind : (h.error ? "error" : "?");
+  const badge = document.createElement("span");
+  badge.className = "badge";
+  badge.textContent = kind;
+  meta.appendChild(badge);
+  const count = summaryCount(h.summary);
+  if (count) {
+    const c = document.createElement("span");
+    c.className = "count";
+    c.textContent = count;
+    meta.appendChild(c);
+  }
+  li.appendChild(meta);
+
+  li.addEventListener("click", () => selectHost(h));
+  return li;
+}
+
+// --- host selection: header + BOTH sockets -----------------------------------
+async function selectHost(h) {
+  const host = h.host;
+  selectedHost = host;
+
+  // reflect selection in the sidebar.
+  for (const row of hostsEl.children) row.classList.remove("selected");
+  // find the clicked row by matching label text (rows carry the host as first child).
+  for (const row of hostsEl.children) {
+    const label = row.querySelector(".host-label");
+    if (label && label.textContent === host) row.classList.add("selected");
+  }
+
+  // header — filled from the (cheap) summary already in the index; refresh live.
+  renderHostHeader(host, h.summary, h.error);
+  if (placeholderEl) placeholderEl.hidden = true;
+  if (panesEl) panesEl.hidden = false;
+  if (hostHeaderEl) hostHeaderEl.hidden = false;
+
+  // fetch a fresh summary so counts are authoritative even if the index was stale.
+  try {
+    const res = await fetch("/api/hosts/" + encodeURIComponent(host) + "/summary");
+    const summary = await res.json();
+    if (selectedHost === host && summary && !summary.status) {
+      renderHostHeader(host, summary, null);
+    }
+  } catch (err) { /* keep the index summary */ }
+
+  openChat(host);
+  openLiveView(host);
+}
+
+function renderHostHeader(host, summary, error) {
+  hostNameEl.textContent = host;
+  const kind = summary ? summary.graph_kind : (error ? "error" : "?");
+  hostKindEl.textContent = kind;
+  const parts = [];
+  if (summary) {
+    if (typeof summary.states === "number") parts.push(summary.states + " states");
+    if (typeof summary.nodes === "number") parts.push(summary.nodes + " pages");
+    if (typeof summary.triggers === "number") parts.push(summary.triggers + " triggers");
+    if (typeof summary.edges === "number") parts.push(summary.edges + " edges");
+  }
+  hostCountsEl.textContent = parts.join("  ·  ");
+}
+
+// --- chat pane ---------------------------------------------------------------
 function chatSetEnabled(on) {
   if (chatInputEl) chatInputEl.disabled = !on;
   if (chatSendEl) chatSendEl.disabled = !on;
@@ -245,61 +187,62 @@ function chatAddLine(cls, text) {
 }
 
 function openChat(host) {
-  // Close any prior socket before opening a new one.
   if (chatWs) {
     try { chatWs.close(); } catch (e) { /* ignore */ }
     chatWs = null;
   }
-  chatHost = host;
   currentBubble = null;
-  chatLogEl.innerHTML = "";
+  chatLogEl.textContent = "";
   chatSetEnabled(false);
-  chatStatusEl.textContent = "connecting to " + host + "…";
+  chatStatusEl.textContent = "connecting…";
 
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const url = proto + "//" + location.host + "/ws/chat?host=" +
-    encodeURIComponent(host);
-  const ws = new WebSocket(url);
+  const ws = new WebSocket(wsUrl("/ws/chat?host=" + encodeURIComponent(host)));
   chatWs = ws;
 
   ws.onopen = () => {
-    chatStatusEl.textContent = "chatting about " + host;
+    if (chatWs !== ws) return;
+    chatStatusEl.textContent = "ready — ask where to go.";
     chatSetEnabled(true);
   };
   ws.onclose = () => {
     if (chatWs === ws) {
-      chatStatusEl.textContent = "chat closed — pick a host to reconnect.";
+      chatStatusEl.textContent = "chat closed.";
       chatSetEnabled(false);
     }
   };
   ws.onerror = () => {
-    chatStatusEl.textContent = "chat connection error.";
+    if (chatWs === ws) chatStatusEl.textContent = "chat connection error.";
   };
   ws.onmessage = (ev) => {
+    if (chatWs !== ws) return;
     let data;
     try { data = JSON.parse(ev.data); } catch (e) { return; }
     switch (data.type) {
       case "text":
         if (!currentBubble) currentBubble = chatAddLine("msg-assistant", "");
-        // extend the current assistant bubble via textContent (never innerHTML).
         currentBubble.textContent += (data.delta || "");
         chatLogEl.scrollTop = chatLogEl.scrollHeight;
         break;
       case "tool_use":
         currentBubble = null;
-        chatAddLine("msg-tool", "used tool " + (data.name || "?"));
+        chatAddLine("msg-tool", "→ " + (data.name || "tool"));
         break;
       case "tool_result":
-        chatAddLine("msg-tool", "tool " + (data.name || "?") + " → " +
+        chatAddLine("msg-tool", "✓ " + (data.name || "tool") + " · " +
           (data.status || "?"));
         break;
       case "error":
         currentBubble = null;
-        chatAddLine("msg-error", "error: " + (data.reason || data.status ||
-          "unknown") + (data.detail ? " — " + data.detail : ""));
+        if (data.status === "chat_unavailable") {
+          // graceful no-key (or missing-dep) case — the rest of the UI still works.
+          chatSetEnabled(false);
+          chatStatusEl.textContent = "chat unavailable (" + (data.reason || "?") + ")";
+        }
+        chatAddLine("msg-error", "chat unavailable: " +
+          (data.reason || data.status || "unknown") +
+          (data.detail ? " — " + data.detail : ""));
         break;
       case "done":
-        // finalize the current assistant bubble.
         currentBubble = null;
         break;
       default:
@@ -320,47 +263,33 @@ if (chatFormEl) {
   });
 }
 
-// --- Phase-4 live browser pane (placeholder; Phase 5 owns the two-pane layout) --
-// A CDP screencast of a headless Chrome streams over /ws/screencast?host=<host> as
-// base64 JPEG frames; we paint each into an <img>. Read-only: no client->server
-// input. Server text (status/reason) never touches innerHTML — textContent only.
-const liveViewEl = document.getElementById("live-view");
-const liveStatusEl = document.getElementById("live-status");
-
-let liveWs = null;
-
+// --- live browser pane -------------------------------------------------------
 function openLiveView(host) {
-  // Close any prior live socket before opening a new one.
   if (liveWs) {
     try { liveWs.close(); } catch (e) { /* ignore */ }
     liveWs = null;
   }
   if (liveViewEl) liveViewEl.removeAttribute("src");
-  if (liveStatusEl) liveStatusEl.textContent = "connecting to " + host + "…";
+  if (liveStatusEl) liveStatusEl.textContent = "connecting…";
 
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const url = proto + "//" + location.host + "/ws/screencast?host=" +
-    encodeURIComponent(host);
-  const ws = new WebSocket(url);
+  const ws = new WebSocket(wsUrl("/ws/screencast?host=" + encodeURIComponent(host)));
   liveWs = ws;
 
   ws.onclose = () => {
-    if (liveWs === ws && liveStatusEl) {
-      liveStatusEl.textContent = "live view closed — pick a host to reconnect.";
-    }
+    if (liveWs === ws && liveStatusEl) liveStatusEl.textContent = "live view closed.";
   };
   ws.onerror = () => {
-    if (liveStatusEl) liveStatusEl.textContent = "live view connection error.";
+    if (liveWs === ws && liveStatusEl) liveStatusEl.textContent = "live view error.";
   };
   ws.onmessage = (ev) => {
+    if (liveWs !== ws) return;
     let data;
     try { data = JSON.parse(ev.data); } catch (e) { return; }
     switch (data.type) {
       case "status":
         if (liveStatusEl) {
-          liveStatusEl.textContent = "live: " + host +
-            (data.authenticated ? " (authenticated)" :
-              data.reason ? " (" + data.reason + ")" : "");
+          liveStatusEl.textContent = data.authenticated ? "live · authenticated" :
+            (data.reason ? "live · " + data.reason : "live");
         }
         break;
       case "frame":
@@ -373,8 +302,9 @@ function openLiveView(host) {
         break;
       case "error":
         if (liveStatusEl) {
-          liveStatusEl.textContent = "live view error: " + (data.reason ||
-            data.status || "unknown") + (data.detail ? " — " + data.detail : "");
+          liveStatusEl.textContent = "live unavailable: " +
+            (data.reason || data.status || "unknown") +
+            (data.detail ? " — " + data.detail : "");
         }
         break;
       default:
@@ -382,3 +312,142 @@ function openLiveView(host) {
     }
   };
 }
+
+// --- credentials vault (modal) -----------------------------------------------
+function openVault() {
+  if (!vaultModalEl) return;
+  vaultModalEl.hidden = false;
+  loadVaultStatus();
+  loadCredentials();
+}
+
+function closeVault() {
+  if (vaultModalEl) vaultModalEl.hidden = true;
+}
+
+if (vaultOpenEl) vaultOpenEl.addEventListener("click", openVault);
+if (vaultCloseEl) vaultCloseEl.addEventListener("click", closeVault);
+if (vaultBackdropEl) vaultBackdropEl.addEventListener("click", closeVault);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && vaultModalEl && !vaultModalEl.hidden) closeVault();
+});
+
+async function loadVaultStatus() {
+  try {
+    const res = await fetch("/api/vault/status");
+    const data = await res.json();
+    if (data.available) {
+      vaultStatusEl.textContent = "keyring backend: " + (data.backend || "ok");
+    } else {
+      vaultStatusEl.textContent = "keyring unavailable (" + (data.reason || "?") +
+        ") — " + (data.detail || "");
+    }
+  } catch (err) {
+    vaultStatusEl.textContent = "could not read keyring status";
+  }
+}
+
+async function loadCredentials() {
+  try {
+    const res = await fetch("/api/vault/credentials");
+    const data = await res.json();
+    credsEl.textContent = "";
+    const rows = data.credentials || [];
+    if (rows.length === 0) {
+      const li = document.createElement("li");
+      li.className = "muted pad";
+      li.textContent = "no stored credentials yet";
+      credsEl.appendChild(li);
+      return;
+    }
+    for (const c of rows) credsEl.appendChild(buildCredRow(c));
+  } catch (err) {
+    credsEl.textContent = "";
+    const li = document.createElement("li");
+    li.className = "muted pad";
+    li.textContent = "failed to load credentials";
+    credsEl.appendChild(li);
+  }
+}
+
+function buildCredRow(c) {
+  const li = document.createElement("li");
+
+  const main = document.createElement("span");
+  main.className = "cred-main";
+  main.textContent = c.host + "  ·  " + (c.username || "?") +
+    (c.url ? "  ·  " + c.url : "");
+  li.appendChild(main);
+
+  const badge = document.createElement("span");
+  // has_password: true (stored) / false (missing) / null (keyring unreadable).
+  badge.className = "badge " + (c.has_password === true ? "ok" :
+    c.has_password === false ? "warn" : "unknown");
+  badge.textContent = c.has_password === true ? "has password" :
+    c.has_password === false ? "no password" : "keyring ?";
+  li.appendChild(badge);
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "cred-del";
+  del.textContent = "delete";
+  del.addEventListener("click", () => deleteCredential(c.host));
+  li.appendChild(del);
+
+  return li;
+}
+
+async function deleteCredential(host) {
+  credMsgEl.textContent = "deleting " + host + "…";
+  try {
+    const res = await fetch("/api/vault/credentials/" + encodeURIComponent(host),
+      { method: "DELETE" });
+    const data = await res.json();
+    credMsgEl.textContent = "deleted " + host + " (routing_removed=" +
+      data.routing_removed + ", secret_removed=" + data.secret_removed + ")";
+  } catch (err) {
+    credMsgEl.textContent = "delete failed";
+  }
+  loadCredentials();
+}
+
+if (credFormEl) {
+  credFormEl.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const host = credHostEl.value.trim();
+    if (!host) {
+      credMsgEl.textContent = "enter a host first.";
+      return;
+    }
+    const payload = { password: credPasswordEl.value };
+    for (const f of CRED_FIELDS) {
+      const input = el("cred-" + f);
+      const v = input ? input.value.trim() : "";
+      if (v) payload[f] = v;
+    }
+    credMsgEl.textContent = "saving…";
+    try {
+      const res = await fetch("/api/vault/credentials/" + encodeURIComponent(host), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (data.status === "ok") {
+        credMsgEl.textContent = "saved " + host;
+      } else {
+        credMsgEl.textContent = "save failed: " + (data.status || "?") +
+          (data.detail ? " — " + data.detail : "");
+      }
+    } catch (err) {
+      credMsgEl.textContent = "save request failed";
+    } finally {
+      // Clear the password input immediately, regardless of the outcome.
+      credPasswordEl.value = "";
+    }
+    loadCredentials();
+  });
+}
+
+// --- boot --------------------------------------------------------------------
+loadHosts();

@@ -232,3 +232,41 @@ def test_vault_unavailable_503(isolated_cache_home):
     assert body["status"] == "vault_unavailable"
     assert body["reason"] == "no_keyring_backend"
     assert _no_secret_anywhere(body)
+
+
+# --- SPA static page: index.html <-> app.js element-id contract --------------
+#
+# The SPA is vanilla HTML/JS with no build step, so nothing enforces that the IDs
+# app.js reaches for actually exist in index.html. These two guards do: if index.html
+# is served, and if every ID the controller depends on is present, the two files stay
+# in sync. We do NOT execute the JS — just assert the shared ID surface + that app.js
+# references those same IDs.
+
+# The element IDs the SPA controller (app.js) depends on — the panes, the two
+# sockets' targets, and the vault modal. Keep in sync with app.js's `el(...)` calls.
+SPA_IDS = [
+    "caches-dir", "hosts",                        # sidebar: crawled-graphs list
+    "host-header", "host-name", "host-kind", "host-counts", "panes",  # host header
+    "chat-form", "chat-input", "chat-log", "chat-status",             # chat pane
+    "live-view", "live-status",                                       # live pane
+    "vault-modal", "vault-open", "vault-close", "vault-status",       # vault modal
+    "creds", "cred-form", "cred-host", "cred-password", "cred-msg",
+]
+
+
+def test_index_served_with_spa_element_ids():
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    html = r.text
+    for _id in SPA_IDS:
+        assert ('id="%s"' % _id) in html, "index.html is missing id=%r" % _id
+
+
+def test_app_js_references_the_same_ids():
+    r = client.get("/app.js")
+    assert r.status_code == 200
+    js = r.text
+    # The controller resolves elements by id string literal; each SPA id must appear.
+    for _id in SPA_IDS:
+        assert ('"%s"' % _id) in js, "app.js never references id=%r" % _id

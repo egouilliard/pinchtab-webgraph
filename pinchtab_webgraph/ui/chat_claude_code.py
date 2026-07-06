@@ -21,6 +21,7 @@ LAZILY inside ``open_client``, and a missing package / missing CLI degrades to a
 structured ``chat.ChatUnavailable(reason, detail)`` rather than a crash.
 """
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -206,6 +207,34 @@ async def open_client(host, *, model=None):
         shutil.rmtree(cwd, ignore_errors=True)
 
 
+def _tool_result_text(content):
+    """Join a ToolResultBlock's ``content`` into plain text. Pure, never raises.
+
+    Unlike the API backend (chat.py), the Claude Agent SDK delivers a tool result as
+    the raw ToolResultBlock content — a str, or a list of ``{"type":"text","text":...}``
+    blocks (the SDK's content-block shape), or None. Returns "" for anything else.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _parse_tool_payload(content):
+    """Best-effort ``json.loads`` of a ToolResultBlock's text. None on any failure.
+
+    The SAME `howto` payload the API backend reads as a dict arrives here as JSON TEXT,
+    so we parse it back to a dict before reusing ``chat._extract_tour``. Any parse
+    failure (non-JSON text, empty content) degrades to None — never a tour frame.
+    """
+    try:
+        return json.loads(_tool_result_text(content))
+    except (ValueError, TypeError):
+        return None
+
+
 async def run_conversation_turn(client, text, *, emit):
     """Drive one turn: send ``text``, stream the reply, map SDK messages -> frames.
 
@@ -252,6 +281,12 @@ async def run_conversation_turn(client, text, *, emit):
                         status = "error" if block.is_error else "ok"
                         await emit({"type": "tool_result", "name": name,
                                     "status": status})
+                        if name == "howto" and status == "ok":
+                            payload = _parse_tool_payload(block.content)
+                            if payload is not None:
+                                tour = chat._extract_tour(payload)
+                                if tour is not None:
+                                    await emit({"type": "tour", "data": tour})
             continue
 
         if kind == "ResultMessage":

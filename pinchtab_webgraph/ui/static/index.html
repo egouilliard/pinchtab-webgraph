@@ -66,6 +66,19 @@
           </div>
           <div class="live-frame">
             <img id="live-view" alt="live browser session" />
+            <!-- guided-tour overlay: a dimming highlight box + a tip card. Sits over
+                 the live <img> (same box), pointer-events:none except the tip. -->
+            <div id="tour-overlay" class="tour-overlay" hidden>
+              <div id="tour-box" class="tour-box"></div>
+              <div id="tour-tip" class="tour-tip">
+                <p id="tour-tip-text"></p>
+                <div class="tour-controls">
+                  <button id="tour-prev" type="button">Prev</button>
+                  <button id="tour-next" type="button">Next</button>
+                  <button id="tour-done" type="button">Done</button>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
       </div>

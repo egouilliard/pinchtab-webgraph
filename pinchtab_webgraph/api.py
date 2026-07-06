@@ -113,7 +113,8 @@ def howto(
         return {"trigger_label": t["label"], "state_id": t["state"],
                 "state_url": st.get("url"), "clicks": len(steps) - 1, "steps": steps,
                 "opens_at": t.get("opensAt"), "form": t.get("form"),
-                "confidence": howto_graph.form_confidence(t)}
+                "confidence": howto_graph.form_confidence(t),
+                "tour": _tour_steps(epath, t)}
 
     dist_cache: dict = {}
     routed = []
@@ -148,6 +149,24 @@ def howto(
     return {"status": "ok", "goal": goal, "match_pattern": pattern,
             "start_url": start_url, "results": results, "candidates": [],
             "low_confidence": low}
+
+
+def _tour_steps(epath, trigger) -> list[dict]:
+    """The ordered highlight steps a "Show Me How" guided tour replays on the live pane.
+
+    Structural + additive: one `nav` step per routing edge in `epath` (each carrying its
+    edge selector — present for every edge kind EXCEPT `iframe`, whose selector is None),
+    then one `trigger` step for the trigger's own final click (which the crawler NEVER
+    persists a selector for, so `selector` is None — the front-end resolves it by label),
+    then a terminal `form` step. The terminal `form` step deliberately carries NO
+    selector: that is the structural guarantee that a tour NEVER auto-submits a form.
+    """
+    steps = [{"kind": "nav", "label": e["label"], "selector": e.get("selector"),
+              "href": None} for e in epath]
+    steps.append({"kind": "trigger", "label": trigger["label"], "selector": None,
+                  "href": None})
+    steps.append({"kind": "form"})
+    return steps
 
 
 def _item_text(it: dict) -> str:

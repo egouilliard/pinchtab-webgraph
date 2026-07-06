@@ -340,24 +340,43 @@ async def screencast_ws(websocket: WebSocket, host: str = Query(...)):
             # stream IN on the same socket and are dispatched as CDP Input.* commands on
             # the SAME cdp_ws (websockets serializes concurrent sends). This is what makes
             # the pane a driveable live session, not a passive view.
+            # ONE dispatcher owns the cdp_ws id-space, shared by the relay (frames/acks),
+            # the input path (Input.* fire-and-forget), and the "Show Me How" locate probe
+            # (Runtime.evaluate request/reply). The relay consumes locate replies before
+            # they can be mistaken for screencast frames.
+            dispatcher = screencast.CdpDispatcher(live.cdp_ws)
             relay = asyncio.create_task(
-                screencast.relay_screencast(live.cdp_ws, emit=websocket.send_json))
-            input_id = 100000  # high, ignored-response CDP ids — never clash with relay's
+                screencast.relay_screencast(dispatcher, emit=websocket.send_json))
             try:
                 while True:
                     if relay.done():
                         break
                     msg = await websocket.receive_json()
-                    if msg.get("type") != "input":
+                    if msg.get("type") == "input":
+                        cmd = screencast.build_input_command(msg)
+                        if cmd is None:
+                            continue
+                        try:
+                            await dispatcher.send_nowait(cmd["method"], cmd.get("params"))
+                        except Exception:  # cdp socket died — end the session
+                            break
+                    elif msg.get("type") == "locate":
+                        # Resolve a tour step's on-screen rect so the SPA can draw a
+                        # highlight over the live pane. Best-effort: any failure yields a
+                        # null rect, never an error.
+                        cmd = screencast.build_locate_command(
+                            msg.get("selector"), msg.get("label"))
+                        try:
+                            result = await dispatcher.request(
+                                cmd["method"], cmd["params"], timeout=3.0)
+                        except Exception:  # noqa: BLE001 — never break the session on locate
+                            result = None
+                        rect = screencast._extract_locate_rect(result)
+                        await websocket.send_json({"type": "located",
+                                                   "stepId": msg.get("stepId"),
+                                                   "rect": rect})
+                    else:
                         continue
-                    cmd = screencast.build_input_command(msg)
-                    if cmd is None:
-                        continue
-                    input_id += 1
-                    try:
-                        await live.cdp_ws.send(json.dumps({"id": input_id, **cmd}))
-                    except Exception:  # cdp socket died — end the session
-                        break
             except WebSocketDisconnect:
                 pass
             finally:

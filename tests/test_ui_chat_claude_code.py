@@ -8,6 +8,7 @@ subprocess. The lockdown-shape / deny-backstop tests DO need the real SDK and ar
 guarded with importorskip. The REAL end-to-end test is opt-in behind an env gate.
 """
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -149,6 +150,70 @@ def test_frame_mapping_full_sequence():
 
     # the user text was actually sent through query() with the default session id
     assert client.queries == [("how?", "default")]
+
+
+def test_tool_result_text_and_parse_helpers():
+    # str content passes through; list-of-text-blocks joins; anything else -> "".
+    assert chat_claude_code._tool_result_text('{"a": 1}') == '{"a": 1}'
+    assert chat_claude_code._tool_result_text(
+        [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]) == "a\nb"
+    assert chat_claude_code._tool_result_text(None) == ""
+    assert chat_claude_code._tool_result_text(123) == ""
+    # best-effort json parse; non-JSON / empty -> None (never raises).
+    assert chat_claude_code._parse_tool_payload('{"status": "ok"}') == {"status": "ok"}
+    assert chat_claude_code._parse_tool_payload("not json") is None
+    assert chat_claude_code._parse_tool_payload(None) is None
+
+
+def test_frame_mapping_emits_tour_frame_for_howto_ok():
+    # The SDK delivers the howto result as JSON TEXT in ToolResultBlock.content; an OK
+    # payload with a tour must yield a {"type":"tour"} frame identical in shape to the
+    # API backend's (chat._extract_tour).
+    qhowto = chat_claude_code._qualified("howto")
+    payload = {"status": "ok", "goal": "create role",
+               "start_url": "https://example.test/dashboard",
+               "results": [{"trigger_label": "Create Role",
+                            "opens_at": "https://example.test/team/roles",
+                            "form": {"fieldCount": 1},
+                            "tour": [{"kind": "nav", "label": "Team", "selector": "a", "href": None},
+                                     {"kind": "trigger", "label": "Create Role",
+                                      "selector": None, "href": None},
+                                     {"kind": "form"}]}]}
+    messages = [
+        AssistantMessage([ToolUseBlock("t1", qhowto, {"host": "h", "goal": "create role"})]),
+        UserMessage([ToolResultBlock("t1", content=json.dumps(payload), is_error=False)]),
+        ResultMessage(is_error=False),
+    ]
+    frames = []
+
+    async def emit(f):
+        frames.append(f)
+
+    _run(chat_claude_code.run_conversation_turn(FakeClient(messages), "how?", emit=emit))
+
+    assert [f["type"] for f in frames] == ["tool_use", "tool_result", "tour", "done"]
+    tour = next(f for f in frames if f["type"] == "tour")["data"]
+    # identical shape to the API backend's _extract_tour output.
+    assert tour == chat._extract_tour(payload)
+    assert tour["trigger_label"] == "Create Role"
+    assert [s["kind"] for s in tour["steps"]] == ["nav", "trigger", "form"]
+
+
+def test_frame_mapping_no_tour_frame_for_howto_miss():
+    qhowto = chat_claude_code._qualified("howto")
+    messages = [
+        AssistantMessage([ToolUseBlock("t1", qhowto, {"host": "h"})]),
+        UserMessage([ToolResultBlock(
+            "t1", content=json.dumps({"status": "no_match", "results": []}))]),
+        ResultMessage(is_error=False),
+    ]
+    frames = []
+
+    async def emit(f):
+        frames.append(f)
+
+    _run(chat_claude_code.run_conversation_turn(FakeClient(messages), "x", emit=emit))
+    assert "tour" not in [f["type"] for f in frames]
 
 
 def test_frame_mapping_tool_result_error_status():

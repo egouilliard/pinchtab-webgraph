@@ -250,6 +250,37 @@ def test_run_tool_iserror_becomes_tool_error():
     assert chat._tool_status(payload) == "error"
 
 
+# --- _extract_tour: pure "Show Me How" tour extraction ------------------------
+
+def _howto_ok_payload():
+    return {"status": "ok", "goal": "create role",
+            "start_url": "https://example.test/dashboard",
+            "results": [{"trigger_label": "Create Role",
+                         "opens_at": "https://example.test/team/roles",
+                         "form": {"fieldCount": 1},
+                         "tour": [{"kind": "nav", "label": "Team", "selector": "a", "href": None},
+                                  {"kind": "trigger", "label": "Create Role",
+                                   "selector": None, "href": None},
+                                  {"kind": "form"}]}]}
+
+
+def test_extract_tour_from_ok_payload():
+    tour = chat._extract_tour(_howto_ok_payload())
+    assert tour["goal"] == "create role"
+    assert tour["start_url"] == "https://example.test/dashboard"
+    assert tour["trigger_label"] == "Create Role"
+    assert tour["opens_at"] == "https://example.test/team/roles"
+    assert tour["form"] == {"fieldCount": 1}
+    assert [s["kind"] for s in tour["steps"]] == ["nav", "trigger", "form"]
+
+
+def test_extract_tour_none_when_not_ok():
+    assert chat._extract_tour({"status": "no_match", "results": []}) is None
+    assert chat._extract_tour({"status": "ok", "results": []}) is None
+    assert chat._extract_tour("not a dict") is None
+    assert chat._extract_tour({"status": "ok"}) is None
+
+
 # --- run_conversation_turn: full stream + tool-use loop -----------------------
 
 def test_run_conversation_turn_streams_and_runs_tool():
@@ -280,8 +311,10 @@ def test_run_conversation_turn_streams_and_runs_tool():
     _run(chat.run_conversation_turn(state, emit=emit))
 
     types = [f["type"] for f in frames]
-    # ordered: text..., tool_use(howto), tool_result(ok), text..., done
-    assert types == ["text", "text", "tool_use", "tool_result", "text", "done"]
+    # ordered: text..., tool_use(howto), tool_result(ok), tour, text..., done
+    # (howto returned status:"ok" with a non-empty results list, so a tour frame is
+    # emitted right after the tool_result — see _extract_tour.)
+    assert types == ["text", "text", "tool_use", "tool_result", "tour", "text", "done"]
 
     tool_use = next(f for f in frames if f["type"] == "tool_use")
     assert tool_use["name"] == "howto"
@@ -301,6 +334,59 @@ def test_run_conversation_turn_streams_and_runs_tool():
     assert block["is_error"] is False
     # the tool was actually invoked with the model-provided args.
     assert session.calls == [("howto", {"host": "example.test", "goal": "create role"})]
+
+
+def test_run_conversation_turn_emits_tour_frame_after_howto():
+    # A howto tool call that returns status:"ok" with a tour -> a {"type":"tour"} frame
+    # emitted immediately AFTER the tool_result frame.
+    stream1 = FakeStream(
+        events=[],
+        final=FakeFinalMessage(
+            "tool_use",
+            [FakeToolUseBlock("t1", "howto", {"host": "example.test", "goal": "create role"})]))
+    stream2 = FakeStream(
+        events=[FakeTextEvent("Click Team, then Create Role.")],
+        final=FakeFinalMessage("end_turn", [FakeTextBlock("done")]))
+    client = FakeAnthropic([stream1, stream2])
+    session = FakeMCPSession(result=FakeCallToolResult(structuredContent=_howto_ok_payload()))
+    state = chat.ChatState(host="example.test", messages=[{"role": "user", "content": "how?"}],
+                           mcp_session=session, anthropic_client=client, tools=[])
+    frames = []
+
+    async def emit(frame):
+        frames.append(frame)
+
+    _run(chat.run_conversation_turn(state, emit=emit))
+
+    types = [f["type"] for f in frames]
+    assert types == ["tool_use", "tool_result", "tour", "text", "done"]
+    # the tour frame carries the extracted tour, keyed on the first result.
+    tour = next(f for f in frames if f["type"] == "tour")["data"]
+    assert tour["trigger_label"] == "Create Role"
+    assert [s["kind"] for s in tour["steps"]] == ["nav", "trigger", "form"]
+
+
+def test_run_conversation_turn_no_tour_frame_when_not_ok():
+    # a howto miss (status != ok / empty results) must NOT emit a tour frame.
+    stream1 = FakeStream(
+        events=[],
+        final=FakeFinalMessage(
+            "tool_use", [FakeToolUseBlock("t1", "howto", {"host": "h", "goal": "x"})]))
+    stream2 = FakeStream(
+        events=[FakeTextEvent("No path.")],
+        final=FakeFinalMessage("end_turn", [FakeTextBlock("No path.")]))
+    client = FakeAnthropic([stream1, stream2])
+    session = FakeMCPSession(
+        result=FakeCallToolResult(structuredContent={"status": "no_match", "results": []}))
+    state = chat.ChatState(host="h", messages=[{"role": "user", "content": "how?"}],
+                           mcp_session=session, anthropic_client=client, tools=[])
+    frames = []
+
+    async def emit(frame):
+        frames.append(frame)
+
+    _run(chat.run_conversation_turn(state, emit=emit))
+    assert "tour" not in [f["type"] for f in frames]
 
 
 def test_run_conversation_turn_iteration_limit():

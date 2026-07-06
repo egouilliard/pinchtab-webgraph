@@ -74,6 +74,38 @@ def test_howto_no_goal_no_match_is_invalid(sample_interaction_graph_path):
     assert out["candidates"] == []
 
 
+# --- howto: "Show Me How" tour steps (additive `tour` key) -------------------
+
+def test_howto_tour_multi_step_shape(sample_interaction_graph_path):
+    # "create role" routes s0->s1 (Team) ->s2 (Roles tab): 2 nav edges + trigger + form.
+    out = api.howto(sample_interaction_graph_path, goal="create role")
+    tour = out["results"][0]["tour"]
+    assert [s["kind"] for s in tour] == ["nav", "nav", "trigger", "form"]
+    # nav steps carry their edge selectors (in routing order).
+    assert tour[0]["label"] == "Team"
+    assert tour[0]["selector"] == "nav>a:nth-of-type(1)"
+    assert tour[1]["label"] == "Roles tab"
+    assert tour[1]["selector"] == "div>div>button:nth-of-type(2)"
+    # the trigger step carries the trigger label but NO selector (crawler persists none).
+    assert tour[2]["label"] == "Create Role"
+    assert tour[2]["selector"] is None
+    # the terminal form step is exactly {"kind":"form"} — no selector -> never auto-submits.
+    assert tour[-1] == {"kind": "form"}
+
+
+def test_howto_tour_single_nav_step_shape(sample_interaction_graph_path):
+    # "add report" routes s0->s3 (Reports): 1 nav edge + trigger + form.
+    out = api.howto(sample_interaction_graph_path, goal="add report")
+    tour = out["results"][0]["tour"]
+    assert [s["kind"] for s in tour] == ["nav", "trigger", "form"]
+    # nav count == length of the routing path (1 here).
+    navs = [s for s in tour if s["kind"] == "nav"]
+    assert len(navs) == out["results"][0]["clicks"] - 1
+    assert navs[0]["selector"] == "nav>a:nth-of-type(2)"
+    assert tour[1]["selector"] is None  # trigger step
+    assert tour[-1] == {"kind": "form"}
+
+
 # --- howto: issue #11 acceptance (LinkedIn guest surface) --------------------
 # Finding 1 — no confident FALSE positives; Finding 2 — form-bearing states route.
 

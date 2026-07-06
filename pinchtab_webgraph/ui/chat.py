@@ -223,6 +223,26 @@ def _tool_status(payload):
     return "ok"
 
 
+def _extract_tour(payload):
+    """Pull the "Show Me How" tour out of an OK `howto` payload, else None. Pure.
+
+    Additive to the frame protocol: when the model runs `howto` and it resolves, the
+    FIRST result carries a `tour` (the ordered nav/trigger/form highlight steps). We
+    surface it as one structured `{"type":"tour"}` frame the SPA replays on the live
+    pane. None unless the payload is a dict with status "ok" and a non-empty results
+    list — a miss / error / result-less payload yields no tour frame.
+    """
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        return None
+    results = payload.get("results") or []
+    if not results:
+        return None
+    r = results[0]
+    return {"goal": payload.get("goal"), "start_url": payload.get("start_url"),
+            "trigger_label": r.get("trigger_label"), "steps": r.get("tour"),
+            "form": r.get("form"), "opens_at": r.get("opens_at")}
+
+
 @dataclass
 class ChatState:
     """Injected agent context — the anthropic client + mcp session live HERE, not global."""
@@ -291,6 +311,10 @@ async def run_conversation_turn(state, *, emit, model=None, max_tokens=1024,
             payload = await run_tool(state.mcp_session, block.name, block.input)
             status = _tool_status(payload)
             await emit({"type": "tool_result", "name": block.name, "status": status})
+            if block.name == "howto" and status == "ok":
+                tour = _extract_tour(payload)
+                if tour is not None:
+                    await emit({"type": "tour", "data": tour})
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,

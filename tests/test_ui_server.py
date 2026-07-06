@@ -234,6 +234,89 @@ def test_vault_unavailable_503(isolated_cache_home):
     assert _no_secret_anywhere(body)
 
 
+# --- live pane: "Show Me How" locate -> located round-trip -------------------
+#
+# Mirrors test_ui_screencast.py's WS tests: a fake open_live_session yields a LiveSession
+# whose cdp_ws answers a Runtime.evaluate (the locate probe) with a scripted rect. The
+# REAL relay + dispatcher drive it, so a {type:"locate"} frame yields a {type:"located"}.
+
+import asyncio  # noqa: E402
+import json  # noqa: E402
+from contextlib import asynccontextmanager  # noqa: E402
+
+from pinchtab_webgraph.ui import server as ui_server  # noqa: E402
+from pinchtab_webgraph.ui import screencast  # noqa: E402
+
+
+class LocateReplyCDPWebSocket:
+    """A CDP socket that answers any Runtime.evaluate send with a scripted rect reply.
+
+    recv() blocks until send() queues something; Page.enable/startScreencast/ack queue
+    nothing (the relay just idles), while a Runtime.evaluate (the locate probe) queues a
+    matching-``id`` reply so the shared dispatcher resolves the request future.
+    """
+
+    def __init__(self, rect_value):
+        self.sent = []
+        self._q = asyncio.Queue()
+        self._rect = rect_value
+        self.closed = False
+
+    async def send(self, s):
+        self.sent.append(s)
+        msg = json.loads(s)
+        if msg.get("method") == "Runtime.evaluate":
+            self._q.put_nowait(json.dumps(
+                {"id": msg["id"], "result": {"result": {"value": json.dumps(self._rect)}}}))
+
+    async def recv(self):
+        return await self._q.get()
+
+    async def close(self):
+        self.closed = True
+
+
+def test_ws_screencast_locate_returns_located_rect(monkeypatch):
+    rect = {"found": True, "x": 12, "y": 34, "width": 56, "height": 78}
+
+    @asynccontextmanager
+    async def fake_open(host, *, bridge_url=None):
+        yield screencast.LiveSession(
+            cdp_ws=LocateReplyCDPWebSocket(rect),
+            auth={"authenticated": False, "reason": "no_credential"})
+
+    monkeypatch.setattr(ui_server.screencast, "open_live_session", fake_open)
+
+    with client.websocket_connect("/ws/screencast?host=example.test") as ws:
+        assert ws.receive_json()["type"] == "status"          # route auth status
+        assert ws.receive_json() == {"type": "status", "state": "live",
+                                     "width": None, "height": None}  # relay status(live)
+        ws.send_json({"type": "locate", "stepId": "step-1",
+                      "selector": "a.create", "label": "Create Role"})
+        located = ws.receive_json()
+        assert located["type"] == "located"
+        assert located["stepId"] == "step-1"
+        assert located["rect"] == {"x": 12.0, "y": 34.0, "width": 56.0, "height": 78.0}
+
+
+def test_ws_screencast_locate_null_rect_when_not_found(monkeypatch):
+    # A not-found probe yields a null rect (never an error frame).
+    @asynccontextmanager
+    async def fake_open(host, *, bridge_url=None):
+        yield screencast.LiveSession(
+            cdp_ws=LocateReplyCDPWebSocket({"found": False}),
+            auth={"authenticated": False, "reason": None})
+
+    monkeypatch.setattr(ui_server.screencast, "open_live_session", fake_open)
+
+    with client.websocket_connect("/ws/screencast?host=example.test") as ws:
+        ws.receive_json()  # route status
+        ws.receive_json()  # relay status(live)
+        ws.send_json({"type": "locate", "stepId": "s2", "selector": None, "label": "Nope"})
+        located = ws.receive_json()
+        assert located == {"type": "located", "stepId": "s2", "rect": None}
+
+
 # --- SPA static page: index.html <-> app.js element-id contract --------------
 #
 # The SPA is vanilla HTML/JS with no build step, so nothing enforces that the IDs

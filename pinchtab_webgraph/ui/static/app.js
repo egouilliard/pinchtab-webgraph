@@ -35,6 +35,15 @@ const chatSendEl = chatFormEl ? chatFormEl.querySelector("button") : null;
 const liveViewEl = el("live-view");
 const liveStatusEl = el("live-status");
 
+// guided-tour overlay
+const tourOverlayEl = el("tour-overlay");
+const tourBoxEl = el("tour-box");
+const tourTipEl = el("tour-tip");
+const tourTipTextEl = el("tour-tip-text");
+const tourPrevEl = el("tour-prev");
+const tourNextEl = el("tour-next");
+const tourDoneEl = el("tour-done");
+
 // vault modal
 const vaultModalEl = el("vault-modal");
 const vaultOpenEl = el("vault-open");
@@ -55,6 +64,13 @@ let chatWs = null;
 let liveWs = null;
 let selectedHost = null;
 let currentBubble = null; // the assistant bubble currently streaming
+
+// --- guided-tour ("Show me How") state ---------------------------------------
+let lastTour = null;            // most recent tour payload from the chat socket
+let tourSteps = null;           // steps of the tour currently being driven (or null)
+let tourIndex = 0;              // index of the step currently shown
+let pendingLocateStepId = null; // step id we are awaiting a `located` response for
+let currentRect = null;         // last resolved viewport-CSS-px rect for the step
 
 function wsUrl(pathAndQuery) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -240,6 +256,7 @@ function finalizeBubble() {
 }
 
 function openChat(host) {
+  endTour();                         // drop any active tour on host switch
   if (chatWs) {
     try { chatWs.close(); } catch (e) { /* ignore */ }
     chatWs = null;
@@ -296,6 +313,10 @@ function openChat(host) {
           (data.reason || data.status || "unknown") +
           (data.detail ? " — " + data.detail : ""));
         break;
+      case "tour":
+        finalizeBubble();
+        addTourOffer(data.data);
+        break;
       case "done":
         finalizeBubble();
         break;
@@ -303,6 +324,32 @@ function openChat(host) {
         break;
     }
   };
+}
+
+// Append a "Show me How" button to the chat log for a captured tour payload.
+// Each button closes over ITS OWN tour so older offers keep working.
+function addTourOffer(tour) {
+  lastTour = tour;
+  const line = document.createElement("div");
+  line.className = "msg msg-assistant tour-offer";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "show-how-btn";
+  btn.textContent = "Show me How";   // fixed label, not server data
+  const note = document.createElement("span");
+  note.className = "show-how-note muted";
+  btn.addEventListener("click", () => {
+    if (!liveWs || liveWs.readyState !== WebSocket.OPEN) {
+      note.textContent = "live view not ready";
+      return;
+    }
+    note.textContent = "";
+    startTour(tour);
+  });
+  line.appendChild(btn);
+  line.appendChild(note);
+  chatLogEl.appendChild(line);
+  chatLogEl.scrollTop = chatLogEl.scrollHeight;
 }
 
 if (chatFormEl) {
@@ -319,6 +366,7 @@ if (chatFormEl) {
 
 // --- live browser pane -------------------------------------------------------
 function openLiveView(host) {
+  endTour();                         // drop any active tour on host switch
   if (liveWs) {
     try { liveWs.close(); } catch (e) { /* ignore */ }
     liveWs = null;
@@ -330,7 +378,10 @@ function openLiveView(host) {
   liveWs = ws;
 
   ws.onclose = () => {
-    if (liveWs === ws && liveStatusEl) liveStatusEl.textContent = "live view closed.";
+    if (liveWs === ws) {
+      endTour();                     // a dead socket can't drive/locate — tear down
+      if (liveStatusEl) liveStatusEl.textContent = "live view closed.";
+    }
   };
   ws.onerror = () => {
     if (liveWs === ws && liveStatusEl) liveStatusEl.textContent = "live view error.";
@@ -349,6 +400,25 @@ function openLiveView(host) {
       case "frame":
         if (liveViewEl && data.data) {
           liveViewEl.src = "data:image/jpeg;base64," + data.data;
+        }
+        break;
+      case "located":
+        // response to our {type:"locate"} — position the highlight for the step.
+        if (data.stepId !== pendingLocateStepId) break;
+        if (tourOverlayEl) tourOverlayEl.classList.remove("locating");
+        if (data.rect) {
+          currentRect = data.rect;
+          positionTourBox(currentRect);
+          if (tourNextEl) tourNextEl.disabled = false;
+        } else {
+          // never trap the user: allow Next even when we can't find the element.
+          currentRect = null;
+          if (tourBoxEl) tourBoxEl.hidden = true;
+          if (tourTipTextEl) {
+            tourTipTextEl.textContent = "Couldn't find that element on screen — " +
+              "you can click it yourself, then press Next";
+          }
+          if (tourNextEl) tourNextEl.disabled = false;
         }
         break;
       case "stopped":
@@ -430,6 +500,147 @@ if (liveViewEl) {
     }
   });
 }
+
+// --- guided "Show me How" tour driver ----------------------------------------
+// The tour walks the user through a discovered click-path on the SAME live browser
+// pane. It highlights each step's element (resolved server-side via `locate`), and
+// on "Next" drives a real CDP click through sendInput(), then advances.
+
+// INVERSE of liveCoords(): map a viewport CSS-px rect (getBoundingClientRect space,
+// same as liveCoords produces) to a pixel box in the DISPLAYED <img>'s coordinate
+// space. The overlay is inset:0 over the same box as the <img>, so the img-relative
+// left/top double as overlay-relative left/top. Uses the identical scale + letterbox
+// offsets as liveCoords, run forwards: displayX = offX + viewportX * scale.
+function rectToDisplay(rect) {
+  if (!liveViewEl || !rect) return null;
+  const dr = liveViewEl.getBoundingClientRect();
+  const nw = liveViewEl.naturalWidth, nh = liveViewEl.naturalHeight;
+  if (!nw || !nh || !dr.width || !dr.height) return null;
+  const scale = Math.min(dr.width / nw, dr.height / nh);
+  const offX = (dr.width - nw * scale) / 2;
+  const offY = (dr.height - nh * scale) / 2;
+  return {
+    left: offX + rect.x * scale,
+    top: offY + rect.y * scale,
+    width: rect.width * scale,
+    height: rect.height * scale,
+  };
+}
+
+function positionTourBox(rect) {
+  if (!tourBoxEl) return;
+  const box = rectToDisplay(rect);
+  if (!box) return;
+  tourBoxEl.hidden = false;
+  tourBoxEl.style.left = box.left + "px";
+  tourBoxEl.style.top = box.top + "px";
+  tourBoxEl.style.width = box.width + "px";
+  tourBoxEl.style.height = box.height + "px";
+}
+
+function startTour(tour) {
+  if (!tour || !liveWs || liveWs.readyState !== WebSocket.OPEN) return;
+  tourSteps = Array.isArray(tour.steps) ? tour.steps : [];
+  tourIndex = 0;
+  pendingLocateStepId = null;
+  currentRect = null;
+  if (tourSteps.length === 0) { endTour(); return; }
+  if (tourOverlayEl) tourOverlayEl.hidden = false;
+  showStep(0);
+}
+
+function showStep(i) {
+  if (!tourSteps) return;
+  if (i >= tourSteps.length) { endTour(); return; }
+  const step = tourSteps[i] || {};
+  const n = tourSteps.length;
+
+  if (tourPrevEl) tourPrevEl.disabled = i <= 0;
+  if (tourDoneEl) tourDoneEl.disabled = false;
+
+  if (step.kind === "form") {
+    // terminal step — nothing to click; hide the highlight, disable Next.
+    if (tourTipTextEl) {
+      tourTipTextEl.textContent =
+        "You're there — fill in this form to finish. (I won't submit it for you.)";
+    }
+    if (tourBoxEl) tourBoxEl.hidden = true;
+    if (tourOverlayEl) tourOverlayEl.classList.remove("locating");
+    currentRect = null;
+    pendingLocateStepId = null;
+    if (tourNextEl) tourNextEl.disabled = true;
+    return;
+  }
+
+  // nav / trigger — label is CRAWLED (untrusted): textContent only.
+  if (tourTipTextEl) {
+    tourTipTextEl.textContent =
+      "Step " + (i + 1) + " of " + n + ": Click “" + (step.label || "") + "”";
+  }
+  currentRect = null;
+  pendingLocateStepId = i;
+  if (tourNextEl) tourNextEl.disabled = true;     // until `located` arrives
+  if (tourOverlayEl) tourOverlayEl.classList.add("locating");
+  if (tourBoxEl) tourBoxEl.hidden = false;
+  if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+    liveWs.send(JSON.stringify({
+      type: "locate",
+      stepId: i,
+      selector: (step.selector != null ? step.selector : null),
+      label: step.label || "",
+    }));
+  }
+}
+
+function nextStep() {
+  if (!tourSteps) return;
+  const step = tourSteps[tourIndex];
+  if (!step) { endTour(); return; }
+  // If we resolved a rect, drive a real click at its center via the existing input
+  // path. If the locate failed (no rect), the user clicked manually — just advance.
+  if ((step.kind === "nav" || step.kind === "trigger") && currentRect) {
+    const cx = currentRect.x + currentRect.width / 2;
+    const cy = currentRect.y + currentRect.height / 2;
+    sendInput({ kind: "mousepressed", x: cx, y: cy, button: 0, buttons: 1, clickCount: 1 });
+    sendInput({ kind: "mousereleased", x: cx, y: cy, button: 0, buttons: 0, clickCount: 1 });
+  }
+  tourIndex++;
+  // disable Next + hide the stale highlight while the UI settles, so a fast
+  // double-click can't skip a step before the next locate resolves.
+  if (tourNextEl) tourNextEl.disabled = true;
+  if (tourBoxEl) tourBoxEl.hidden = true;
+  setTimeout(() => showStep(tourIndex), 600);
+}
+
+function prevStep() {
+  if (!tourSteps) return;
+  tourIndex = Math.max(0, tourIndex - 1);
+  showStep(tourIndex);   // just re-highlights; does not un-click anything
+}
+
+function endTour() {
+  if (tourOverlayEl) {
+    tourOverlayEl.hidden = true;
+    tourOverlayEl.classList.remove("locating");
+  }
+  if (tourBoxEl) {
+    tourBoxEl.hidden = false;
+    tourBoxEl.removeAttribute("style");
+  }
+  tourSteps = null;
+  tourIndex = 0;
+  pendingLocateStepId = null;
+  currentRect = null;
+}
+
+if (tourNextEl) tourNextEl.addEventListener("click", nextStep);
+if (tourPrevEl) tourPrevEl.addEventListener("click", prevStep);
+if (tourDoneEl) tourDoneEl.addEventListener("click", endTour);
+
+// The <img> scale changes with the pane size, so re-place the highlight on resize.
+window.addEventListener("resize", () => {
+  if (tourSteps && currentRect) positionTourBox(currentRect);
+});
 
 // --- credentials vault (modal) -----------------------------------------------
 function openVault() {

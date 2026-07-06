@@ -311,6 +311,7 @@ button {
 
 /* live pane */
 .live-frame {
+  position: relative;               /* anchor for the guided-tour overlay */
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -332,6 +333,63 @@ button {
 #live-view:focus {
   box-shadow: inset 0 0 0 2px var(--accent);  /* keyboard focus (typeable) */
 }
+
+/* --- guided "Show me How" tour -------------------------------------------- */
+.tour-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;             /* clicks fall through to the live <img> */
+  z-index: 5;                       /* above the frame */
+}
+.tour-overlay[hidden] { display: none; }
+.tour-box {
+  position: absolute;
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);  /* dim everything but the rect */
+  transition: all 0.15s ease;
+  pointer-events: none;
+}
+.tour-box[hidden] { display: none; }
+.tour-overlay.locating .tour-box { opacity: 0.4; }
+.tour-tip {
+  position: absolute;
+  left: 0.75rem;
+  bottom: 0.75rem;
+  pointer-events: auto;             /* the tip is interactive */
+  max-width: 280px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  box-shadow: var(--shadow);
+  color: var(--text);
+}
+.tour-tip p { margin: 0; font-size: 0.85rem; }
+.tour-controls { display: flex; gap: 0.4rem; margin-top: 0.5rem; }
+.tour-controls button {
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.78rem;
+}
+.tour-controls button:hover:not(:disabled) { border-color: var(--accent); }
+.tour-controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* the "Show me How" offer button inside a chat bubble */
+.show-how-btn {
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  padding: 0.35rem 0.8rem;
+  font-size: 0.82rem;
+}
+.show-how-btn:hover { background: var(--accent-hover); }
+.show-how-note { margin-left: 0.5rem; font-size: 0.76rem; }
+.tour-offer { display: flex; align-items: center; }
 
 /* --- modal (credentials vault) -------------------------------------------- */
 .modal {

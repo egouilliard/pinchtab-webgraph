@@ -42,7 +42,7 @@ import subprocess
 import tempfile
 import urllib.request
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 MAX_LIVE_SESSIONS = 3
 
@@ -107,64 +107,153 @@ def home_url_for(host):
     return "https://%s/" % host
 
 
-async def relay_screencast(cdp_ws, *, emit, fmt="jpeg", quality=70, max_width=1600,
-                           max_height=1000, every_nth_frame=1):
-    """Drive Chrome's screencast over ``cdp_ws`` and stream frames out through ``emit``.
+@dataclass
+class CdpDispatcher:
+    """The SINGLE owner of one cdp_ws send/recv id-space — shared by relay + request/reply.
 
-    ``cdp_ws`` is a duck-typed CDP client exposing ``async send(str)`` and
-    ``async recv()->str``. ``emit`` is an async callable taking one dict frame — the
-    ONLY output side effect (mirrors chat.run_conversation_turn). The frame protocol:
+    The screencast relay and the "Show Me How" locate probe both talk to the SAME CDP
+    socket, so their outbound `id`s must not collide and inbound responses must be routed
+    to the right waiter. This dataclass centralizes that: ``alloc_id`` hands out unique
+    ids, ``send_nowait`` fires a command with no reply awaited (relay's enable/start/ack
+    + client input), and ``request`` sends a command and awaits its matching-``id`` reply
+    via a registered future. The relay loop calls ``_resolve`` on every inbound message
+    FIRST — a reply to a pending request is consumed there and never mistaken for a
+    screencast frame — and ``fail_all`` on loop exit so no ``request`` caller hangs after
+    the socket dies. NEVER raises into the caller: ``request`` returns None on timeout /
+    error.
+    """
+    cdp_ws: object
+    _next_id: int = 1
+    _pending: dict = field(default_factory=dict)  # id -> asyncio.Future
+
+    def alloc_id(self) -> int:
+        i = self._next_id
+        self._next_id += 1
+        return i
+
+    async def send_nowait(self, method, params=None) -> int:
+        """Send ``{id, method, params}`` and return the id; no response is awaited."""
+        i = self.alloc_id()
+        msg = {"id": i, "method": method}
+        if params is not None:
+            msg["params"] = params
+        await self.cdp_ws.send(json.dumps(msg))
+        return i
+
+    async def request(self, method, params=None, timeout=5.0):
+        """Send a command and await its matching-``id`` reply. None on timeout/error.
+
+        Registers a future under the allocated id BEFORE sending so a reply that arrives
+        before we await is not lost. On timeout or ANY error the pending id is popped and
+        None is returned — this NEVER raises into the caller.
+        """
+        i = self.alloc_id()
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[i] = fut
+        msg = {"id": i, "method": method}
+        if params is not None:
+            msg["params"] = params
+        try:
+            await self.cdp_ws.send(json.dumps(msg))
+            return await asyncio.wait_for(fut, timeout)
+        except Exception:  # noqa: BLE001 — timeout / send failure / cancelled future
+            self._pending.pop(i, None)
+            return None
+
+    def _resolve(self, msg) -> bool:
+        """If ``msg`` is a reply to a pending request, complete its future. Pure-ish.
+
+        Returns True when the message carried an ``id`` we were waiting on (so the relay
+        loop consumes it and does NOT treat it as a screencast frame), else False.
+        """
+        if isinstance(msg, dict):
+            mid = msg.get("id")
+            if mid in self._pending:
+                fut = self._pending.pop(mid)
+                if not fut.done():
+                    fut.set_result(msg)
+                return True
+        return False
+
+    def fail_all(self, exc=None):
+        """Resolve every still-pending future so no ``request`` caller hangs forever.
+
+        Called on relay loop exit (the socket is dead). Sets None (default) — the twin of
+        ``request``'s timeout path — or an exception when one is supplied.
+        """
+        while self._pending:
+            _mid, fut = self._pending.popitem()
+            if fut.done():
+                continue
+            if exc is not None:
+                fut.set_exception(exc)
+            else:
+                fut.set_result(None)
+
+
+async def relay_screencast(cdp_ws_or_dispatcher, *, emit, fmt="jpeg", quality=70,
+                           max_width=1600, max_height=1000, every_nth_frame=1):
+    """Drive Chrome's screencast over a CDP socket and stream frames out through ``emit``.
+
+    ``cdp_ws_or_dispatcher`` is EITHER a raw duck-typed CDP client exposing
+    ``async send(str)`` and ``async recv()->str`` (back-compat: wrapped in a fresh
+    ``CdpDispatcher``) OR a ``CdpDispatcher`` already shared with the route's input/locate
+    path. ``emit`` is an async callable taking one dict frame — the ONLY output side
+    effect (mirrors chat.run_conversation_turn). The frame protocol:
       {"type":"status","state":"live","width":<int|None>,"height":<int|None>}
       {"type":"frame","data":<base64 str>,"metadata":<dict>}   per screencast frame
       {"type":"stopped"}                                       once, when CDP ends
 
     The CDP url / port are NEVER emitted — only frame/status dicts leave this loop.
     """
-    next_id = 1
+    dispatcher = (cdp_ws_or_dispatcher if isinstance(cdp_ws_or_dispatcher, CdpDispatcher)
+                  else CdpDispatcher(cdp_ws_or_dispatcher))
+    cdp_ws = dispatcher.cdp_ws
 
-    async def _cmd(method, params=None):
-        nonlocal next_id
-        msg = {"id": next_id, "method": method}
-        if params is not None:
-            msg["params"] = params
-        next_id += 1
-        await cdp_ws.send(json.dumps(msg))
+    try:
+        await dispatcher.send_nowait("Page.enable")
+        await dispatcher.send_nowait("Page.startScreencast", {
+            "format": fmt,
+            "quality": quality,
+            "maxWidth": max_width,
+            "maxHeight": max_height,
+            "everyNthFrame": every_nth_frame,
+        })
+        # width/height are unknown until the first frame's metadata arrives.
+        await emit({"type": "status", "state": "live", "width": None, "height": None})
 
-    await _cmd("Page.enable")
-    await _cmd("Page.startScreencast", {
-        "format": fmt,
-        "quality": quality,
-        "maxWidth": max_width,
-        "maxHeight": max_height,
-        "everyNthFrame": every_nth_frame,
-    })
-    # width/height are unknown until the first frame's metadata arrives.
-    await emit({"type": "status", "state": "live", "width": None, "height": None})
-
-    while True:
-        try:
-            raw = await cdp_ws.recv()
-        except Exception:  # noqa: BLE001
-            # ConnectionClosed (a websockets Exception subclass), StopAsyncIteration,
-            # a closed OS socket, or an exhausted scripted fake all end the stream.
-            break
-        try:
-            msg = json.loads(raw)
-        except (ValueError, TypeError):
-            continue
-        if msg.get("method") != "Page.screencastFrame":
-            continue
-        params = msg.get("params") or {}
-        session_id = params.get("sessionId")
-        # ACK IMMEDIATELY on receipt — this bounds Chrome's in-flight frame memory;
-        # never gate the ack on `emit` (a slow client must not stall Chrome).
-        if session_id is not None:
+        while True:
             try:
-                await _cmd("Page.screencastFrameAck", {"sessionId": session_id})
-            except Exception:  # noqa: BLE001 — socket died between recv and ack
+                raw = await cdp_ws.recv()
+            except Exception:  # noqa: BLE001
+                # ConnectionClosed (a websockets Exception subclass), StopAsyncIteration,
+                # a closed OS socket, or an exhausted scripted fake all end the stream.
                 break
-        await emit({"type": "frame", "data": params.get("data"),
-                    "metadata": params.get("metadata")})
+            try:
+                msg = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            # A reply to a pending request() (e.g. the locate probe) is consumed here and
+            # never mistaken for a screencast frame.
+            if dispatcher._resolve(msg):
+                continue
+            if msg.get("method") != "Page.screencastFrame":
+                continue
+            params = msg.get("params") or {}
+            session_id = params.get("sessionId")
+            # ACK IMMEDIATELY on receipt — this bounds Chrome's in-flight frame memory;
+            # never gate the ack on `emit` (a slow client must not stall Chrome).
+            if session_id is not None:
+                try:
+                    await dispatcher.send_nowait("Page.screencastFrameAck",
+                                                 {"sessionId": session_id})
+                except Exception:  # noqa: BLE001 — socket died between recv and ack
+                    break
+            await emit({"type": "frame", "data": params.get("data"),
+                        "metadata": params.get("metadata")})
+    finally:
+        # The socket is dead — release every request() waiter so none hangs forever.
+        dispatcher.fail_all()
 
     await emit({"type": "stopped"})
 
@@ -210,6 +299,83 @@ def build_input_command(frame):
                            "key": str(frame.get("key", "")),
                            "code": str(frame.get("code", "")),
                            "windowsVirtualKeyCode": int(frame.get("keyCode", 0) or 0)}}
+    return None
+
+
+# --- "Show Me How" locate: find a tour step's element rect on the live page ---
+
+def build_locate_expression(selector, label) -> str:
+    """Build the FIXED JS expression that locates a tour step's element. Pure.
+
+    SECURITY: this is a FIXED template. ``selector`` and ``label`` are embedded ONLY as
+    ``json.dumps()``-escaped STRING LITERALS — never concatenated as executable code —
+    so a hostile value like ``');alert(1)//`` becomes an inert quoted string, not a
+    statement. Both are length-capped before embedding as a second belt-and-braces
+    guard. The logic (evaluated in the page): try ``document.querySelector(sel)`` inside
+    a try/catch (an invalid selector yields null, never throws); if no element, fall
+    back to a case-insensitive text match of ``label.trim()`` against a FIXED allow-list
+    of interactive elements — a, button, [role=button], [role=link], [role=menuitem] —
+    returning the first whose trimmed text equals the label. Returns
+    ``JSON.stringify({found:false})`` or ``{found:true, x, y, width, height}`` read from
+    ``getBoundingClientRect()`` (viewport CSS pixels).
+    """
+    sel_lit = json.dumps((selector or "")[:500])
+    label_lit = json.dumps((label or "")[:500])
+    return (
+        "(function(){"
+        "  var sel = %s;"
+        "  var label = %s;"
+        "  var el = null;"
+        "  if (sel) { try { el = document.querySelector(sel); } catch (e) { el = null; } }"
+        "  if (!el && label) {"
+        "    var want = label.trim().toLowerCase();"
+        "    var nodes = document.querySelectorAll("
+        "      'a, button, [role=button], [role=link], [role=menuitem]');"
+        "    for (var i = 0; i < nodes.length; i++) {"
+        "      var t = (nodes[i].innerText || nodes[i].textContent || '').trim().toLowerCase();"
+        "      if (t && t === want) { el = nodes[i]; break; }"
+        "    }"
+        "  }"
+        "  if (!el) { return JSON.stringify({found: false}); }"
+        "  var r = el.getBoundingClientRect();"
+        "  return JSON.stringify({found: true, x: r.x, y: r.y,"
+        "                         width: r.width, height: r.height});"
+        "})()"
+        % (sel_lit, label_lit)
+    )
+
+
+def build_locate_command(selector, label) -> dict:
+    """Wrap ``build_locate_expression`` in a CDP ``Runtime.evaluate`` command (no id)."""
+    return {"method": "Runtime.evaluate",
+            "params": {"expression": build_locate_expression(selector, label),
+                       "returnByValue": True, "awaitPromise": False}}
+
+
+def _extract_locate_rect(result):
+    """Dig the element rect out of a ``Runtime.evaluate`` reply. None on any miss. Pure.
+
+    ``result`` is the full CDP reply message the dispatcher returns. The ``returnByValue``
+    payload is the RemoteObject's ``value``: in real CDP that is
+    ``result["result"]["result"]["value"]`` (message.result = the Runtime.evaluate result,
+    whose ``result`` is the RemoteObject); a flattened ``result["result"]["value"]`` is
+    tolerated too. Our expression returns a JSON string, so it is parsed; when
+    ``found is True`` we surface ``{x, y, width, height}`` as floats. A missing / absent /
+    ``found:false`` / malformed value yields None. NEVER raises.
+    """
+    try:
+        outer = result["result"]
+        if isinstance(outer, dict) and isinstance(outer.get("result"), dict):
+            value = outer["result"].get("value")  # real CDP RemoteObject nesting
+        else:
+            value = outer["value"]                # flattened shape
+        if isinstance(value, str):
+            value = json.loads(value)
+        if isinstance(value, dict) and value.get("found") is True:
+            return {"x": float(value["x"]), "y": float(value["y"]),
+                    "width": float(value["width"]), "height": float(value["height"])}
+    except (KeyError, TypeError, ValueError):
+        return None
     return None
 
 

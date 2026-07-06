@@ -168,6 +168,171 @@ def test_relay_stops_on_stop_async_iteration():
     assert [f["type"] for f in frames] == ["status", "stopped"]
 
 
+# --- CdpDispatcher: shared send/recv id-space + request/reply -----------------
+
+class QueueCDPWebSocket:
+    """A CDP socket whose recv() blocks on an asyncio.Queue the test feeds.
+
+    Lets a test run relay_screencast concurrently with dispatcher.request() and deliver
+    a scripted reply (or a socket-death exception) at a controlled moment.
+    """
+
+    def __init__(self):
+        self.sent = []
+        self._queue = asyncio.Queue()
+        self.closed = False
+
+    async def send(self, s):
+        self.sent.append(s)
+
+    async def recv(self):
+        item = await self._queue.get()
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    async def close(self):
+        self.closed = True
+
+    def feed(self, item):
+        self._queue.put_nowait(item)
+
+
+def test_relay_wraps_raw_ws_in_dispatcher_backcompat():
+    # A raw duck-typed cdp_ws (not a dispatcher) must still work unchanged.
+    ws = FakeCDPWebSocket([_screencast_frame_msg()])
+    frames = []
+
+    async def emit(f):
+        frames.append(f)
+
+    asyncio.run(screencast.relay_screencast(ws, emit=emit))
+    assert [f["type"] for f in frames] == ["status", "frame", "stopped"]
+
+
+def test_dispatcher_request_resolved_by_matching_id_not_emitted_as_frame():
+    async def go():
+        ws = QueueCDPWebSocket()
+        dispatcher = screencast.CdpDispatcher(ws)
+        frames = []
+
+        async def emit(f):
+            frames.append(f)
+
+        relay = asyncio.create_task(screencast.relay_screencast(dispatcher, emit=emit))
+        await asyncio.sleep(0)  # let relay send enable/start and reach recv()
+
+        req = asyncio.create_task(
+            dispatcher.request("Runtime.evaluate", {"expression": "1"}, timeout=2.0))
+        await asyncio.sleep(0)  # let request allocate its id + send
+
+        rid = json.loads(ws.sent[-1])["id"]
+        reply = {"id": rid, "result": {"result": {"value": "42"}}}
+        ws.feed(json.dumps(reply))
+        got = await asyncio.wait_for(req, timeout=2.0)
+
+        ws.feed(StopAsyncIteration())  # end the relay
+        await asyncio.wait_for(relay, timeout=2.0)
+        return got, frames
+
+    got, frames = asyncio.run(go())
+    # the reply resolved the request future...
+    assert got == {"id": got["id"], "result": {"result": {"value": "42"}}}
+    # ...and was consumed by _resolve, NOT emitted as a screencast frame.
+    assert "frame" not in [f["type"] for f in frames]
+
+
+def test_dispatcher_request_returns_none_when_socket_dies():
+    async def go():
+        ws = QueueCDPWebSocket()
+        dispatcher = screencast.CdpDispatcher(ws)
+
+        async def emit(_f):
+            pass
+
+        relay = asyncio.create_task(screencast.relay_screencast(dispatcher, emit=emit))
+        await asyncio.sleep(0)
+        req = asyncio.create_task(dispatcher.request("X", {}, timeout=5.0))
+        await asyncio.sleep(0)
+        # socket dies with NO reply — fail_all must resolve the pending future to None
+        # (well before the 5s timeout), so request() never hangs.
+        ws.feed(StopAsyncIteration())
+        got = await asyncio.wait_for(req, timeout=2.0)
+        await asyncio.wait_for(relay, timeout=2.0)
+        return got
+
+    assert asyncio.run(go()) is None
+
+
+def test_dispatcher_fail_all_resolves_pending_to_none():
+    async def go():
+        dispatcher = screencast.CdpDispatcher(FakeCDPWebSocket([]))
+        i = dispatcher.alloc_id()
+        fut = asyncio.get_event_loop().create_future()
+        dispatcher._pending[i] = fut
+        dispatcher.fail_all()
+        return await fut
+
+    assert asyncio.run(go()) is None
+
+
+# --- build_locate_expression / build_locate_command: FIXED, injection-safe ----
+
+def test_build_locate_expression_embeds_selector_and_label_as_json_literals():
+    # A hostile value must be embedded ONLY as a json.dumps-escaped string literal —
+    # never concatenated as executable code.
+    hostile = '"; alert(1); const x = "'
+    expr = screencast.build_locate_expression(hostile, hostile)
+    # embedded as an escaped JSON string literal (present verbatim for both slots)...
+    assert json.dumps(hostile) in expr
+    # escaping actually happened (the double-quote became \")...
+    assert '\\"' in expr
+    # ...and the NAIVE, injectable embedding (payload wrapped in raw, unescaped quotes)
+    # is NOT present — the string can't be broken out of.
+    naive = '"' + hostile + '"'
+    assert naive not in expr
+    # the FIXED allow-list of interactive elements is baked in (structural, generic).
+    assert "[role=button]" in expr and "[role=menuitem]" in expr
+
+
+def test_build_locate_expression_handles_none_inputs():
+    # None selector/label must not crash and must still produce a valid expression.
+    expr = screencast.build_locate_expression(None, None)
+    assert "document.querySelectorAll" in expr
+
+
+def test_build_locate_command_shape():
+    cmd = screencast.build_locate_command("a.foo", "Click me")
+    assert cmd["method"] == "Runtime.evaluate"
+    assert cmd["params"]["returnByValue"] is True
+    assert cmd["params"]["awaitPromise"] is False
+    assert cmd["params"]["expression"] == screencast.build_locate_expression("a.foo", "Click me")
+
+
+# --- _extract_locate_rect -----------------------------------------------------
+
+def test_extract_locate_rect_found_stringified():
+    result = {"result": {"value": json.dumps(
+        {"found": True, "x": 1.5, "y": 2, "width": 10, "height": 20})}}
+    assert screencast._extract_locate_rect(result) == {
+        "x": 1.5, "y": 2.0, "width": 10.0, "height": 20.0}
+
+
+def test_extract_locate_rect_found_dict_value():
+    result = {"result": {"value": {"found": True, "x": 0, "y": 0, "width": 1, "height": 1}}}
+    assert screencast._extract_locate_rect(result) == {
+        "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}
+
+
+def test_extract_locate_rect_none_cases():
+    assert screencast._extract_locate_rect(
+        {"result": {"value": json.dumps({"found": False})}}) is None
+    assert screencast._extract_locate_rect(None) is None
+    assert screencast._extract_locate_rect({}) is None
+    assert screencast._extract_locate_rect({"result": {}}) is None
+    assert screencast._extract_locate_rect({"result": {"value": "not json"}}) is None
+
+
 # --- open_cdp_websocket: no websockets package --------------------------------
 
 def test_open_cdp_websocket_no_package(monkeypatch):

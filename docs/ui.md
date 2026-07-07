@@ -3,9 +3,10 @@
 > **Docs:** [← README](../README.md) · [📚 Index](README.md) · [MCP server](mcp-server.md) · [UTCP interface](utcp.md) · [Authenticated login](authenticated-login.md)
 
 `pinchtab-webgraph` ships an **optional** local web UI: a small FastAPI app that serves
-a read-only REST API over the offline graph caches, a credentials vault, a live chat
-agent (Claude wired to the project's own MCP tools), and a live headless-browser pane —
-behind a single console script, `pinchtab-webgraph-ui`.
+a read-only REST API over the offline graph caches, a credentials vault, an interactive
+**graph view** of the crawled interaction graph, a live chat agent (Claude wired to the
+project's own MCP tools), and a live headless-browser pane — behind a single console
+script, `pinchtab-webgraph-ui`.
 
 Like the [MCP server](mcp-server.md) and the [UTCP manual](utcp.md), the UI is a thin
 binding onto the same `api.py` query surface the CLI uses, so its answers are identical.
@@ -43,6 +44,81 @@ Every capability degrades independently: with no chat backend configured the cha
 shows a `chat_unavailable` notice while the REST API and graph browsing keep working; with
 no Chrome binary the live pane shows `screencast_unavailable`; with no keyring backend the
 vault reports `vault_unavailable`.
+
+## Graph view
+
+The host header carries a **Workspace | Graph** view switcher. **Workspace** is the two-pane
+chat + live-browser view above; **Graph** replaces it with an interactive rendering of the
+selected host's **interaction graph** — the same offline cache the REST API and chat serve.
+Switching views only toggles which pane is `hidden`; it **never** opens or closes the
+chat / live-browser WebSockets, so flipping to Graph and back leaves both live sessions
+running untouched.
+
+```
+┌───────────────┬───────────────────────────────────────────────┐
+│  Crawled      │  app.example.com   interaction · 45 · 662   [Workspace][Graph]
+│  graphs       ├───────────────────────────────────┬───────────┤
+│  ───────────  │  Search states by URL or label…   │  ● state  │
+│  app.example  │  ┌─────────────────────────────┐  │  ◆ trigger│
+│  docs.example │  │   ●───●   ◆ (opens a form)   │  │  ───────  │
+│  …            │  │   │  ╲│                       │  │  detail:  │
+│               │  │   ●   ●──●                    │  │  url/depth│
+│  [Credentials]│  └─────────────────────────────┘  │ [Ask in…] │
+└───────────────┴───────────────────────────────────┴───────────┘
+```
+
+**What the graph shows.** It renders the interaction-graph schema (`states` /
+`edges{from,to}` / `triggers`) with a fixed visual language mirroring the [standalone
+Cytoscape viewer](../README.md#-graph-shape):
+
+- **States** — blue circles (`●`), one per crawled page / SPA view, **sized by out-degree**
+  (a hub with many outbound edges is drawn larger). Labelled by the state's label or a
+  trimmed URL path.
+- **Form-triggers** — green diamonds (`◆`), one per create-trigger that "opens a form",
+  linked from the state that surfaces them by a dotted green edge.
+- **Edges** — `link` navigation edges are solid gray arrows; trigger edges are dotted green.
+- A **legend** (state vs. trigger) sits in the detail rail.
+
+**Search / filter.** The toolbar's *"Search states by URL or label…"* box filters the graph
+live as you type — nodes whose label or URL don't contain the query are hidden (client-side,
+no refetch).
+
+**Focus + detail panel.** Clicking a node dims the rest of the graph and spotlights the
+node's neighbourhood (an adjacency highlight), and fills the right-hand detail rail: for a
+**state**, its URL and depth; for a **trigger**, the form title, field count, where it opens,
+and its selector. The panel's **"Ask in chat"** button prefills the chat input with *"How do
+I get to `<label>`?"* and focuses it — a one-click bridge from "I see this node" to "tell me
+the click-path" (it only prefills the box; you still send it, and the chat socket is untouched).
+
+**Fully offline.** The whole view is served from the cached interaction graph via
+`GET /api/hosts/{host}/graph` — no browser, no network, no crawl. The status line reports the
+rendered counts (e.g. `45 states · 53 triggers · 662 edges`).
+
+**Interaction graphs only (v1).** The Graph view renders **interaction** graphs. A host whose
+cache is a page→page **link graph** shows a message pointing you at that host's **standalone
+`.html` viewer** (produced by `linkcrawl` / `crawl.py`) instead — the in-UI renderer is
+interaction-graph-only for now. Structured-error and non-graph payloads are reported inline
+rather than crashing the pane. Switching hosts always returns to the Workspace view and tears
+down the prior render; the Graph tab is disabled for a host whose cache failed to load.
+
+### `/vendor` mount + lazy loading
+
+The Graph view reuses **Phase 1's vendored Cytoscape/fcose stack** — the exact same six
+minified libs (`cytoscape`, `dagre`, `cytoscape-dagre`, `layout-base`, `cose-base`,
+`cytoscape-fcose`) that `crawl.py` inlines into the standalone viewer. Rather than duplicate
+that ~785KB under `static/`, the server adds a **`/vendor` static mount** that serves them
+straight from `pinchtab_webgraph/vendor/`:
+
+| Mount | Serves | Notes |
+| --- | --- | --- |
+| `/vendor/*` | `pinchtab_webgraph/vendor/*.min.js` (the 6 Cytoscape libs) | registered **before** the catch-all `/` mount so it isn't shadowed; path-traversal out of the vendor dir is rejected (403/404) |
+| `/` | `pinchtab_webgraph/ui/static/` (`html=True`) | the SPA shell + `app.js` / `graph.js` / `style.css` / `graph.css`, registered **last** so it never shadows `/api/*` or `/vendor/*` |
+
+The libs **and** `graph.js` are **lazy-loaded on the first Graph-tab open** — injected
+sequentially by `app.js` (core → layout deps → fcose extension → controller; the order is
+load-bearing) and memoized, so a session that never opens the Graph view never pays the
+Cytoscape download and the SPA shell stays light. A load failure is reported in the graph
+status line and clears the memo so a later switch retries.
 
 ## Chat backends
 
@@ -171,7 +247,7 @@ filesystem-path parameter over HTTP.
 | `GET /api/health` | — | `{status:"ok", version}` liveness probe |
 | `GET /api/hosts` | `cache_store.list_hosts` + `api.graph_summary` | index of every cached host + a cheap per-host summary (+ `caches_dir`) |
 | `GET /api/hosts/{host}/summary` | `api.graph_summary` | graph kind + meta + element counts |
-| `GET /api/hosts/{host}/graph` | `cache_store.load` | the full raw interaction graph (the large payload, on demand) |
+| `GET /api/hosts/{host}/graph` | `cache_store.load` | the full raw interaction graph (the large payload, on demand) — also what the in-UI [Graph view](#graph-view) renders |
 | `GET /api/hosts/{host}/forms` | `api.list_forms` | every create-form: label, host, depth, field count |
 | `GET /api/hosts/{host}/howto?goal=&start=&match=&all=` | `api.howto` | shortest click-path(s) to a create-trigger + its form; each result also carries an additive `tour` field (the [Show Me How](#show-me-how-guided-tour) highlight steps) |
 | `GET /api/hosts/{host}/content` | `api.list_content` | per-view inventory of captured collections |

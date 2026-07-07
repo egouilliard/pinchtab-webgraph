@@ -34,6 +34,7 @@ from . import chat_backend, screencast, vault
 app = FastAPI(title="pinchtab-webgraph UI", version=__version__)
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+VENDOR_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "vendor")
 
 
 # --- shared helpers ----------------------------------------------------------
@@ -396,8 +397,15 @@ async def screencast_ws(websocket: WebSocket, host: str = Query(...)):
         app.state.live_sessions -= 1
 
 
-# Static mount — registered LAST, AFTER every /api route, so it never shadows the
-# API. `html=True` serves index.html at "/".
+# Vendor mount — the 6 Cytoscape libs the graph view lazy-loads. Registered BEFORE
+# the catch-all "/" mount because Starlette resolves mounts in REGISTRATION order: the
+# "/" StaticFiles below matches every path, so a /vendor mount registered after it would
+# be shadowed and never reached. It reuses pinchtab_webgraph/vendor/*.min.js (the same
+# 785KB crawl.py inlines) rather than duplicating them under static/.
+app.mount("/vendor", StaticFiles(directory=VENDOR_DIR), name="vendor")
+
+# Static mount — registered LAST, AFTER every /api route AND the /vendor mount, so it
+# never shadows the API or the vendor libs. `html=True` serves index.html at "/".
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 

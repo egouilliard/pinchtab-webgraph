@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>pinchtab-webgraph</title>
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="graph.css" />
 </head>
 <body>
   <!-- The real two-pane SPA. Layout: a top bar, a left sidebar (crawled hosts +
@@ -38,6 +39,13 @@
         <h1 class="host-name" id="host-name"></h1>
         <span class="host-kind badge" id="host-kind"></span>
         <span class="host-counts muted" id="host-counts"></span>
+        <!-- view switcher: flips the main area between the Workspace (chat + live
+             browser) and the interactive Graph. Toggling ONLY flips `hidden`; it
+             never touches the chat/live sockets (app.js owns those). -->
+        <div class="view-tabs" id="view-tabs">
+          <button type="button" id="tab-workspace" class="view-tab on">Workspace</button>
+          <button type="button" id="tab-graph" class="view-tab">Graph</button>
+        </div>
       </div>
       <p class="placeholder muted" id="placeholder">
         Pick a graph on the left to open a chat and a live browser session for that host.
@@ -81,6 +89,23 @@
             </div>
           </div>
         </section>
+      </div>
+
+      <!-- GRAPH view: an interactive Cytoscape rendering of the host's interaction
+           graph. Hidden until the Graph tab is picked; graph.js + the vendored libs
+           are injected lazily by app.js on first switch. -->
+      <div class="graph-view" id="graph-view" hidden>
+        <div class="graph-toolbar">
+          <input id="graph-search" type="text" autocomplete="off"
+                 placeholder="Search states by URL or label…" />
+          <span id="graph-status" class="muted"></span>
+        </div>
+        <div class="graph-body">
+          <div id="graph-canvas"></div>
+          <aside id="graph-detail">
+            <p class="hint muted">Click a node to inspect it.</p>
+          </aside>
+        </div>
       </div>
     </main>
   </div>

@@ -26,6 +26,12 @@ const hostCountsEl = el("host-counts");
 const placeholderEl = el("placeholder");
 const panesEl = el("panes");
 
+// view switcher (Workspace | Graph) + the lazily-populated graph container
+const viewTabsEl = el("view-tabs");
+const tabWorkspaceEl = el("tab-workspace");
+const tabGraphEl = el("tab-graph");
+const graphViewEl = el("graph-view");
+
 const chatLogEl = el("chat-log");
 const chatStatusEl = el("chat-status");
 const chatFormEl = el("chat-form");
@@ -63,6 +69,9 @@ const CRED_FIELDS = ["url", "username", "userField", "passField", "submit",
 let chatWs = null;
 let liveWs = null;
 let selectedHost = null;
+let currentView = "workspace";   // "workspace" | "graph" — flips ONLY the `hidden` panes
+let vendorPromise = null;        // memoized sequential load of the Cytoscape libs + graph.js
+let selectedGraphKind = null;    // the selected host's graph_kind, for the Graph view
 let currentLiveUrl = null; // the live pane's current page, tracked from `location` frames
 let currentBubble = null; // the assistant bubble currently streaming
 
@@ -76,6 +85,87 @@ let currentRect = null;         // last resolved viewport-CSS-px rect for the st
 function wsUrl(pathAndQuery) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return proto + "//" + location.host + pathAndQuery;
+}
+
+// --- view switcher: Workspace <-> Graph --------------------------------------
+// The Graph view is heavy (785KB of Cytoscape) and only needed on demand, so its
+// libs + controller (graph.js) are injected lazily on the first switch, memoized in
+// vendorPromise. Toggling views ONLY flips the `hidden` panes + the active tab — it
+// NEVER opens/closes chatWs/liveWs (selectHost owns the socket lifecycle).
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = () => resolve(src);
+    s.onerror = () => reject(new Error("failed to load " + src));
+    document.head.appendChild(s);
+  });
+}
+
+// Loaded SEQUENTIALLY: cytoscape core first, then the layout-base/cose-base deps, then
+// the fcose extension that registers itself against them, then our controller. A wrong
+// ORDER silently no-ops the fcose registration (the layout would fall back / throw), so
+// this list order is significant — do not parallelize it.
+const VENDOR_SCRIPTS = [
+  "/vendor/cytoscape.min.js",
+  "/vendor/dagre.min.js",
+  "/vendor/cytoscape-dagre.min.js",
+  "/vendor/layout-base.min.js",
+  "/vendor/cose-base.min.js",
+  "/vendor/cytoscape-fcose.min.js",
+  "/graph.js",
+];
+
+function loadVendorSequential() {
+  let chain = Promise.resolve();
+  for (const src of VENDOR_SCRIPTS) chain = chain.then(() => loadScript(src));
+  return chain;
+}
+
+// The Graph view's DOM lives in index.html and is DRIVEN by the lazily-loaded graph.js
+// (which resolves these by id). app.js only asserts the markup is present before the
+// hand-off; listing the ids here also keeps the app.js<->index.html id cross-check honest.
+const GRAPH_VIEW_IDS = ["graph-canvas", "graph-detail", "graph-search", "graph-status"];
+
+function setView(view) {
+  currentView = view;
+  const graph = view === "graph";
+  if (panesEl) panesEl.hidden = graph;
+  if (graphViewEl) graphViewEl.hidden = !graph;
+  if (tabWorkspaceEl) tabWorkspaceEl.classList.toggle("on", !graph);
+  if (tabGraphEl) tabGraphEl.classList.toggle("on", graph);
+  if (graph) ensureGraphView();
+}
+
+async function ensureGraphView() {
+  const statusEl = el("graph-status");
+  const missing = GRAPH_VIEW_IDS.filter((id) => !el(id));
+  if (missing.length) {
+    if (statusEl) statusEl.textContent = "graph markup missing: " + missing.join(", ");
+    return;
+  }
+  if (statusEl && !statusEl.textContent) statusEl.textContent = "loading graph…";
+  if (!vendorPromise) vendorPromise = loadVendorSequential();
+  try {
+    await vendorPromise;
+    if (typeof openGraphView === "function") openGraphView(selectedHost);
+  } catch (err) {
+    // memoized failure would poison every retry — clear it so a later switch retries.
+    vendorPromise = null;
+    if (statusEl) {
+      statusEl.textContent = "Graph libraries failed to load — " +
+        (err && err.message ? err.message : "unknown error");
+    }
+  }
+}
+
+// graph.js keeps chat-input ownership here (app.js): its "Ask in chat" button calls
+// this to prefill the chat box without reaching into the chat socket itself.
+function prefillChat(text) {
+  if (!chatInputEl) return;
+  chatInputEl.value = text;
+  chatInputEl.focus();
 }
 
 // --- sidebar: list of crawled graphs -----------------------------------------
@@ -147,6 +237,17 @@ async function selectHost(h) {
   const host = h.host;
   selectedHost = host;
 
+  // A host switch always returns to the Workspace view and tears down any prior
+  // graph render (destroyGraphView is defined in the lazily-loaded graph.js, so it may
+  // not exist yet). setView here only flips `hidden` — it does NOT touch the sockets,
+  // which the openChat/openLiveView calls below own.
+  setView("workspace");
+  if (typeof destroyGraphView === "function") destroyGraphView();
+  // Stash the (cheap, index) graph_kind now; the fresh-summary .then refreshes it.
+  selectedGraphKind = h.summary ? h.summary.graph_kind : null;
+  // A host whose cache failed to load can't render a graph — disable the Graph tab.
+  if (tabGraphEl) tabGraphEl.disabled = !!h.error;
+
   // reflect selection in the sidebar.
   for (const row of hostsEl.children) row.classList.remove("selected");
   // find the clicked row by matching label text (rows carry the host as first child).
@@ -167,6 +268,7 @@ async function selectHost(h) {
     const summary = await res.json();
     if (selectedHost === host && summary && !summary.status) {
       renderHostHeader(host, summary, null);
+      selectedGraphKind = summary.graph_kind;
     }
   } catch (err) { /* keep the index summary */ }
 
@@ -681,6 +783,9 @@ function openVault() {
 function closeVault() {
   if (vaultModalEl) vaultModalEl.hidden = true;
 }
+
+if (tabWorkspaceEl) tabWorkspaceEl.addEventListener("click", () => setView("workspace"));
+if (tabGraphEl) tabGraphEl.addEventListener("click", () => setView("graph"));
 
 if (vaultOpenEl) vaultOpenEl.addEventListener("click", openVault);
 if (vaultCloseEl) vaultCloseEl.addEventListener("click", closeVault);

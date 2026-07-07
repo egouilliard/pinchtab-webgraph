@@ -330,6 +330,8 @@ def test_ws_screencast_locate_null_rect_when_not_found(monkeypatch):
 SPA_IDS = [
     "caches-dir", "hosts",                        # sidebar: crawled-graphs list
     "host-header", "host-name", "host-kind", "host-counts", "panes",  # host header
+    "view-tabs", "tab-workspace", "tab-graph",                        # view switcher
+    "graph-view", "graph-canvas", "graph-detail", "graph-search", "graph-status",  # graph view
     "chat-form", "chat-input", "chat-log", "chat-status",             # chat pane
     "live-view", "live-status",                                       # live pane
     "vault-modal", "vault-open", "vault-close", "vault-status",       # vault modal
@@ -353,3 +355,57 @@ def test_app_js_references_the_same_ids():
     # The controller resolves elements by id string literal; each SPA id must appear.
     for _id in SPA_IDS:
         assert ('"%s"' % _id) in js, "app.js never references id=%r" % _id
+
+
+# --- Phase 2 graph view: /vendor mount, lazy graph.js, adapter contract ------
+#
+# The Graph view reuses the SAME 6 vendored Cytoscape libs crawl.py inlines, served from
+# a NEW /vendor StaticFiles mount registered BEFORE the catch-all "/" mount (else "/"
+# would shadow it). graph.js is injected lazily by app.js (never an eager <script>).
+
+def test_vendor_mounted_all_six_files():
+    from pinchtab_webgraph import crawl
+    for name in crawl._VENDOR_FILES:
+        r = client.get("/vendor/%s" % name)
+        assert r.status_code == 200, "missing /vendor/%s" % name
+        assert len(r.text) > 3000, "/vendor/%s looks truncated" % name
+
+
+def test_vendor_path_traversal_rejected():
+    # A traversal attempt out of the vendor dir must never resolve to server.py (or any
+    # source) — StaticFiles rejects it with a 403/404, never a 200 leak.
+    # Percent-encode the dot-segments so httpx does NOT normalize `..` away client-side
+    # (a bare "/vendor/../server.py" is collapsed to "/server.py" before it ever reaches
+    # the app, which would test nothing) — this drives the raw `..` into StaticFiles.
+    r = client.get("/vendor/%2e%2e/server.py")
+    assert r.status_code in (403, 404)
+    assert r.status_code != 200
+    assert "app.mount" not in r.text
+
+
+def test_graph_js_lazy_not_eager():
+    # graph.js is served, but the index HTML must NOT eager-load it via a <script> tag —
+    # app.js injects it (and the vendor libs) dynamically on the first Graph-tab switch.
+    r = client.get("/graph.js")
+    assert r.status_code == 200
+    html = client.get("/").text
+    assert 'src="graph.js"' not in html
+    assert 'src="/graph.js"' not in html
+
+
+def test_graph_css_served():
+    r = client.get("/graph.css")
+    assert r.status_code == 200
+
+
+def test_graph_raw_edge_shape_locks_adapter_contract(populated_cache_home):
+    # The client-side adapter (graph.js adaptInteractionGraph) maps {from,to,...} edges to
+    # Cytoscape {source,target,...}. This locks the RAW server shape it consumes: edges carry
+    # from/to/label/kind and deliberately NOT source/target (regression guard for the contract).
+    r = client.get("/api/hosts/%s/graph" % HOST)
+    assert r.status_code == 200
+    edges = r.json()["edges"]
+    assert edges, "fixture should have at least one edge"
+    for e in edges:
+        assert "from" in e and "to" in e and "label" in e and "kind" in e
+        assert "source" not in e and "target" not in e

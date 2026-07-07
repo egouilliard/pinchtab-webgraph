@@ -161,6 +161,8 @@ A "how do I get to X" chat answer also offers a **"Show me How"** button: a guid
 
 The **Graph view** renders the host's cached interaction graph entirely offline (via `GET /api/hosts/{host}/graph`), with search, an adjacency-highlight on node click, a detail panel, and an "Ask in chat" button that prefills the chat with the click-path question. Its Cytoscape libraries are lazy-loaded on first open so the SPA stays light. See [Graph view](docs/ui.md#graph-view).
 
+The UI can also **crawl a new URL and store it**: a sidebar **"New crawl"** form spawns the interaction crawler over a WebSocket, streams live progress, and atomically promotes the resulting graph into the cache so the new host appears in the sidebar and is instantly usable by the Graph view + chat. It is **opt-in** (off unless `PINCHTAB_WEBGRAPH_ENABLE_CRAWL` is set) because a crawl drives a real browser through the whole target app and opens every Create form (it never submits). See [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in).
+
 Only the **base install** (`pip install pinchtab-webgraph`, pure stdlib) is needed for the CLI and the UTCP manual; the MCP server and the web UI each live behind an optional extra (`[mcp]` / `[ui]`) so the base package stays dependency-free.
 
 > On externally-managed Python (Debian/Ubuntu, PEP 668) install the extras into a venv, or use `pip install --user --break-system-packages 'pinchtab-webgraph[mcp]'`.
@@ -220,7 +222,7 @@ Deep-dive guides live in **[`docs/`](docs/README.md)** — start at the **[docum
 | --- | --- |
 | **[MCP server](docs/mcp-server.md)** | Run `pinchtab-webgraph-mcp`: the `[mcp]` extra, `.mcp.json` registration, the tool + resource inventory, env vars, and the live-tool safety model. |
 | **[UTCP interface](docs/utcp.md)** | The `pwg query` JSON surface + the `pwg manual` / `--serve` UTCP manual, the 8 tools, the scope subset, and the exit-code convention. |
-| **[Web UI](docs/ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the Workspace/[Graph](docs/ui.md#graph-view) view switcher, the REST API + vault endpoints, the chat + screencast WebSockets, env vars, and the loopback-only security model. |
+| **[Web UI](docs/ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the Workspace/[Graph](docs/ui.md#graph-view) view switcher, the REST API + vault endpoints, the chat + screencast WebSockets, the opt-in [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in) endpoint, env vars, and the loopback-only security model. |
 | **[Authenticated login](docs/authenticated-login.md)** | Crawl behind a login safely: hand-login vs. keyring automation, the threat model, sandbox/bot-account isolation, and how to test it. |
 | **[Contributing](CONTRIBUTING.md)** | Branch model, Conventional Commits, the stay-generic rule, safety, security, and PRs. |
 

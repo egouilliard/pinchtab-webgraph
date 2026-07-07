@@ -423,6 +423,75 @@ one, or the pane hasn't navigated yet) the agent routes from the crawl's default
 as before. The live URL is untrusted site data, but it only ever travels to the model as text —
 it is never rendered as HTML.
 
+### New crawl (`GET /ws/crawl`, opt-in)
+
+`GET /ws/crawl?url=<url>&max_states=&max_depth=` — the one **WRITE** socket in the UI:
+crawl a brand-new URL and store the result, all from
+the sidebar — no CLI, no shell. The server spawns
+`python -m pinchtab_webgraph.interaction_crawl` as a subprocess, streams its progress out
+frame-by-frame, and — when it finishes (or is cancelled) — **atomically promotes** the
+resulting interaction graph into the cache dir, so the new host appears in the sidebar and
+is immediately usable by the [Graph view](#graph-view) and the [chat](#get-wschathosthost).
+
+**Off by default.** This is the biggest capability in the UI: it makes the server drive a
+**real browser** through the *entire* target app and open **every** "Create" form (to read
+its fields — it **never submits**). So the route is gated behind an opt-in env var and
+refuses with a structured frame unless it is set:
+
+```bash
+PINCHTAB_WEBGRAPH_ENABLE_CRAWL=1 pinchtab-webgraph-ui   # 1 / true / yes / on
+```
+
+Its target PinchTab bridge is its **own** env var, `PINCHTAB_WEBGRAPH_CRAWL_SERVER`
+(default `http://localhost:9871`) — deliberately distinct from the [screencast pane's
+`PINCHTAB_WEBGRAPH_BRIDGE`](#get-wsscreencasthosthost), so a crawl and the live pane can point
+at different physical bridges. The crawler self-loads its bridge **token** from the config
+at `$PINCHTAB_CONFIG`. Concurrency is capped at **one** crawl at a time
+(`MAX_LIVE_CRAWLS`); a second attempt gets a `too_many_sessions` frame.
+
+**The sidebar form.** A **"New crawl"** form sits above the host list:
+
+- a `url` input (validated `http`/`https` + a hostname the cache guard accepts);
+- an **Advanced (crawl limits)** disclosure with `max states` (clamped to **[10, 500]**,
+  default **60**) and `max depth` (clamped to **[1, 8]**, default **4**);
+- a **New crawl** submit + a **Cancel** button (shown only while a crawl runs);
+- a permanent **safety note** — *"The crawler clicks through every page and opens every
+  Create form to read it — it never submits anything."*;
+- a live **progress log** that streams `status` / `progress` / `log` lines and the terminal
+  result. Every server-sourced string is rendered with `textContent` (never `innerHTML`).
+
+On a terminal `done` (or a `cancelled` that promoted a partial graph) the SPA re-fetches
+`/api/hosts`, then **auto-selects** the freshly-stored host so its Graph view + chat open
+immediately.
+
+**Client → server:**
+
+| Frame | Meaning |
+| --- | --- |
+| `{"type":"cancel"}` | request cancellation; the server SIGTERM→SIGKILLs the crawler's process group and still promotes whatever partial graph was written. Any other frame — or a socket disconnect — is treated the same as a cancel |
+
+**Server → client:**
+
+| Frame | Meaning |
+| --- | --- |
+| `{"type":"status","state":"starting","host":<str>,"start_url":<str>}` | the subprocess launched |
+| `{"type":"progress","states":<int>,"visits":<int>,"depth":<int>,"url":<str>,"controls":<int>}` | one visited-state progress tick, parsed from the crawler's stderr |
+| `{"type":"log","line":<str>}` | any non-progress crawler line (banner, `✓ trigger …`, warnings, the final `Wrote …`), truncated to 500 chars |
+| `{"type":"done","host":<str>,"states":<int>,"edges":<int>,"triggers":<int>,"complete":<bool>,"stopped":<str>}` | the crawl finished and its graph was promoted. `complete` / `stopped` come from the **written graph's `meta`**, never the return code |
+| `{"type":"cancelled","host":<str>,"promoted":<bool>,"states":…,"edges":…,"triggers":…,"complete":…,"stopped":…}` | cancelled / disconnected. `promoted` says whether a partial graph was stored; the counts are `null` when nothing was written |
+| `{"type":"error","status":"invalid_url","url":<str>,"detail":…}` | bad scheme / no hostname / rejected host token; the socket closes |
+| `{"type":"error","status":"crawl_unavailable","reason":…,"detail":…}` | the feature can't start — `reason` is `disabled` (the opt-in var isn't set), `no_config` (`$PINCHTAB_CONFIG` unset/missing), or `bridge_unreachable` (the crawl bridge didn't answer); the socket closes |
+| `{"type":"error","status":"too_many_sessions","max":1}` | already at the `MAX_LIVE_CRAWLS` cap; the socket closes |
+| `{"type":"error","status":"crawl_failed","host":<str>,"detail":…}` | the crawl produced no output graph, or its staging file was corrupt/partial (promotion raised) |
+
+**Storage guarantee — temp-staging → atomic promote.** The crawler writes into a private
+staging dir created **inside** `$PINCHTAB_WEBGRAPH_HOME`, and only a *promotable* result
+(a graph whose `meta` loads) is `os.replace`d onto `cache_store.cache_path(host)` — an
+**atomic, same-filesystem move**. A failed, empty, or corrupt crawl therefore **never
+clobbers an existing good cache**; the staging dir is always torn down in a `finally`, so no
+orphan process and no leaked temp files. Because a cancel still writes the crawler's partial
+graph first (its own SIGTERM handler), a cancelled crawl can still promote what it captured.
+
 ## Environment variables
 
 | Var | Effect |
@@ -433,6 +502,8 @@ it is never rendered as HTML.
 | `PINCHTAB_UI_CHAT_BACKEND` | Force the chat backend: `api` or `claude_code` (an explicit override wins over the auto-selection). See [Chat backends](#chat-backends). |
 | `PINCHTAB_UI_CLAUDE_CODE_MODEL` | Override the `claude_code`-backend model. Default: your account's Claude Code default (deliberately *not* the API `claude-opus-4-8` alias). |
 | `PINCHTAB_WEBGRAPH_BRIDGE` | PinchTab bridge URL for the live pane's best-effort automated login. Absent → the live pane still runs, just unauthenticated. |
+| `PINCHTAB_WEBGRAPH_ENABLE_CRAWL` | **Opt-in gate** for the [New crawl](#new-crawl-get-wscrawl-opt-in) socket (`/ws/crawl`). Unset → **off**: `/ws/crawl` refuses with a `crawl_unavailable`/`disabled` frame. Set to a truthy value (`1` / `true` / `yes` / `on`) to allow crawling a URL from the UI. |
+| `PINCHTAB_WEBGRAPH_CRAWL_SERVER` | PinchTab bridge URL the [New crawl](#new-crawl-get-wscrawl-opt-in) subprocess drives (default `http://localhost:9871`). Deliberately **distinct** from `PINCHTAB_WEBGRAPH_BRIDGE` so a crawl and the live pane can target different bridges. The crawler self-loads its bridge **token** from `$PINCHTAB_CONFIG`. |
 
 ## Security model
 
@@ -458,6 +529,18 @@ it is never rendered as HTML.
   all built-in tools are removed (`tools=[]`), no `~/.claude` / `CLAUDE.md` / project settings
   are loaded, and a deny-by-default `can_use_tool` backstop rejects anything off the
   six-tool allow-list.
+- **Crawl-from-UI is the strongest capability — and the most fenced.** The
+  [New crawl](#new-crawl-get-wscrawl-opt-in) socket (`/ws/crawl`) can
+  make the server drive a **real browser** through the whole target app and open every
+  Create form (it never submits). It is guarded four ways: **opt-in** — off unless
+  `PINCHTAB_WEBGRAPH_ENABLE_CRAWL` is truthy; **loopback-only** — same unauthenticated,
+  `127.0.0.1`-by-default posture as the rest of the UI (and it makes the non-loopback
+  warning louder); **no shell / no argv injection** — the user URL is passed as an inert
+  argv element to `create_subprocess_exec` (never a shell string), so a hostile URL can't
+  become an executable statement; and **host-validated** — the start URL must be `http`/`https`
+  with a hostname the `cache_store.validate_host` choke-point accepts, so a crawl can never
+  resolve or write outside `caches_dir()`. Concurrency is capped at one, and the result is
+  promoted by an **atomic same-filesystem move** so a failed crawl can't corrupt a good cache.
 - **No endpoint authentication.** There is deliberately none — the design assumes a
   localhost-only deployment. Do not put this behind a public reverse proxy without adding
   your own auth in front.

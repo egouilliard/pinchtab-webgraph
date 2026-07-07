@@ -131,8 +131,22 @@ pinchtab-webgraph-ui --port 9000     # pick a different port
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | bind address |
-| `--port` | `8765` | bind port |
+| `--port` | `$PORT` if set, else `8765` | bind port |
 | `--open` | off | open the UI in a browser once the server is listening |
+
+### portless-native
+
+`--port` honours the `$PORT` environment variable, so the server runs cleanly through
+[portless](https://www.npmjs.com/package/portless) — no port to remember, no `8765`
+collision:
+
+```bash
+portless webgraph python -m pinchtab_webgraph.ui.server
+# -> https://webgraph.localhost   (portless assigns a free $PORT and proxies to it)
+```
+
+`--host` stays `127.0.0.1` (portless proxies from the same machine), so the loopback-only
+safety model below is unchanged.
 
 **It binds loopback (`127.0.0.1`) by default, on purpose.** The vault WRITE endpoints,
 the chat agent, and the live browser pane are **unauthenticated** — anyone who can reach
@@ -387,3 +401,31 @@ it is never rendered as HTML.
 - **One Chrome + one MCP subprocess per connection.** Each live-pane socket launches a
   private headless Chrome; each chat socket spawns a pinchtab-webgraph MCP stdio
   subprocess. `MAX_LIVE_SESSIONS` (3) caps concurrent Chrome instances.
+- **Chat replies render as markdown.** The SPA renders the assistant's reply — bold,
+  italics, headings, ordered/unordered lists, inline + block code, links, and GitHub-style
+  **tables** — through a small HTML-escape-first renderer, so no model or crawled-site text
+  can inject HTML.
+
+## Troubleshooting
+
+- **The chat replies with raw `<function_calls …>` or `Tool call: …` text and never lists
+  results.** The model has **no tools** and is narrating the call. The `claude_code`
+  backend's tools come from a `pinchtab-webgraph` MCP server it spawns as `python -m
+  pinchtab_webgraph.mcp_server` from an isolated temp dir, so the package must be importable
+  from *anywhere* — not just the repo. The usual cause is a **stale editable install** whose
+  target was moved or pruned (e.g. a deleted git worktree): the subprocess then crashes with
+  `ModuleNotFoundError` and the tools never load. Verify and fix:
+
+  ```bash
+  cd /tmp && python -c "import pinchtab_webgraph"   # must NOT raise
+  pip install -e .                                  # re-point the editable install at this checkout
+  ```
+
+  Then **reload the chat page** — a fresh page spins up a new MCP subprocess. (The server
+  also pins `PYTHONPATH` for the subprocess as a backstop, but a healthy import is the real
+  fix.)
+- **The chat pane says `chat_unavailable`.** No backend is configured — set an
+  `ANTHROPIC_API_KEY` (the `api` backend) **or** install `[ui-claude-code]` and log in to the
+  `claude` CLI (the `claude_code` backend, no key). See [Chat backends](#chat-backends).
+- **The live browser pane stays blank.** No Chrome/Chromium on `PATH` — install one of
+  `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`.

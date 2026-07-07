@@ -226,13 +226,34 @@ function renderMarkdown(raw) {
   const out = [];
   let listType = null, inCode = false, code = [];
   const closeList = () => { if (listType) { out.push("</" + listType + ">"); listType = null; } };
-  for (const line of lines) {
+  // GitHub-style tables: split a `| a | b |` row into trimmed cells; a separator row is
+  // one whose cells are all `---` / `:--:` dashes. A table is a row immediately followed
+  // by a separator (so a lone paragraph pipe is never mistaken for one).
+  const cellsOf = (row) => row.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+  const isRow = (l) => l.includes("|") && l.trim() !== "";
+  const isSep = (l) => isRow(l) && cellsOf(l).every((c) => /^:?-{1,}:?$/.test(c));
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     if (line.trim().startsWith("```")) {
       if (inCode) { out.push("<pre><code>" + code.join("\n") + "</code></pre>"); code = []; inCode = false; }
       else { closeList(); inCode = true; }
       continue;
     }
     if (inCode) { code.push(line); continue; }
+    if (isRow(line) && !isSep(line) && i + 1 < lines.length && isSep(lines[i + 1])) {
+      closeList();
+      out.push("<table><thead><tr>"
+        + cellsOf(line).map((c) => "<th>" + inline(c) + "</th>").join("")
+        + "</tr></thead><tbody>");
+      i += 2;  // consume header + separator
+      while (i < lines.length && isRow(lines[i]) && !isSep(lines[i])) {
+        out.push("<tr>" + cellsOf(lines[i]).map((c) => "<td>" + inline(c) + "</td>").join("") + "</tr>");
+        i++;
+      }
+      i--;  // step back: the for-loop will re-increment
+      out.push("</tbody></table>");
+      continue;
+    }
     const h = line.match(/^(#{1,4})\s+(.*)$/);
     const ol = line.match(/^\s*\d+\.\s+(.*)$/);
     const ul = line.match(/^\s*[-*]\s+(.*)$/);

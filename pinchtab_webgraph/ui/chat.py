@@ -328,6 +328,79 @@ async def run_conversation_turn(state, *, emit, model=None, max_tokens=1024,
     await emit({"type": "done"})
 
 
+_TM_OPEN = "<function_calls>"
+_TM_CLOSE = "</function_calls>"
+
+
+class ToolMarkupFilter:
+    """Strip leaked tool-call markup from a streamed assistant TEXT stream.
+
+    A model whose tools are not yet in its list (e.g. an MCP handshake that raced the
+    first turn) can emit a tool call AS TEXT — the raw ``<function_calls><invoke …>``
+    markup — instead of a structured tool_use. That must never render as chat prose. This
+    stateful filter drops every ``<function_calls>…</function_calls>`` span across the
+    incoming deltas, holding back only a short tail that could be a tag split across two
+    deltas. Generic — no tool/app names, no regex on content. Pure/stdlib.
+    """
+
+    def __init__(self):
+        self._buf = ""
+        self._in = False           # inside a <function_calls>…</function_calls> span
+
+    def feed(self, delta):
+        """Consume one text delta; return the text safe to emit now ('' if none yet)."""
+        self._buf += delta or ""
+        out = []
+        while True:
+            if self._in:
+                i = self._buf.find(_TM_CLOSE)
+                if i == -1:
+                    break
+                self._buf = self._buf[i + len(_TM_CLOSE):]
+                self._in = False
+            else:
+                i = self._buf.find(_TM_OPEN)
+                if i == -1:
+                    break
+                out.append(self._buf[:i])
+                self._buf = self._buf[i + len(_TM_OPEN):]
+                self._in = True
+        # Hold back ONLY a tail that is a partial prefix of the tag we're scanning for
+        # (so normal text streams immediately; we buffer only near a possible split tag).
+        tag = _TM_CLOSE if self._in else _TM_OPEN
+        hold = self._partial_prefix_len(self._buf, tag)
+        if self._in:
+            # inside a dropped span: discard everything except a possible partial close tag
+            self._buf = self._buf[len(self._buf) - hold:] if hold else ""
+        else:
+            if hold:
+                out.append(self._buf[:len(self._buf) - hold])
+                self._buf = self._buf[len(self._buf) - hold:]
+            else:
+                out.append(self._buf)
+                self._buf = ""
+        return "".join(out)
+
+    @staticmethod
+    def _partial_prefix_len(buf, tag):
+        """Length of the longest suffix of ``buf`` that is a proper prefix of ``tag``.
+
+        That suffix might be the start of a ``tag`` split across the next delta, so it is
+        the only part worth holding back; everything before it is safe to emit now.
+        """
+        for n in range(min(len(buf), len(tag) - 1), 0, -1):
+            if tag.startswith(buf[-n:]):
+                return n
+        return 0
+
+    def flush(self):
+        """End of stream: emit any retained safe text (nothing if mid-dropped-span)."""
+        out = "" if self._in else self._buf
+        self._buf = ""
+        self._in = False
+        return out
+
+
 def augment_with_location(text, live_url):
     """Prefix the user's message with the live browser's current URL when known.
 

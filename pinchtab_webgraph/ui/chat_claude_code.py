@@ -125,6 +125,17 @@ def _build_options(claude_agent_sdk, host, *, model=None, cwd=None):
             return claude_agent_sdk.PermissionResultAllow()
         return claude_agent_sdk.PermissionResultDeny(message=_CLAUDE_CODE_DENY_MSG)
 
+    # The MCP server is spawned as `python -m pinchtab_webgraph.mcp_server` from an
+    # ISOLATED temp cwd (below), so `-m` can only find the package via sys.path — NOT
+    # the cwd. Pin PYTHONPATH to this package's parent so the import works regardless of
+    # how (or whether) the package is installed. Without this, a broken/dangling editable
+    # install (e.g. pointing at a pruned worktree) silently crashes the MCP server → the
+    # model gets NO tools and narrates its tool calls as text instead of calling them.
+    _pkg_parent = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    _mcp_env = dict(os.environ)
+    _mcp_env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (_pkg_parent, os.environ.get("PYTHONPATH")) if p)
+
     return claude_agent_sdk.ClaudeAgentOptions(
         tools=[],
         mcp_servers={
@@ -132,6 +143,7 @@ def _build_options(claude_agent_sdk, host, *, model=None, cwd=None):
                 "type": "stdio",
                 "command": sys.executable,
                 "args": ["-m", "pinchtab_webgraph.mcp_server"],
+                "env": _mcp_env,
             }
         },
         strict_mcp_config=True,
@@ -158,10 +170,18 @@ async def _await_mcp_ready(client, *, attempts=50, delay=0.2):
     missing or unresponsive status endpoint never hangs the session (any error just
     proceeds — the turn still works, it just may miss tools on the very first message).
     """
+    get_status = getattr(client, "get_mcp_status", None)
+    if get_status is None:
+        # This SDK build can't report MCP readiness. Rather than proceed instantly (the
+        # first turn would then race an EMPTY tool list, and the model emits its tool
+        # call as raw TEXT), give the stdio handshake a bounded moment to settle.
+        await asyncio.sleep(1.0)
+        return
     for _ in range(attempts):
         try:
-            status = await client.get_mcp_status()
-        except Exception:  # noqa: BLE001 — status endpoint absent/erroring: don't block
+            status = await get_status()
+        except Exception:  # noqa: BLE001 — status endpoint erroring: brief settle, don't hang
+            await asyncio.sleep(1.0)
             return
         servers = (status or {}).get("mcpServers") or []
         ours = next((s for s in servers if s.get("name") == MCP_SERVER_NAME), None)
@@ -251,6 +271,9 @@ async def run_conversation_turn(client, text, *, emit):
     """
     await client.query(text, session_id="default")
     tool_names = {}  # tool_use_id -> qualified name, to label the matching result
+    # Drop any tool-call markup the model streams as TEXT (tools-not-ready fallback) so
+    # raw <function_calls> XML never renders as chat prose. Flushed before "done".
+    text_filter = chat.ToolMarkupFilter()
 
     async for msg in client.receive_response():
         kind = type(msg).__name__
@@ -260,7 +283,9 @@ async def run_conversation_turn(client, text, *, emit):
             if event.get("type") == "content_block_delta":
                 delta = event.get("delta") or {}
                 if delta.get("type") == "text_delta":
-                    await emit({"type": "text", "delta": delta.get("text", "")})
+                    safe = text_filter.feed(delta.get("text", ""))
+                    if safe:
+                        await emit({"type": "text", "delta": safe})
             continue
 
         if kind == "AssistantMessage":
@@ -290,6 +315,9 @@ async def run_conversation_turn(client, text, *, emit):
             continue
 
         if kind == "ResultMessage":
+            tail = text_filter.flush()
+            if tail:
+                await emit({"type": "text", "delta": tail})
             if msg.is_error:
                 await emit({"type": "error",
                             "detail": msg.result or "claude_code_turn_error"})

@@ -568,3 +568,32 @@ def test_handle_user_message_folds_live_url_into_the_turn():
                                              live_url="https://site.test/settings"))
     assert state.messages[-1]["role"] == "user"
     assert "https://site.test/settings" in state.messages[-1]["content"]
+
+
+# --- ToolMarkupFilter: strip leaked <function_calls> tool-call markup from text ------
+
+def _run_filter(deltas):
+    from pinchtab_webgraph.ui.chat import ToolMarkupFilter
+    f = ToolMarkupFilter()
+    out = "".join(f.feed(d) for d in deltas)
+    return out + f.flush()
+
+
+def test_tool_markup_filter_strips_single_delta_leak():
+    leak = ('I\'ll list the forms.\n<function_calls>\n<invoke name="list_forms">\n'
+            '<parameter name="host">go-staging.leyton.com</parameter>\n</invoke>\n</function_calls>')
+    assert _run_filter([leak]) == "I'll list the forms.\n"
+
+
+def test_tool_markup_filter_strips_across_streamed_deltas():
+    leak = 'before<function_calls><invoke name="x"></invoke></function_calls>after'
+    # fed one character at a time (worst-case streaming) the markup still vanishes
+    assert _run_filter(list(leak)) == "beforeafter"
+
+
+def test_tool_markup_filter_passes_normal_text():
+    assert _run_filter(["Go to ", "Settings, ", "then click Add."]) == "Go to Settings, then click Add."
+
+
+def test_tool_markup_filter_open_tag_split_on_boundary():
+    assert _run_filter(["hi <function_", "calls>junk</function_calls> bye"]) == "hi  bye"

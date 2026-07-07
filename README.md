@@ -16,6 +16,7 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 
 - **Graph from anything** — one crawl records each state's full control inventory (links / buttons / tabs / menus) **and** its data collections (tables, grids, trees, lists, feeds, virtualized/scroll-loaded content). A complete nav + content graph of any site, all from structural signals.
 - **Offline "how-to" in milliseconds** — BFS over the crawled graph returns the shortest click-path to any action *plus* the fields of the form it opens, in ~60–130 ms with zero browser calls.
+- **File-upload discovery** — the crawl also finds where you can upload a document. File inputs (including ones hidden behind a styled `<label>`/button) and `ondrop` dropzones become read-only `upload` nodes tagged with the file types they accept (e.g. `.pdf,.docx`, `image/*`), so "how do I upload a … ?" is answerable — and the crawler never clicks them (that would pop a native OS file dialog).
 - **Safe by construction** — discovery opens and reads forms, then presses Escape. It never submits, saves, or deletes anything. Destructive-looking controls are skipped and recorded, not clicked.
 - **Never loses progress** — atomic checkpoints every N states plus a SIGINT/SIGTERM handler; a crash, OOM, or Ctrl-C keeps the partial graph. `meta.stopped` always says *why* a crawl ended (complete vs. truncated) — no silent truncation.
 - **Spans app boundaries** — `--cross-host` follows links and `iframe[src]` into other hosts as graph nodes, so an embedded/linked app becomes part of the same graph. `--single-url` drives app-shell SPAs (e.g. Teams-style apps that swap views without changing the URL).
@@ -223,12 +224,15 @@ Deep-dive guides live in **[`docs/`](docs/README.md)** — start at the **[docum
 
 ## 🔎 How interaction crawling works
 
-For each state the crawler reads every link and clickable widget (stable structural CSS selectors, not framework-generated refs), plus the state's data collections. Then, for each non-skipped widget, it **re-materializes** the state (replay the click-path from a known start), clicks the widget, and classifies the result:
+For each state the crawler reads every link and clickable widget (stable structural CSS selectors, not framework-generated refs), plus the state's data collections. The clickable set spans `button` / `[role="button"]` / tabs / menu items / `summary` / `[onclick]` **and** upload affordances — `input[type="file"]` (including a file input hidden behind a styled `<label>`/button) and `[ondrop]` dropzones — each carrying its `accept` attribute (accepted file types). Then, for each non-skipped widget, it **re-materializes** the state (replay the click-path from a known start), clicks the widget, and classifies the result:
 
 - **navigated** (URL changed) → a page edge; enqueue the new page.
 - **DOM changed, same URL** → a new SPA/state node + edge, recursed into up to the interaction depth.
-- **create-trigger** → the form/modal is opened, its fields are read (label / type / required / options / confirm button), then Escape — nothing is persisted.
+- **create-trigger** → the form/modal is opened, its fields are read (label / type / required / options / accepted file types / confirm button), then Escape — nothing is persisted.
+- **upload affordance** → recorded as a read-only `upload` node (with its `accept` file types) and a skipped action edge, but **never clicked** — clicking a file input opens a native OS file dialog the crawler can't dismiss, so uploads are documented, not activated.
 - **no change** → ignored.
+
+> A dropzone whose drop handler is attached via `addEventListener` (not an inline `ondrop` attribute) and that wraps no file input can't be seen from the DOM; the nested-file-input heuristic covers the common case.
 
 Two kinds of state become **trigger targets** for the offline `howto` query: a control whose label carries a create-verb (`create` / `add` / `new` / …), **and** a state that *structurally is a form* — it renders real `input`/`select`/`textarea` fields plus a submit control — even when nothing on it carries a create-verb. That second, structural signal (`--capture-form-states`, on by default) is how sign-in / sign-up / contact pages become answerable (e.g. "how do I sign in" → `/login` with its email + password form), and it's fully generic — form shape, no app vocabulary. On the query side, a matched trigger whose form has **no fields** is treated as low-confidence and `howto` prefers `no_match` over surfacing it, so a nav link that merely shares a verb (say "Find a **new** job" for "post a job") is never returned as a confident match.
 
@@ -254,14 +258,15 @@ Everything runs locally against your own isolated browser bridge. The pipeline i
 
 The JSON graph is `{ nodes, edges, meta }`:
 
-- **Nodes** — **pages** (by normalized URL) and **SPA/modal states** (same URL, changed DOM). Cross-host mode adds `external` / `iframe` nodes. Each node can carry its **control inventory** and its **content collections**.
-- **Edges** — **links** (navigation) and **actions/clicks**. Destructive-looking actions that were deliberately skipped are recorded as dashed edges so you can see what was avoided.
-- **meta** — crawl parameters plus `meta.stopped`: `frontier-exhausted` (complete) vs. `hit-max-*` / `wedge` (truncated). Truncation is always explicit.
+- **Nodes** — **pages** (by normalized URL) and **SPA/modal states** (same URL, changed DOM). Cross-host mode adds `external` / `iframe` nodes. File-upload affordances become a distinct `upload` node carrying an `accept` field (the accepted file types). Each node can carry its **control inventory** and its **content collections**.
+- **Edges** — **links** (navigation) and **actions/clicks**. Destructive-looking actions that were deliberately skipped — and upload affordances, which are recorded but never clicked — are stored as dashed (skipped) edges so you can see what was avoided.
+- **meta** — crawl parameters plus `meta.stopped`: `frontier-exhausted` (complete) vs. `hit-max-*` / `wedge` (truncated). Truncation is always explicit. An additive `meta.uploads` counts the upload affordances found.
+- **Viewer** — the Cytoscape HTML viewer renders `upload` nodes distinctly (cyan, "tag" shape, a "file upload" legend entry) alongside the "SPA / modal state" and "skipped" legends; the `Uploads` stat is guarded, so older graphs without it still render.
 
 ## 🛡️ Safety model
 
 - **Same-origin by default** — the crawler won't wander off the target site unless you pass `--cross-host`.
-- **Never mutates data** — discovery opens and reads forms, then Escapes. Create / save / delete / submit controls are skipped by default and recorded, not clicked. **Never run a "click everything" crawl in an authenticated session you care about** — that's exactly why the isolated bridge exists.
+- **Never mutates data** — discovery opens and reads forms, then Escapes. Create / save / delete / submit controls are skipped by default and recorded, not clicked. **File-upload affordances are recorded but never clicked** (clicking a file input opens a native OS file dialog the crawler can't dismiss), so the read-only contract holds. **Never run a "click everything" crawl in an authenticated session you care about** — that's exactly why the isolated bridge exists.
 - **Hard caps** on states, actions-per-state, interaction depth, and a global action budget prevent the classic SPA state explosion.
 - **Secrets stay out of git** — `crawl-config.json` (bridge token) and `.instance/` (live browser profile/session) are gitignored. Commit explicit source files only.
 - **OS-level sandbox (opt-in)** — run under [Claude Code's built-in sandbox](#-run-it-under-a-sandbox-recommended) to confine the crawler at the OS level: no keyring/SSH/cloud-cred reads, localhost-only egress, and no `sudo` escape. A ready posture ships in [`.claude/settings.json`](.claude/settings.json).

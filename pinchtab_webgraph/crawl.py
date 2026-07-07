@@ -67,8 +67,14 @@ TRACKING = re.compile(r"^(utm_|gclid$|fbclid$|mc_|ref$|ref_src$|_ga$)", re.I)
 
 
 # --- JavaScript injected to read a page's interactive surface ----------------
-# Returns {url, title, links:[{href,text}], actions:[{selector,text,tag}]}.
+# Returns {url, title, links:[{href,text}],
+#          actions:[{selector,text,tag,nav,bulk,upload,accept}]}.
 # `selector` is a stable CSS path so we can re-find the element after a reload.
+# `upload` (bool) flags a file-upload affordance — a bare `input[type="file"]`, a
+# file input hidden behind a styled <label>/button, or an inline-`ondrop` dropzone;
+# `accept` carries that control's accepted file types (e.g. ".pdf,.docx", "image/*")
+# or null. Upload affordances become a read-only "upload" graph node and are NEVER
+# clicked (clicking a file input opens a native OS dialog the crawler can't dismiss).
 EXTRACT_JS = r"""
 (() => {
   function cssEsc(s){ return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/[^a-zA-Z0-9_-]/g,'\\$&'); }

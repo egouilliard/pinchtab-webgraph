@@ -59,6 +59,7 @@ pinchtab-webgraph-ui = "pinchtab_webgraph.ui.server:main"
 packages = ["pinchtab_webgraph", "pinchtab_webgraph.ui"]
 
 [tool.setuptools.package-data]
+"pinchtab_webgraph" = ["vendor/*.min.js"]
 "pinchtab_webgraph.ui" = ["static/*"]
 
 [tool.pytest.ini_options]

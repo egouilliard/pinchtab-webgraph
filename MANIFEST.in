@@ -1,1 +1,2 @@
 recursive-include pinchtab_webgraph/ui/static *
+recursive-include pinchtab_webgraph/vendor *.min.js

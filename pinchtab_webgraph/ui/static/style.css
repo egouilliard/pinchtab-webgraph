@@ -135,6 +135,66 @@ body {
 .host-meta { display: flex; align-items: center; gap: 0.4rem; }
 .host-meta .count { font-size: 0.72rem; color: var(--muted); }
 
+/* --- new crawl form ------------------------------------------------------- */
+.crawl-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0 0.9rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.5rem;
+}
+.crawl-form input {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+}
+.crawl-form input:disabled { opacity: 0.55; }
+.crawl-form .advanced { font-size: 0.78rem; color: var(--muted); }
+.crawl-form .advanced summary { cursor: pointer; padding: 0.15rem 0; }
+.crawl-form .advanced .field-row { margin-top: 0.4rem; gap: 0.5rem; }
+.crawl-form .advanced label {
+  display: flex; flex-direction: column; gap: 0.2rem; flex: 1 1 5rem;
+  font-size: 0.72rem; color: var(--muted);
+}
+.crawl-actions { display: flex; align-items: center; gap: 0.5rem; }
+.crawl-form button[type="submit"] {
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.8rem;
+}
+.crawl-form button[type="submit"]:hover { background: var(--accent-hover); }
+.crawl-form button[type="submit"]:disabled { opacity: 0.55; cursor: default; }
+.crawl-cancel-btn {
+  background: transparent;
+  color: var(--err-fg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.78rem;
+}
+.crawl-cancel-btn:hover { border-color: var(--err-fg); }
+.crawl-safety { font-size: 0.7rem; line-height: 1.35; margin: 0; }
+.crawl-progress {
+  max-height: 9rem;
+  overflow-y: auto;
+  background: var(--tool-bg);
+  color: var(--tool-fg);
+  font-size: 0.72rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+}
+.crawl-progress .crawl-line { white-space: pre-wrap; word-break: break-all; }
+
 /* --- buttons -------------------------------------------------------------- */
 button {
   font: inherit;

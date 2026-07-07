@@ -65,9 +65,19 @@ const credMsgEl = el("cred-msg");
 const CRED_FIELDS = ["url", "username", "userField", "passField", "submit",
   "successUrl", "keyringService"];
 
+// new-crawl form
+const crawlFormEl = el("crawl-form");
+const crawlUrlEl = el("crawl-url");
+const crawlSubmitEl = el("crawl-submit");
+const crawlCancelEl = el("crawl-cancel");
+const crawlMaxStatesEl = el("crawl-max-states");
+const crawlMaxDepthEl = el("crawl-max-depth");
+const crawlProgressEl = el("crawl-progress");
+
 // --- shared socket / selection state -----------------------------------------
 let chatWs = null;
 let liveWs = null;
+let crawlWs = null;              // the live-crawl progress socket (one at a time)
 let selectedHost = null;
 let currentView = "workspace";   // "workspace" | "graph" — flips ONLY the `hidden` panes
 let vendorPromise = null;        // memoized sequential load of the Cytoscape libs + graph.js
@@ -910,6 +920,126 @@ if (credFormEl) {
     loadCredentials();
   });
 }
+
+// --- new crawl ---------------------------------------------------------------
+// Enter a URL -> open /ws/crawl, stream progress/log lines into #crawl-progress,
+// and on a terminal frame re-enable the form + auto-select the new host so its graph
+// opens immediately. The feature is off by default (a `crawl_unavailable`/`disabled`
+// frame is shown gracefully). textContent only for every server-sourced string.
+
+function crawlAddLine(text) {
+  if (!crawlProgressEl) return;
+  crawlProgressEl.hidden = false;
+  const div = document.createElement("div");
+  div.className = "crawl-line";
+  div.textContent = text;                    // textContent — never innerHTML
+  crawlProgressEl.appendChild(div);
+  crawlProgressEl.scrollTop = crawlProgressEl.scrollHeight;
+}
+
+function crawlSetRunning(on) {
+  if (crawlUrlEl) crawlUrlEl.disabled = on;
+  if (crawlSubmitEl) crawlSubmitEl.disabled = on;
+  if (crawlMaxStatesEl) crawlMaxStatesEl.disabled = on;
+  if (crawlMaxDepthEl) crawlMaxDepthEl.disabled = on;
+  if (crawlCancelEl) crawlCancelEl.hidden = !on;
+}
+
+// Re-fetch /api/hosts, find the freshly-promoted host, and open it via selectHost so
+// its Graph view + chat are immediately usable.
+async function autoSelectHost(host) {
+  try {
+    const res = await fetch("/api/hosts");
+    const data = await res.json();
+    const entry = (data.hosts || []).find((h) => h.host === host);
+    if (entry) selectHost(entry);
+  } catch (err) { /* the sidebar refresh already ran; ignore */ }
+}
+
+function cancelCrawl() {
+  if (crawlWs && crawlWs.readyState === WebSocket.OPEN) {
+    crawlWs.send(JSON.stringify({ type: "cancel" }));
+  }
+}
+
+function startCrawl(url, opts) {
+  if (crawlWs) { try { crawlWs.close(); } catch (e) { /* ignore */ } crawlWs = null; }
+  if (crawlProgressEl) crawlProgressEl.textContent = "";
+  crawlSetRunning(true);
+  crawlAddLine("connecting…");
+
+  let q = "/ws/crawl?url=" + encodeURIComponent(url);
+  if (opts && opts.maxStates) q += "&max_states=" + encodeURIComponent(opts.maxStates);
+  if (opts && opts.maxDepth) q += "&max_depth=" + encodeURIComponent(opts.maxDepth);
+
+  const ws = new WebSocket(wsUrl(q));
+  crawlWs = ws;
+  let doneHost = null;
+
+  ws.onmessage = (ev) => {
+    if (crawlWs !== ws) return;
+    let data;
+    try { data = JSON.parse(ev.data); } catch (e) { return; }
+    switch (data.type) {
+      case "status":
+        crawlAddLine("starting crawl of " + (data.host || "") + "…");
+        break;
+      case "progress":
+        crawlAddLine("· " + (data.states || 0) + " states / " +
+          (data.visits || 0) + " visits · depth " + (data.depth || 0) +
+          " · " + (data.url || ""));
+        break;
+      case "log":
+        crawlAddLine(data.line || "");
+        break;
+      case "done":
+        doneHost = data.host || null;
+        crawlAddLine("✓ done: " + (data.states || 0) + " states, " +
+          (data.edges || 0) + " edges, " + (data.triggers || 0) + " triggers" +
+          (data.complete ? "" : " (partial: " + (data.stopped || "stopped") + ")"));
+        break;
+      case "cancelled":
+        doneHost = data.promoted ? (data.host || null) : null;
+        crawlAddLine("cancelled" + (data.promoted ?
+          " — saved partial graph (" + (data.states || 0) + " states)" :
+          " (nothing saved)"));
+        break;
+      case "error":
+        if (data.status === "crawl_unavailable" && data.reason === "disabled") {
+          crawlAddLine("live crawl is disabled on this server.");
+        } else {
+          crawlAddLine("crawl failed: " + (data.reason || data.status || "unknown") +
+            (data.detail ? " — " + data.detail : ""));
+        }
+        break;
+      default:
+        break;
+    }
+  };
+  ws.onclose = () => {
+    if (crawlWs !== ws) return;
+    crawlWs = null;
+    crawlSetRunning(false);
+    loadHosts();
+    if (doneHost) autoSelectHost(doneHost);
+  };
+  ws.onerror = () => {
+    if (crawlWs === ws) crawlAddLine("crawl connection error.");
+  };
+}
+
+if (crawlFormEl) {
+  crawlFormEl.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const url = crawlUrlEl ? crawlUrlEl.value.trim() : "";
+    if (!url) { crawlAddLine("enter a URL first."); return; }
+    startCrawl(url, {
+      maxStates: crawlMaxStatesEl ? crawlMaxStatesEl.value.trim() : "",
+      maxDepth: crawlMaxDepthEl ? crawlMaxDepthEl.value.trim() : "",
+    });
+  });
+}
+if (crawlCancelEl) crawlCancelEl.addEventListener("click", cancelCrawl);
 
 // --- boot --------------------------------------------------------------------
 loadHosts();

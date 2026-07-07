@@ -30,6 +30,38 @@
           Credentials
         </button>
       </div>
+      <!-- New crawl: enter a URL and the server crawls it into a graph, streaming
+           live progress below. Off unless PINCHTAB_WEBGRAPH_ENABLE_CRAWL is set; a
+           `crawl_unavailable`/`disabled` frame is shown gracefully. -->
+      <form id="crawl-form" class="crawl-form" autocomplete="off">
+        <input id="crawl-url" type="url" placeholder="https://app.example.com/home"
+               aria-label="URL to crawl" />
+        <details class="advanced">
+          <summary>Advanced (crawl limits)</summary>
+          <div class="field-row">
+            <label>max states
+              <input id="crawl-max-states" type="number" min="10" max="500"
+                     placeholder="60" />
+            </label>
+            <label>max depth
+              <input id="crawl-max-depth" type="number" min="1" max="8"
+                     placeholder="4" />
+            </label>
+          </div>
+        </details>
+        <div class="crawl-actions">
+          <button type="submit" id="crawl-submit">New crawl</button>
+          <button type="button" id="crawl-cancel" class="crawl-cancel-btn" hidden>
+            Cancel
+          </button>
+        </div>
+        <p class="crawl-safety muted">
+          The crawler clicks through every page and opens every Create form to read it —
+          it never submits anything.
+        </p>
+        <div id="crawl-progress" class="crawl-progress muted" hidden></div>
+      </form>
+
       <ul id="hosts" class="hosts"><li class="muted pad">loading…</li></ul>
     </aside>
 

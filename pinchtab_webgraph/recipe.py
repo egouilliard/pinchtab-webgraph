@@ -166,7 +166,8 @@ FORM_JS = r"""
     let options=null, value=null;
     if(el.tagName.toLowerCase()==='select') options=[...el.options].map(o=>o.text.trim()).filter(Boolean).slice(0,25);
     if(type==='dropdown'||type==='toggle'||type==='radiogroup') value=(el.innerText||'').replace(/\s+/g,' ').trim().slice(0,40);
-    fields.push({label:lab, type, required:!!required, options, value, placeholder:(el.getAttribute('placeholder')||'').slice(0,60)});
+    const accept=(el.tagName.toLowerCase()==='input' && (el.getAttribute('type')||'').toLowerCase()==='file') ? (el.getAttribute('accept')||null) : null;
+    fields.push({label:lab, type, required:!!required, options, value, accept, placeholder:(el.getAttribute('placeholder')||'').slice(0,60)});
   });
   const h=(root.querySelector&&root.querySelector('h1,h2,h3,[role="heading"]'));
   let submit=[...(root.querySelectorAll?root.querySelectorAll('button,[type="submit"],[role="button"]'):[])]
@@ -712,8 +713,9 @@ def main():
         req = "  (required)" if f["required"] else ""
         opt = ("  options: " + ", ".join(f["options"])) if f.get("options") else ""
         val = ("  default: " + f["value"]) if f.get("value") else ""
+        acc = ("  accepts: " + f["accept"]) if f.get("accept") else ""
         ph = ("  e.g. " + f["placeholder"]) if f["placeholder"] and not opt and not val else ""
-        print("  • %-30s [%s]%s%s%s%s" % (f["label"] or "(unlabeled)", f["type"], req, ph, val, opt))
+        print("  • %-30s [%s]%s%s%s%s%s" % (f["label"] or "(unlabeled)", f["type"], acc, req, ph, val, opt))
     if form.get("submitButtons"):
         print("\nThen click to confirm: %s" % "  /  ".join("“%s”" % b for b in form["submitButtons"]))
     if a.screenshot:

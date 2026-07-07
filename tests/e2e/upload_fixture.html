@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Upload Fixture</title></head>
+<body>
+  <h1>Document workspace</h1>
+  <nav><a href="/other.html">Other page</a></nav>
+
+  <!-- (a) bare visible file input with an accept whitelist -->
+  <section>
+    <label for="doc">Attach document</label>
+    <input id="doc" type="file" accept=".pdf,.docx" />
+  </section>
+
+  <!-- (b) styled label wrapping a VISUALLY HIDDEN file input (common real pattern) -->
+  <section>
+    <label class="btn" style="display:inline-block;padding:8px 14px;border:1px solid #ccc;cursor:pointer">
+      Upload image
+      <input type="file" accept="image/*" style="display:none" />
+    </label>
+  </section>
+
+  <!-- (c) drag-and-drop dropzone with an inline ondrop handler -->
+  <section>
+    <div ondrop="return false" ondragover="return false"
+         style="width:220px;height:90px;border:2px dashed #888">
+      Drop files here
+    </div>
+  </section>
+
+  <!-- (d) VISIBLE file input inside a <form> — the duplicate-node regression case:
+       the input is captured precisely, and must NOT also emit a coarse <form> node -->
+  <section>
+    <form>
+      <label for="rep">Report file</label>
+      <input id="rep" type="file" accept=".csv" />
+    </form>
+  </section>
+
+  <!-- a plain button that is NOT an upload, to prove we don't over-tag -->
+  <section><button type="button">Just a button</button></section>
+</body>
+</html>

@@ -67,8 +67,14 @@ TRACKING = re.compile(r"^(utm_|gclid$|fbclid$|mc_|ref$|ref_src$|_ga$)", re.I)
 
 
 # --- JavaScript injected to read a page's interactive surface ----------------
-# Returns {url, title, links:[{href,text}], actions:[{selector,text,tag}]}.
+# Returns {url, title, links:[{href,text}],
+#          actions:[{selector,text,tag,nav,bulk,upload,accept}]}.
 # `selector` is a stable CSS path so we can re-find the element after a reload.
+# `upload` (bool) flags a file-upload affordance — a bare `input[type="file"]`, a
+# file input hidden behind a styled <label>/button, or an inline-`ondrop` dropzone;
+# `accept` carries that control's accepted file types (e.g. ".pdf,.docx", "image/*")
+# or null. Upload affordances become a read-only "upload" graph node and are NEVER
+# clicked (clicking a file input opens a native OS dialog the crawler can't dismiss).
 EXTRACT_JS = r"""
 (() => {
   function cssEsc(s){ return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/[^a-zA-Z0-9_-]/g,'\\$&'); }
@@ -104,7 +110,8 @@ EXTRACT_JS = r"""
   });
   const seenA = new Set();
   const sels = 'button,[role="button"],[role="tab"],[role="menuitem"],summary,' +
-               'input[type="submit"],input[type="button"],[onclick]';
+               'input[type="submit"],input[type="button"],input[type="file"],' +
+               '[onclick],[ondrop]';
   const navContainer = '[role="tablist"],[role="menu"],[role="menubar"],' +
                        '[role="navigation"],nav,aside,header';
   const bulkContainer = 'table,[role="grid"],[role="table"],[role="row"],' +
@@ -124,8 +131,51 @@ EXTRACT_JS = r"""
                   b.getAttribute('aria-expanded') !== null ||
                   !!b.closest(navContainer);
     const bulk = !!b.closest(bulkContainer);
-    out.actions.push({ selector: s, text: txt(b), tag: b.tagName.toLowerCase(),
-                       nav: isNav, bulk: bulk });
+    const _tag = b.tagName.toLowerCase();
+    const _isFile = _tag === 'input' && (b.getAttribute('type')||'').toLowerCase() === 'file';
+    const _nested = b.querySelector ? b.querySelector('input[type="file"]') : null;
+    const _upload = _isFile || b.hasAttribute('ondrop') || !!_nested;
+    const _accept = _isFile ? (b.getAttribute('accept') || null)
+                  : (_nested ? (_nested.getAttribute('accept') || null) : null);
+    out.actions.push({ selector: s, text: txt(b) || (_upload ? 'Upload file' : ''),
+                       tag: _tag, nav: isNav, bulk: bulk,
+                       upload: _upload, accept: _accept });
+  });
+  // file inputs are commonly hidden behind a styled <label>/button/dropzone the
+  // scan above can't see — walk each up to its nearest clickable affordance so the
+  // upload is still recorded, with its accepted file types. Never clicked (crawler
+  // skips upload affordances), so this stays read-only.
+  // NOTE (limitation): a dropzone whose drop handler is bound via addEventListener
+  // (not an inline `ondrop` attribute) and that contains no file input can't be
+  // detected from the DOM — the nested-file-input heuristic covers the common case.
+  document.querySelectorAll('input[type="file"]').forEach(inp => {
+    const acc = inp.getAttribute('accept') || null;
+    // If the input itself was already captured (it was visible in the scan above),
+    // upgrade THAT entry in place — don't also emit a coarser ancestor action for it.
+    const sInp = sel(inp);
+    if (sInp && seenA.has(sInp)) {
+      const ex0 = out.actions.find(a => a.selector === sInp);
+      if (ex0) { ex0.upload = true; if (!ex0.accept) ex0.accept = acc; }
+      return;
+    }
+    // Otherwise the input is hidden — walk to its nearest clickable affordance (a
+    // styled <label>/button/dropzone). `form` is excluded: a bare <form> is never a
+    // meaningful upload click target.
+    let aff = inp.closest('label,button,[role="button"],[ondrop]') || inp;
+    const rr = aff.getBoundingClientRect();
+    const target = (rr.width > 0 || rr.height > 0) ? aff : inp;
+    const s2 = sel(target);
+    if (!s2) return;
+    if (seenA.has(s2)) {
+      const ex = out.actions.find(a => a.selector === s2);
+      if (ex) { ex.upload = true; if (!ex.accept) ex.accept = acc; }
+      return;
+    }
+    seenA.add(s2);
+    out.actions.push({ selector: s2, text: txt(target) || 'Upload file',
+                       tag: target.tagName.toLowerCase(), nav: false,
+                       bulk: !!(target.closest && target.closest(bulkContainer)),
+                       upload: true, accept: acc });
   });
   return out;
 })()
@@ -413,6 +463,15 @@ class Crawler:
                 return
             label = act["text"] or "(%s)" % act["tag"]
             txt = act["text"] or ""
+            if act.get("upload"):
+                accept = act.get("accept")
+                up_id = node_id + "##upload:" + hashlib.sha1(
+                    (act["selector"] + label).encode()).hexdigest()[:6]
+                title = "⬆ " + label + ((" [" + accept + "]") if accept else "")
+                self.add_node(up_id, url="", title=title, type="upload",
+                              reason="upload", accept=accept or "")
+                self.add_edge(node_id, up_id, label, "action", skipped=True)
+                continue
             is_destructive = DESTRUCTIVE.search(txt) and not self.a.allow_destructive
             is_write = self.a.skip_writes and WRITE_ACTIONS.search(txt)
             if is_destructive or is_write:
@@ -477,6 +536,7 @@ class Crawler:
             "pages": sum(1 for n in self.nodes.values() if n["type"] == "page"),
             "states": sum(1 for n in self.nodes.values() if n["type"] == "state"),
             "skipped": sum(1 for n in self.nodes.values() if n["type"] == "skipped"),
+            "uploads": sum(1 for n in self.nodes.values() if n["type"] == "upload"),
             "edges": len(self.edges),
             "interaction_depth": self.a.interaction_depth,
             "allow_destructive": self.a.allow_destructive,
@@ -597,6 +657,7 @@ function shortLabel(n){if(n.url){const s=pathSegs(n.url);return s.length?('/'+s.
 const sections=[...new Set(GRAPH.nodes.filter(n=>n.url).map(n=>sectionOf(n.url)))].sort();
 const sectionColor={};sections.forEach((s,i)=>sectionColor[s]=PALETTE[i%PALETTE.length]);
 function nodeColor(n){if(n.type==='state')return '#9333ea';if(n.type==='skipped')return '#f59e0b';
+  if(n.type==='upload')return '#0891b2';
   return sectionColor[sectionOf(n.url||'')]||'#64748b';}
 const deg={};GRAPH.nodes.forEach(n=>deg[n.id]=0);
 GRAPH.edges.forEach(e=>{deg[e.source]=(deg[e.source]||0)+1;deg[e.target]=(deg[e.target]||0)+1;});
@@ -606,10 +667,10 @@ const inDeg={};GRAPH.nodes.forEach(n=>inDeg[n.id]=0);
 GRAPH.edges.forEach(e=>inDeg[e.target]=(inDeg[e.target]||0)+1);
 const HUB=Math.max(8,(GRAPH.meta.pages||GRAPH.nodes.length)*0.4);
 const els=[];const parents={};
-GRAPH.nodes.forEach(n=>{const cl=n.url?clusterOf(n.url):(n.type==='state'?'states':'skipped');
+GRAPH.nodes.forEach(n=>{const cl=n.url?clusterOf(n.url):(n.type==='state'?'states':(n.type==='upload'?'uploads':'skipped'));
   if(!parents['grp:'+cl])parents['grp:'+cl]={id:'grp:'+cl,label:cl,section:n.url?sectionOf(n.url):cl};});
 Object.values(parents).forEach(p=>els.push({data:{id:p.id,label:p.label,isGroup:1,gcolor:sectionColor[p.section]||'#94a3b8'}}));
-GRAPH.nodes.forEach(n=>{const cl=n.url?clusterOf(n.url):(n.type==='state'?'states':'skipped');
+GRAPH.nodes.forEach(n=>{const cl=n.url?clusterOf(n.url):(n.type==='state'?'states':(n.type==='upload'?'uploads':'skipped'));
   els.push({data:{id:n.id,parent:'grp:'+cl,label:(n.title||n.url||n.id),short:shortLabel(n),
     url:n.url,type:n.type,color:nodeColor(n),deg:deg[n.id]||0,size:16+Math.min(34,Math.sqrt(deg[n.id]||1)*5)}});});
 GRAPH.edges.forEach((e,i)=>els.push({data:{id:'e'+i,source:e.source,target:e.target,label:e.label,kind:e.kind,skipped:!!e.skipped,glob:((inDeg[e.target]||0)>=HUB)?1:0}}));
@@ -620,6 +681,7 @@ const cy=cytoscape({container:document.getElementById('cy'),elements:els,wheelSe
     {selector:'node.show-label',style:{'min-zoomed-font-size':0,'font-size':11,'color':'#0f172a','z-index':40,'text-background-color':'#fff','text-background-opacity':0.85,'text-background-padding':2}},
     {selector:'node[type="state"]',style:{'shape':'round-diamond'}},
     {selector:'node[type="skipped"]',style:{'shape':'triangle'}},
+    {selector:'node[type="upload"]',style:{'shape':'tag'}},
     {selector:'edge',style:{'width':1,'line-color':'#94a3b8','line-opacity':0.12,'curve-style':'bezier','target-arrow-shape':'triangle','target-arrow-color':'#cbd5e1','arrow-scale':0.6}},
     {selector:'edge[kind="action"]',style:{'line-style':'dashed'}},
     {selector:'.dim',style:{'opacity':0.06}},
@@ -651,12 +713,13 @@ relayout('fcose');
 const m=GRAPH.meta;
 document.getElementById('host').textContent=m.host+'  ·  '+(m.start||'').replace(/^https?:\/\//,'');
 function st(k,v){return '<div class="stat"><span>'+k+'</span><b>'+v+'</b></div>';}
-document.getElementById('stats').innerHTML=st('Pages',m.pages)+st('States',m.states)+st('Skipped',m.skipped)+st('Edges',m.edges)+st('Depth',m.interaction_depth)+st('Elapsed',m.elapsed_sec+'s');
+document.getElementById('stats').innerHTML=st('Pages',m.pages)+st('States',m.states)+st('Skipped',m.skipped)+(m.uploads?st('Uploads',m.uploads):'')+st('Edges',m.edges)+st('Depth',m.interaction_depth)+st('Elapsed',m.elapsed_sec+'s');
 document.getElementById('foot').textContent=GRAPH.nodes.length+' nodes · '+GRAPH.edges.length+' edges · drag to pan · scroll to zoom';
 const legendEl=document.getElementById('legend');const hiddenKeys=new Set();
 const legendItems=sections.map(s=>({key:s,color:sectionColor[s],label:s}));
 legendItems.push({key:'__state',color:'#9333ea',label:'SPA / modal state'});
 legendItems.push({key:'__skip',color:'#f59e0b',label:'skipped (write / destructive)'});
+legendItems.push({key:'__upload',color:'#0891b2',label:'file upload'});
 legendItems.forEach(it=>{const d=document.createElement('div');d.className='lg';
   d.innerHTML='<span class="sw" style="background:'+it.color+'"></span>'+it.label;
   d.onclick=()=>{if(hiddenKeys.has(it.key))hiddenKeys.delete(it.key);else hiddenKeys.add(it.key);
@@ -664,6 +727,7 @@ legendItems.forEach(it=>{const d=document.createElement('div');d.className='lg';
 function nodeMatchesLegend(n){const t=n.data('type');
   if(t==='state')return !hiddenKeys.has('__state');
   if(t==='skipped')return !hiddenKeys.has('__skip');
+  if(t==='upload')return !hiddenKeys.has('__upload');
   return !hiddenKeys.has(sectionOf(n.data('url')||''));}
 function applyFilter(){const q=document.getElementById('q').value.toLowerCase().trim();
   cy.batch(()=>{cy.nodes('[!isGroup]').forEach(n=>{const d=n.data();

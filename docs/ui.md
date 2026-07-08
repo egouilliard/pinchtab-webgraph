@@ -2,11 +2,23 @@
 
 > **Docs:** [← README](../README.md) · [📚 Index](README.md) · [MCP server](mcp-server.md) · [UTCP interface](utcp.md) · [Authenticated login](authenticated-login.md)
 
-`pinchtab-webgraph` ships an **optional** local web UI: a small FastAPI app that serves
-a read-only REST API over the offline graph caches, a credentials vault, an interactive
-**graph view** of the crawled interaction graph, a live chat agent (Claude wired to the
-project's own MCP tools), and a live headless-browser pane — behind a single console
-script, `pinchtab-webgraph-ui`.
+`pinchtab-webgraph` ships an **optional** local web UI: a small FastAPI app behind a
+single console script, `pinchtab-webgraph-ui`. From one loopback-only browser app you can:
+
+- **browse** any host's crawled **interaction graph** interactively (the [Graph view](#graph-view));
+- **chat** — "how do I do X on this site?" — against the offline graph, across
+  **multiple persistent named [chats](#chat-sessions)** per host, driving Claude through
+  the project's own MCP tools;
+- watch a **live headless-browser** pane and follow a [**"Show me how"** guided tour](#show-me-how-guided-tour)
+  that highlights and clicks each step for you, stopping at the target form;
+- **[crawl a brand-new URL](#new-crawl-get-wscrawl-opt-in)** and store it, right from the sidebar (opt-in);
+- **[explore / search](#explore-view)** everything the crawl captured — full-text search,
+  the create-form inventory + a goal path-finder, and the per-view content inventory —
+  plus a Ctrl/Cmd-K [command palette](#command-palette) launcher over the whole UI;
+- store per-host login credentials in a keyring-backed [vault](#vault-credentials).
+
+Underneath it's a small FastAPI app that serves a read-only REST API over the offline
+graph caches, the credentials vault, and the chat / screencast / crawl WebSockets.
 
 Like the [MCP server](mcp-server.md) and the [UTCP manual](utcp.md), the UI is a thin
 binding onto the same `api.py` query surface the CLI uses, so its answers are identical.
@@ -49,12 +61,13 @@ vault reports `vault_unavailable`.
 
 ## Graph view
 
-The host header carries a **Workspace | Graph** view switcher. **Workspace** is the two-pane
-chat + live-browser view above; **Graph** replaces it with an interactive rendering of the
-selected host's **interaction graph** — the same offline cache the REST API and chat serve.
-Switching views only toggles which pane is `hidden`; it **never** opens or closes the
-chat / live-browser WebSockets, so flipping to Graph and back leaves both live sessions
-running untouched.
+The host header carries a **Workspace | Graph | Explore** view switcher. **Workspace** is
+the two-pane chat + live-browser view above; **Graph** replaces it with an interactive
+rendering of the selected host's **interaction graph** (below); **[Explore](#explore-view)**
+replaces it with a read-only browser over the crawled cache (search / forms / content) — all
+three read the same offline cache the REST API and chat serve. Switching views only toggles
+which pane is `hidden`; it **never** opens or closes the chat / live-browser WebSockets, so
+flipping to Graph or Explore and back leaves both live sessions running untouched.
 
 ```
 ┌───────────────┬───────────────────────────────────────────────┐
@@ -114,13 +127,104 @@ straight from `pinchtab_webgraph/vendor/`:
 | Mount | Serves | Notes |
 | --- | --- | --- |
 | `/vendor/*` | `pinchtab_webgraph/vendor/*.min.js` (the 6 Cytoscape libs) | registered **before** the catch-all `/` mount so it isn't shadowed; path-traversal out of the vendor dir is rejected (403/404) |
-| `/` | `pinchtab_webgraph/ui/static/` (`html=True`) | the SPA shell + `app.js` / `graph.js` / `style.css` / `graph.css`, registered **last** so it never shadows `/api/*` or `/vendor/*` |
+| `/` | `pinchtab_webgraph/ui/static/` (`html=True`) | the SPA shell + `app.js` / `graph.js` / `explore.js` / `style.css` / `graph.css` / `explore.css`, registered **last** so it never shadows `/api/*` or `/vendor/*`. `explore.js` / `explore.css` load **eagerly** (no vendor deps); `graph.js` + the Cytoscape libs load lazily |
 
 The libs **and** `graph.js` are **lazy-loaded on the first Graph-tab open** — injected
 sequentially by `app.js` (core → layout deps → fcose extension → controller; the order is
 load-bearing) and memoized, so a session that never opens the Graph view never pays the
 Cytoscape download and the SPA shell stays light. A load failure is reported in the graph
 status line and clears the memo so a later switch retries.
+
+## Explore view
+
+The third view tab, **Explore**, is a read-only browser over everything the crawl already
+captured. It surfaces data the offline `api.py` surface has always computed but that no UI
+exposed before — full-text content search, the create-form inventory, a goal path-finder,
+and the per-view content inventory — behind **three sub-tabs** (`Search | Forms | Content`).
+No new endpoints: it is a fresh UI over four pre-existing REST routes.
+
+```
+┌───────────────┬───────────────────────────────────────────────┐
+│  Crawled      │  app.example.com   [Workspace][Graph][Explore]
+│  graphs       ├───────────────────────────────────────────────┤
+│  ───────────  │  [ Search ][ Forms ][ Content ]   12 matches…  │
+│  app.example  │  ┌─────────────────────────────────────────┐  │
+│  docs.example │  │ Search captured page data…      [Search] │  │
+│  …            │  │  ● Roles  [reachable][2 clicks]          │  │
+│               │  │    admin/roles                           │  │
+│  [Credentials]│  │    1. Click “Settings”  2. Click “Roles” │  │
+└───────────────┴───────────────────────────────────────────────┘
+```
+
+**Search sub-tab** → `GET /api/hosts/{host}/content/search?text=<q>&limit=40`. A text box
+searches every crawled view's captured collections. Each matching view is a card showing a
+**reachable / unreachable** badge, a **click-count** badge, the **click-path** to reach it
+(one step per line), and the **matched items** (`kind` + text); a server-truncated view adds
+a *"+ more"* marker. The status line reports `N matches · M views · showing K`. The `limit`
+is fixed at 40, and an empty query is a guarded no-op (never the 422 an empty `text=` would
+return). Results stay empty until you submit.
+
+**Forms sub-tab** → the create-form inventory + a goal path-finder:
+
+- **Create-form inventory** — `GET /api/hosts/{host}/forms`: one card per discovered
+  create-form, showing its **label**, a **click-depth** badge, and a **field-count** badge.
+  Each card carries a **"Show me how"** button. Clicking it runs
+  `GET /api/hosts/{host}/howto?match=<label>` and, on an `ok` result, **switches to the
+  Workspace view** and hands the first result's `tour` steps to the existing
+  [`startTour` overlay](#show-me-how-guided-tour) — the same guided tour the chat offers,
+  driven straight from a form row. A form with no reachable path shows an inline
+  *"No reachable path found for this form."* note instead.
+- **Goal path-finder** — a free-text *"How do I… (e.g. create a role)"* box →
+  `GET /api/hosts/{host}/howto?goal=<goal>`. On a confident hit it lists the matching
+  click-path(s) (each with its own **"Show me how"**); on a miss it additionally surfaces
+  the server's **`candidates`** and the dimmed **`low_confidence`** matches — routing data
+  the resolver always computed but that was previously invisible in any UI.
+
+**Content sub-tab** → `GET /api/hosts/{host}/content`: the per-view inventory of captured
+collections — one card per crawled view (label + URL), each listing its collections as
+`kind × count` with a sample string.
+
+**Show-me-how reuses the tour, verbatim.** `explore.js` never owns the live/tour sockets;
+it just calls the `app.js` globals `setView("workspace")` and `startTour(...)`, so a form's
+"Show me how" and a chat answer's "Show me how" drive the **same** live-pane overlay
+([Show Me How guided tour](#show-me-how-guided-tour)) — it highlights each step, and **Next**
+performs the real click, stopping at the target form without ever submitting it.
+
+**Safety (same discipline as [graph.js](#graph-view)).** Every crawled string is rendered
+with `createElement` + `textContent`, never `innerHTML`. **Crawled URLs are shown as a plain
+`<span>`, never a live `<a href>`** — clicking one must never navigate the SPA away. Every
+query param is `encodeURIComponent`-encoded, and a form **label is regex-escaped before it
+becomes a `?match=`** pattern (so a label with regex metacharacters stays a literal match).
+
+**Loaded eagerly.** Unlike the Graph view's lazy Cytoscape stack, `explore.js` has **no
+vendor dependencies**, so `/explore.js` (script, after `app.js` which it depends on) and
+`/explore.css` (stylesheet) are served **eagerly** from the `/` static mount — the Explore
+tab is instant. Switching hosts calls `destroyExploreView()` first, so a stale host's search
+results / forms / content never bleed into the next; Forms and Content are fetched once per
+host and cached across sub-tab flips (Search refetches per submit).
+
+### Command palette
+
+A **Ctrl/Cmd-K** command palette (also reachable from the header button) is a keyboard
+launcher over the UI's **existing** state and functions — it opens **no new fetches**, just
+re-dispatches onto globals the SPA already exposes. It offers:
+
+- **Jump view** — *Go to Workspace / Graph / Explore* (a view that's unavailable for the
+  current host renders greyed with a *"unavailable for this host"* hint rather than hiding).
+- **Switch host** — a dynamic *"Switch to `<host>`"* row per sidebar host (it replays that
+  row's click).
+- **New chat** (host-gated — shows *"pick a host first"* when none is selected).
+- **New crawl** (focuses the sidebar [New-crawl](#new-crawl-get-wscrawl-opt-in) form; never
+  host-gated, since crawling is how you get your first host).
+- **Manage credentials** (opens the [vault](#vault-credentials) modal).
+- **Free-text content search** — typing anything adds a *"Search content for `…`"* row that
+  hands off into Explore's Search panel: it switches to the Explore view, selects the Search
+  sub-tab, fills the box, and submits — one keystroke path from "anywhere" to a content search.
+
+Typing **substring-filters** the action list; **↑/↓** move the highlight and **Enter** runs
+the selected row (a disabled row is a no-op and explains why via its hint). Every row is
+built with `createElement` + `textContent` (host names are untrusted crawled data), and the
+Ctrl/Cmd-K shortcut fires even while a chat or crawl input is focused.
 
 ## Chat backends
 
@@ -345,10 +449,14 @@ filesystem-path parameter over HTTP.
 | `GET /api/hosts` | `cache_store.list_hosts` + `api.graph_summary` | index of every cached host + a cheap per-host summary (+ `caches_dir`) |
 | `GET /api/hosts/{host}/summary` | `api.graph_summary` | graph kind + meta + element counts |
 | `GET /api/hosts/{host}/graph` | `cache_store.load` | the full raw interaction graph (the large payload, on demand) — also what the in-UI [Graph view](#graph-view) renders |
-| `GET /api/hosts/{host}/forms` | `api.list_forms` | every create-form: label, host, depth, field count |
-| `GET /api/hosts/{host}/howto?goal=&start=&match=&all=` | `api.howto` | shortest click-path(s) to a create-trigger + its form; each result also carries an additive `tour` field (the [Show Me How](#show-me-how-guided-tour) highlight steps) |
-| `GET /api/hosts/{host}/content` | `api.list_content` | per-view inventory of captured collections |
-| `GET /api/hosts/{host}/content/search?text=&start=&limit=` | `api.find_content` | search captured collections for text; `text` required, `limit` default 40 |
+| `GET /api/hosts/{host}/forms` | `api.list_forms` | every create-form: label, host, depth, field count. Also drives the [Explore](#explore-view) Forms sub-tab |
+| `GET /api/hosts/{host}/howto?goal=&start=&match=&all=` | `api.howto` | shortest click-path(s) to a create-trigger + its form; each result also carries an additive `tour` field (the [Show Me How](#show-me-how-guided-tour) highlight steps). Backs the chat agent, the [Explore](#explore-view) path-finder, and each form's "Show me how" |
+| `GET /api/hosts/{host}/content` | `api.list_content` | per-view inventory of captured collections. Backs the [Explore](#explore-view) Content sub-tab |
+| `GET /api/hosts/{host}/content/search?text=&start=&limit=` | `api.find_content` | search captured collections for text; `text` required, `limit` default 40. Backs the [Explore](#explore-view) Search sub-tab |
+
+The [Explore view](#explore-view) (Phase 5) is the **first UI consumer** of these four
+routes — `/content` and `/content/search` had no front end at all before it, and `/forms` /
+`/howto` were previously reachable only through the chat agent.
 
 ### Vault (credentials)
 

@@ -44,6 +44,13 @@ def validate_host(host):
     # (e.g. `cache clear "../../etc/passwd"`) before any filesystem access.
     if not isinstance(host, str) or not _HOST_RE.match(host):
         raise ValueError("invalid cache host: %r" % host)
+    # The regex accepts pure-dot tokens ("." / ".." / "..."), which are safe for
+    # cache_path() (it appends ".json", so ".." becomes the filename "..json") but
+    # NOT for callers that use the bare host as a directory segment (chat_store's
+    # host_sessions_dir): there "." / ".." would resolve to the parent dir, escaping
+    # the per-host quarantine. Reject any all-dots token at the shared choke point.
+    if host.strip(".") == "":
+        raise ValueError("invalid cache host: %r" % host)
 
 
 def cache_path(host):

@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import api, cache_store, __version__
-from . import chat_backend, live_crawl, screencast, vault
+from . import chat_backend, chat_store, live_crawl, screencast, vault
 
 app = FastAPI(title="pinchtab-webgraph UI", version=__version__)
 
@@ -49,6 +49,9 @@ _STATUS_CODE = {
     "invalid_graph": 422,
     "no_credential_for_host": 404,
     "vault_unavailable": 503,
+    "session_not_found": 404,
+    "invalid_session": 400,
+    "too_many_sessions": 429,
     # NOTE: "invalid_args" is deliberately NOT here. It is an OVERLOADED status — a
     # 200 structured MISS for the read surface (howto with no goal/match), but a 400
     # for a vault PUT with a bad body. The vault PUT route maps it to 400 locally so
@@ -92,10 +95,11 @@ def _call(fn, path, **kwargs):
         return {"status": "invalid_graph", "path": path, "error": str(e)}
 
 
-def _resolve_vault_host(host):
+def _resolve_host_token(host):
     """Validate the host TOKEN only — unlike _resolve_host there is deliberately no
-    filesystem-existence precondition, since "no credential yet" is the normal state
-    for the vault write path. Returns None on success, else an invalid_host error dict.
+    filesystem-existence precondition, since "no credential yet" / "no session yet" is the
+    normal state for the vault + session write paths. Returns None on success, else an
+    invalid_host error dict. Shared by the vault routes and the session routes.
     """
     try:
         cache_store.validate_host(host)
@@ -223,7 +227,7 @@ def vault_credentials():
 
 @app.get("/api/vault/credentials/{host}")
 def vault_get_credential(host: str):
-    err = _resolve_vault_host(host)
+    err = _resolve_host_token(host)
     if err is not None:
         return _respond(err)
     r = vault.get_routing(host)
@@ -234,7 +238,7 @@ def vault_get_credential(host: str):
 
 @app.put("/api/vault/credentials/{host}")
 def vault_put_credential(host: str, payload: dict = Body(...)):
-    err = _resolve_vault_host(host)
+    err = _resolve_host_token(host)
     if err is not None:
         return _respond(err)
     try:
@@ -251,10 +255,88 @@ def vault_put_credential(host: str, payload: dict = Body(...)):
 
 @app.delete("/api/vault/credentials/{host}")
 def vault_delete_credential(host: str, delete_secret: bool = True):
-    err = _resolve_vault_host(host)
+    err = _resolve_host_token(host)
     if err is not None:
         return _respond(err)
     return _respond(vault.delete_credential(host, delete_secret=delete_secret))
+
+
+# --- chat session routes (Phase 4: persistent, named chats per host) ---------
+#
+# Multiple named chat sessions per host, persisted by chat_store. MIRRORS the vault
+# routes' _resolve_host_token / _respond / structured-status style. The heavy transcript
+# + wire history stay OUT of the list/summary responses (chips only need the summary);
+# only the single-session GET returns the full record, minus the resume-only internals
+# (wire_messages + sdk_session_id). Bad-id tokens are rejected as invalid_session (400)
+# before any filesystem access, the twin of invalid_host on the host segment.
+
+def _guard_session(host, session_id):
+    """Shared host+id guard for the per-session routes: returns None on success, else a
+    structured error dict (invalid_host / invalid_session). Blocks path traversal on the
+    id segment before any chat_store call touches the filesystem."""
+    err = _resolve_host_token(host)
+    if err is not None:
+        return err
+    try:
+        chat_store.validate_session_id(session_id)
+    except ValueError:
+        return {"status": "invalid_session", "session": session_id}
+    return None
+
+
+@app.get("/api/hosts/{host}/sessions")
+def host_sessions(host: str):
+    err = _resolve_host_token(host)
+    if err is not None:
+        return _respond(err)
+    return {"sessions": chat_store.list_sessions(host)}
+
+
+@app.post("/api/hosts/{host}/sessions")
+def create_host_session(host: str, payload: dict | None = Body(default=None)):
+    err = _resolve_host_token(host)
+    if err is not None:
+        return _respond(err)
+    try:
+        record = chat_store.create(host, backend=chat_backend.resolve_backend_name(),
+                                   title=(payload or {}).get("title"))
+    except chat_store.TooManySessions:
+        return _respond({"status": "too_many_sessions",
+                         "max": chat_store.MAX_SESSIONS_PER_HOST})
+    return _respond(chat_store.summary(record))
+
+
+@app.get("/api/hosts/{host}/sessions/{session_id}")
+def get_host_session(host: str, session_id: str):
+    err = _guard_session(host, session_id)
+    if err is not None:
+        return _respond(err)
+    rec = chat_store.load(host, session_id)
+    if rec is None:
+        return _respond({"status": "session_not_found", "session": session_id})
+    # the full record MINUS the resume-only internals + the ephemeral in-memory baseline.
+    return _respond({k: v for k, v in rec.items()
+                     if k not in ("wire_messages", "sdk_session_id", "_disk_len")})
+
+
+@app.patch("/api/hosts/{host}/sessions/{session_id}")
+def rename_host_session(host: str, session_id: str, payload: dict | None = Body(default=None)):
+    err = _guard_session(host, session_id)
+    if err is not None:
+        return _respond(err)
+    rec = chat_store.rename(host, session_id, (payload or {}).get("title"))
+    if rec is None:
+        return _respond({"status": "session_not_found", "session": session_id})
+    return _respond(chat_store.summary(rec))
+
+
+@app.delete("/api/hosts/{host}/sessions/{session_id}")
+def delete_host_session(host: str, session_id: str):
+    err = _guard_session(host, session_id)
+    if err is not None:
+        return _respond(err)
+    # idempotent — deleting an absent session is a green {"deleted": false}, never a 404.
+    return {"status": "ok", "deleted": chat_store.delete(host, session_id)}
 
 
 # --- chat WebSocket (Phase 3/6: Claude wired to the offline MCP tools) --------
@@ -269,7 +351,8 @@ def vault_delete_credential(host: str, delete_secret: bool = True):
 # ChatUnavailable frame rather than a crash.
 
 @app.websocket("/ws/chat")
-async def chat_ws(websocket: WebSocket, host: str = Query(...)):
+async def chat_ws(websocket: WebSocket, host: str = Query(...),
+                  session: str | None = Query(None)):
     await websocket.accept()
     try:
         cache_store.validate_host(host)
@@ -278,8 +361,32 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...)):
                                    "host": host})
         await websocket.close(code=1008)
         return
+    # Resolve the requested session (if any) BEFORE opening the backend. A bad id token is
+    # invalid_session; an id that doesn't resolve (or belongs to another host) is
+    # session_not_found — both close the socket rather than silently minting a new chat.
+    if session is not None:
+        try:
+            chat_store.validate_session_id(session)
+        except ValueError:
+            await websocket.send_json({"type": "error", "status": "invalid_session"})
+            await websocket.close(code=1008)
+            return
+        record = chat_store.load(host, session)
+        if record is None or record.get("host") != host:
+            await websocket.send_json({"type": "error", "status": "session_not_found",
+                                       "session": session})
+            await websocket.close(code=1008)
+            return
+    else:
+        record = None
     try:
-        async with chat_backend.open_chat_session(host) as session:
+        async with chat_backend.open_chat_session(host, record=record) as session_obj:
+            # Bootstrap FIRST: the SPA replays this frame's transcript to restore the log
+            # (a brand-new chat carries an empty transcript). Carries the summary so the
+            # client learns the session id it is now bound to.
+            await websocket.send_json({
+                "type": "session", **chat_store.summary(session_obj.record),
+                "transcript": session_obj.record.get("transcript", [])})
             while True:
                 try:
                     msg = await websocket.receive_json()
@@ -287,9 +394,9 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...)):
                     return
                 if msg.get("type") != "user_message":
                     continue
-                await session.handle(msg.get("text", ""),
-                                     live_url=msg.get("live_url"),
-                                     emit=websocket.send_json)
+                await session_obj.handle(msg.get("text", ""),
+                                         live_url=msg.get("live_url"),
+                                         emit=websocket.send_json)
     except chat_backend.ChatUnavailable as e:
         await websocket.send_json({"type": "error", "status": "chat_unavailable",
                                    "reason": e.reason, "detail": e.detail})

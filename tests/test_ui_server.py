@@ -317,6 +317,125 @@ def test_ws_screencast_locate_null_rect_when_not_found(monkeypatch):
         assert located == {"type": "located", "stepId": "s2", "rect": None}
 
 
+# --- chat sessions: REST CRUD + WS bootstrap / restore -----------------------
+#
+# The session store is exercised against an isolated home (PINCHTAB_WEBGRAPH_HOME -> a
+# tmp dir) so no test touches a real ~/.pinchtab-webgraph. The WS restore test
+# monkeypatches open_chat_session so it needs no ANTHROPIC key / MCP subprocess — the
+# route's own load + bootstrap-frame logic is what's under test.
+
+from types import SimpleNamespace  # noqa: E402
+
+from pinchtab_webgraph.ui import chat_store  # noqa: E402
+
+SESS_HOST = "sess.example.com"
+
+
+def test_sessions_crud_round_trip(isolated_cache_home):
+    # empty to start
+    r = client.get("/api/hosts/%s/sessions" % SESS_HOST)
+    assert r.status_code == 200
+    assert r.json()["sessions"] == []
+
+    # create
+    r = client.post("/api/hosts/%s/sessions" % SESS_HOST, json={"title": "my chat"})
+    assert r.status_code == 200
+    created = r.json()
+    sid = created["id"]
+    assert created["title"] == "my chat"
+    assert created["host"] == SESS_HOST
+    assert "transcript" not in created  # summary only
+
+    # list shows it
+    r = client.get("/api/hosts/%s/sessions" % SESS_HOST)
+    assert sid in {s["id"] for s in r.json()["sessions"]}
+
+    # get the full record — WITHOUT the resume-only internals
+    r = client.get("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == sid
+    assert "transcript" in body
+    assert "wire_messages" not in body and "sdk_session_id" not in body
+
+    # rename -> summary reflects it
+    r = client.patch("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid),
+                     json={"title": "renamed"})
+    assert r.status_code == 200
+    assert r.json()["title"] == "renamed"
+
+    # delete -> deleted True, then gone (404), then idempotent False
+    r = client.delete("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid))
+    assert r.status_code == 200 and r.json()["deleted"] is True
+    r = client.get("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid))
+    assert r.status_code == 404 and r.json()["status"] == "session_not_found"
+    r = client.delete("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid))
+    assert r.status_code == 200 and r.json()["deleted"] is False
+
+
+def test_sessions_too_many_returns_429(isolated_cache_home):
+    for _ in range(chat_store.MAX_SESSIONS_PER_HOST):
+        assert client.post("/api/hosts/%s/sessions" % SESS_HOST).status_code == 200
+    r = client.post("/api/hosts/%s/sessions" % SESS_HOST)
+    assert r.status_code == 429
+    body = r.json()
+    assert body["status"] == "too_many_sessions"
+    assert body["max"] == chat_store.MAX_SESSIONS_PER_HOST
+
+
+def test_session_not_found_on_get_and_patch(isolated_cache_home):
+    sid = "a" * 32  # a valid-shaped but non-existent id
+    r = client.get("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid))
+    assert r.status_code == 404 and r.json()["status"] == "session_not_found"
+    r = client.patch("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid), json={"title": "x"})
+    assert r.status_code == 404 and r.json()["status"] == "session_not_found"
+
+
+def test_invalid_session_id_on_get(isolated_cache_home):
+    r = client.get("/api/hosts/%s/sessions/%s" % (SESS_HOST, "NOT-HEX"))
+    assert r.status_code == 400 and r.json()["status"] == "invalid_session"
+
+
+def test_invalid_session_id_on_ws(isolated_cache_home):
+    with client.websocket_connect(
+            "/ws/chat?host=%s&session=%s" % (SESS_HOST, "NOT-HEX")) as ws:
+        frame = ws.receive_json()
+        assert frame["type"] == "error"
+        assert frame["status"] == "invalid_session"
+
+
+def test_ws_chat_restores_transcript_on_bootstrap(isolated_cache_home, monkeypatch):
+    # Pre-seed a session with a transcript, then connect with ?session=ID and assert the
+    # leading bootstrap `session` frame carries that transcript back verbatim.
+    rec = chat_store.create(SESS_HOST, backend="api", title="restored chat")
+    rec["transcript"] = [
+        {"role": "user", "type": "user", "text": "how do I add a role?", "ts": "t"},
+        {"role": "assistant", "type": "text", "text": "Go to Team.", "ts": "t"}]
+    chat_store.save(rec)
+    sid = rec["id"]
+
+    @asynccontextmanager
+    async def fake_open(host, *, backend_name=None, record=None):
+        # the route loads the record from disk and passes it in; echo it back.
+        yield SimpleNamespace(record=record)
+
+    monkeypatch.setattr(ui_server.chat_backend, "open_chat_session", fake_open)
+
+    with client.websocket_connect(
+            "/ws/chat?host=%s&session=%s" % (SESS_HOST, sid)) as ws:
+        boot = ws.receive_json()
+        assert boot["type"] == "session"
+        assert boot["id"] == sid
+        assert boot["title"] == "restored chat"
+        texts = [e.get("text") for e in boot["transcript"]]
+        assert "how do I add a role?" in texts and "Go to Team." in texts
+
+
+def test_session_routes_reject_invalid_host(isolated_cache_home):
+    r = client.get("/api/hosts/%s/sessions" % "bad%20host")
+    assert r.status_code == 400 and r.json()["status"] == "invalid_host"
+
+
 # --- SPA static page: index.html <-> app.js element-id contract --------------
 #
 # The SPA is vanilla HTML/JS with no build step, so nothing enforces that the IDs

@@ -90,6 +90,12 @@
             <h2>Chat</h2>
             <span class="pane-status muted" id="chat-status">pick a host to start.</span>
           </div>
+          <!-- per-host session chips: one chat per chip, "+ New" mints another. Populated
+               by app.js from /api/hosts/{host}/sessions; hidden until a host is picked. -->
+          <div id="chat-sessions" class="chat-sessions" hidden>
+            <button type="button" id="chat-session-new" class="chat-session-new">+ New</button>
+            <div id="chat-session-list" class="chat-session-list" role="tablist"></div>
+          </div>
           <div id="chat-log" class="chat-log" aria-live="polite"></div>
           <form id="chat-form" class="chat-form" autocomplete="off">
             <input id="chat-input" type="text"

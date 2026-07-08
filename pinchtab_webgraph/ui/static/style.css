@@ -245,6 +245,83 @@ button {
 }
 .view-tab:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* --- chat session chips (one chat per chip, "+ New" mints another) -------- */
+.chat-sessions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.chat-sessions[hidden] { display: none; }
+.chat-session-new {
+  flex: 0 0 auto;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  border-radius: 6px;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+.chat-session-new:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.chat-session-list {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+.chat-session-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.74rem;
+  max-width: 14rem;
+  white-space: nowrap;
+}
+.chat-session-chip:hover:not(.on) { background: var(--panel); border-color: var(--accent); }
+.chat-session-chip.on {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.chat-session-chip .chat-session-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 11rem;
+}
+.chat-session-chip .chat-session-rename {
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 0.74rem;
+  padding: 0.05rem 0.25rem;
+  max-width: 11rem;
+}
+.chat-session-del {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  padding: 0 0.15rem;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+.chat-session-del:hover { opacity: 1; color: var(--err-fg); }
+.chat-session-del.confirm {
+  opacity: 1;
+  color: var(--err-fg);
+  font-weight: 700;
+}
+
 /* --- main + host header --------------------------------------------------- */
 .main {
   grid-area: main;

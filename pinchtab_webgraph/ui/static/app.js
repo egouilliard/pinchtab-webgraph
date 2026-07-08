@@ -38,6 +38,11 @@ const chatFormEl = el("chat-form");
 const chatInputEl = el("chat-input");
 const chatSendEl = chatFormEl ? chatFormEl.querySelector("button") : null;
 
+// per-host chat sessions (chips + "+ New")
+const chatSessionsEl = el("chat-sessions");
+const chatSessionNewEl = el("chat-session-new");
+const chatSessionListEl = el("chat-session-list");
+
 const liveViewEl = el("live-view");
 const liveStatusEl = el("live-status");
 
@@ -79,6 +84,8 @@ let chatWs = null;
 let liveWs = null;
 let crawlWs = null;              // the live-crawl progress socket (one at a time)
 let selectedHost = null;
+let chatSessions = [];           // the selected host's session summaries (updated_at desc)
+let activeSessionId = null;      // the session id the chat socket is currently bound to
 let currentView = "workspace";   // "workspace" | "graph" — flips ONLY the `hidden` panes
 let vendorPromise = null;        // memoized sequential load of the Cytoscape libs + graph.js
 let selectedGraphKind = null;    // the selected host's graph_kind, for the Graph view
@@ -246,6 +253,9 @@ function buildHostRow(h) {
 async function selectHost(h) {
   const host = h.host;
   selectedHost = host;
+  // a host switch drops the prior host's session set — loadChatSessions repopulates it.
+  chatSessions = [];
+  activeSessionId = null;
 
   // A host switch always returns to the Workspace view and tears down any prior
   // graph render (destroyGraphView is defined in the lazily-loaded graph.js, so it may
@@ -282,7 +292,9 @@ async function selectHost(h) {
     }
   } catch (err) { /* keep the index summary */ }
 
-  openChat(host);
+  // loadChatSessions lists (or mints) this host's chats, renders the chips, and opens
+  // the most-recent one on the chat socket (openChat owns the socket lifecycle).
+  await loadChatSessions(host);
   openLiveView(host);
 }
 
@@ -389,7 +401,7 @@ function finalizeBubble() {
   currentBubble = null;
 }
 
-function openChat(host) {
+function openChat(host, sessionId) {
   endTour();                         // drop any active tour on host switch
   if (chatWs) {
     try { chatWs.close(); } catch (e) { /* ignore */ }
@@ -400,7 +412,11 @@ function openChat(host) {
   chatSetEnabled(false);
   chatStatusEl.textContent = "connecting…";
 
-  const ws = new WebSocket(wsUrl("/ws/chat?host=" + encodeURIComponent(host)));
+  // The session id (when known) binds the socket to a persisted chat so its transcript
+  // is restored via the leading `session` frame; without it the server mints a new chat.
+  let q = "/ws/chat?host=" + encodeURIComponent(host);
+  if (sessionId) q += "&session=" + encodeURIComponent(sessionId);
+  const ws = new WebSocket(wsUrl(q));
   chatWs = ws;
 
   ws.onopen = () => {
@@ -422,6 +438,17 @@ function openChat(host) {
     let data;
     try { data = JSON.parse(ev.data); } catch (e) { return; }
     switch (data.type) {
+      case "session":
+        // leading bootstrap frame: bind to this session + replay its stored transcript.
+        activeSessionId = data.id;
+        highlightActiveChip();
+        currentBubble = null;
+        chatLogEl.textContent = "";
+        if (Array.isArray(data.transcript)) {
+          for (const entry of data.transcript) renderTranscriptEntry(entry);
+        }
+        maybeShowRestoreNote(data);
+        break;
       case "text":
         if (!currentBubble) { currentBubble = chatAddLine("msg-assistant", ""); currentBubble._md = ""; }
         currentBubble._md += (data.delta || "");
@@ -446,6 +473,7 @@ function openChat(host) {
         chatAddLine("msg-error", "chat unavailable: " +
           (data.reason || data.status || "unknown") +
           (data.detail ? " — " + data.detail : ""));
+        refreshChatSessions();          // an error can still have auto-titled the chat
         break;
       case "tour":
         finalizeBubble();
@@ -453,6 +481,9 @@ function openChat(host) {
         break;
       case "done":
         finalizeBubble();
+        // a completed turn may have auto-titled the chat + bumped its recency — refresh
+        // the chips (fire-and-forget) without touching the live socket.
+        refreshChatSessions();
         break;
       default:
         break;
@@ -497,6 +528,251 @@ if (chatFormEl) {
     chatInputEl.value = "";
   });
 }
+
+// --- chat sessions (chips: one persisted chat each; "+ New" mints another) ---
+// The chip bar lists /api/hosts/{host}/sessions. Clicking a chip reconnects the chat
+// socket to that session (its transcript is restored via the leading `session` frame);
+// "+ New" POSTs a session; dbl-click a title renames (PATCH); the trailing × confirms
+// then DELETEs. All server strings go through textContent (chips) or renderMarkdown
+// (restored assistant text, which escapes first) — never a raw-innerHTML path.
+
+function sessionUrl(host, id) {
+  let u = "/api/hosts/" + encodeURIComponent(host) + "/sessions";
+  if (id) u += "/" + encodeURIComponent(id);
+  return u;
+}
+
+// List (or, when a host has none yet, mint) this host's chats, render the chips, and
+// open the most-recent one. Guards against a host switch racing the awaits.
+async function loadChatSessions(host) {
+  activeSessionId = null;
+  chatSessions = [];
+  let sessions = [];
+  try {
+    const res = await fetch(sessionUrl(host));
+    const data = await res.json();
+    sessions = data.sessions || [];
+  } catch (err) { sessions = []; }
+  if (sessions.length === 0) {
+    try {
+      const res = await fetch(sessionUrl(host), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const created = await res.json();
+      if (created && created.id) sessions = [created];
+    } catch (err) { sessions = []; }
+  }
+  if (selectedHost !== host) return;   // a newer host switch already took over
+  chatSessions = sessions;
+  renderChatChips();
+  if (sessions.length) openChat(host, sessions[0].id);   // most recent (updated_at desc)
+}
+
+// Fire-and-forget re-list to keep chip titles + recency order fresh WITHOUT reconnecting
+// the socket (called after each done/error frame, and after rename/delete of a non-active
+// chat). Never disturbs the active socket.
+async function refreshChatSessions() {
+  const host = selectedHost;
+  if (!host) return;
+  try {
+    const res = await fetch(sessionUrl(host));
+    const data = await res.json();
+    if (selectedHost !== host) return;
+    chatSessions = data.sessions || [];
+    renderChatChips();
+  } catch (err) { /* keep the current chips */ }
+}
+
+function renderChatChips() {
+  if (!chatSessionListEl) return;
+  chatSessionListEl.textContent = "";
+  for (const s of chatSessions) chatSessionListEl.appendChild(buildSessionChip(s));
+  if (chatSessionsEl) chatSessionsEl.hidden = chatSessions.length === 0;
+}
+
+function highlightActiveChip() {
+  if (!chatSessionListEl) return;
+  for (const chip of chatSessionListEl.children) {
+    chip.classList.toggle("on", chip.dataset.sessionId === activeSessionId);
+  }
+}
+
+function buildSessionChip(s) {
+  const chip = document.createElement("div");
+  chip.className = "chat-session-chip" + (s.id === activeSessionId ? " on" : "");
+  chip.dataset.sessionId = s.id;
+  chip.setAttribute("role", "tab");
+
+  const title = document.createElement("span");
+  title.className = "chat-session-title";
+  title.textContent = s.title || "Untitled chat";   // server string -> textContent
+  chip.appendChild(title);
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "chat-session-del";
+  del.textContent = "×";                             // fixed glyph, not server data
+  del.title = "Delete chat";
+  chip.appendChild(del);
+
+  // click a different chip -> reconnect the socket to it (openChat closes the old one).
+  chip.addEventListener("click", (e) => {
+    if (e.target === del) return;
+    if (chip.querySelector(".chat-session-rename")) return;   // mid-rename
+    if (s.id === activeSessionId) return;
+    openChat(selectedHost, s.id);
+  });
+
+  // dbl-click the title -> inline rename input.
+  title.addEventListener("dblclick", (e) => {
+    e.stopPropagation();
+    beginRenameChip(chip, s);
+  });
+
+  // × -> first click arms (.confirm, auto-disarms ~2s); a second click deletes.
+  del.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (del.classList.contains("confirm")) {
+      deleteSession(s.id);
+    } else {
+      del.classList.add("confirm");
+      del.textContent = "delete?";
+      setTimeout(() => {
+        del.classList.remove("confirm");
+        del.textContent = "×";
+      }, 2000);
+    }
+  });
+
+  return chip;
+}
+
+function beginRenameChip(chip, s) {
+  const titleEl = chip.querySelector(".chat-session-title");
+  if (!titleEl) return;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "chat-session-rename";
+  input.value = s.title || "";
+  chip.replaceChild(input, titleEl);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const commit = (save) => {
+    if (settled) return;
+    settled = true;
+    const next = input.value.trim();
+    if (save && next && next !== (s.title || "")) {
+      renameSession(s.id, next);       // renameSession re-renders the chips
+    } else {
+      renderChatChips();               // restore the chip unchanged
+      highlightActiveChip();
+    }
+  };
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("dblclick", (e) => e.stopPropagation());
+  input.addEventListener("blur", () => commit(true));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(true); }
+    else if (e.key === "Escape") { e.preventDefault(); commit(false); }
+  });
+}
+
+async function renameSession(id, title) {
+  const host = selectedHost;
+  if (!host) return;
+  try {
+    await fetch(sessionUrl(host, id), {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+  } catch (err) { /* ignore — the refresh below reflects whatever stuck */ }
+  await refreshChatSessions();
+  highlightActiveChip();
+}
+
+async function deleteSession(id) {
+  const host = selectedHost;
+  if (!host) return;
+  try {
+    await fetch(sessionUrl(host, id), { method: "DELETE" });
+  } catch (err) { /* ignore */ }
+  if (id === activeSessionId) {
+    // deleting the open chat: reload the set (loadChatSessions auto-creates + opens a
+    // replacement when none are left) so the pane never ends up bound to nothing.
+    activeSessionId = null;
+    await loadChatSessions(host);
+  } else {
+    await refreshChatSessions();
+    highlightActiveChip();
+  }
+}
+
+async function newChat() {
+  const host = selectedHost;
+  if (!host) return;
+  try {
+    const res = await fetch(sessionUrl(host), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const created = await res.json();
+    if (created && created.id) {
+      await refreshChatSessions();
+      openChat(host, created.id);
+    }
+  } catch (err) { /* ignore */ }
+}
+
+// Replay ONE stored transcript entry into the chat log. Reuses the SAME safe renderers
+// the live stream uses — chatAddLine (textContent), renderMarkdown (escapes first), and
+// addTourOffer — so restored (untrusted) content never hits a raw-innerHTML path.
+function renderTranscriptEntry(entry) {
+  if (!entry || typeof entry !== "object") return;
+  switch (entry.type) {
+    case "user":
+      chatAddLine("msg-user", entry.text || "");
+      break;
+    case "text": {
+      const bubble = chatAddLine("msg-assistant", "");
+      bubble.innerHTML = renderMarkdown(entry.text || "");   // renderMarkdown escapes raw
+      chatLogEl.scrollTop = chatLogEl.scrollHeight;
+      break;
+    }
+    case "tool_use":
+      chatAddLine("msg-tool", "→ " + (entry.name || "tool"));
+      break;
+    case "tool_result":
+      chatAddLine("msg-tool", "✓ " + (entry.name || "tool") + " · " +
+        (entry.status || "?"));
+      break;
+    case "tour":
+      addTourOffer(entry.data);
+      break;
+    case "error":
+      chatAddLine("msg-error", "chat unavailable: " +
+        (entry.reason || entry.status || "unknown") +
+        (entry.detail ? " — " + entry.detail : ""));
+      break;
+    default:
+      break;
+  }
+}
+
+// The Claude Code backend restores the transcript for DISPLAY only (v1) — it won't recall
+// earlier turns yet, so flag a restored view so the user isn't surprised.
+function maybeShowRestoreNote(data) {
+  if (!chatStatusEl) return;
+  if (data.backend === "claude_code" && Array.isArray(data.transcript) &&
+      data.transcript.length > 0) {
+    chatStatusEl.textContent =
+      "restored view — this backend won't recall earlier turns yet";
+  }
+}
+
+if (chatSessionNewEl) chatSessionNewEl.addEventListener("click", newChat);
 
 // --- live browser pane -------------------------------------------------------
 function openLiveView(host) {

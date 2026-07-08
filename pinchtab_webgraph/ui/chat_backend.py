@@ -17,7 +17,7 @@ import shutil
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from . import chat, chat_claude_code
+from . import chat, chat_claude_code, chat_store
 
 # Re-export so server.py imports ChatUnavailable from ONE place (chat_backend) — both
 # backends raise the SAME type (chat_claude_code reuses chat.ChatUnavailable).
@@ -53,51 +53,81 @@ def resolve_backend_name(*, env=None, has_api_key=None, claude_cli_available=Non
 
 
 @asynccontextmanager
-async def _open_api_session(host):
+async def _open_api_session(host, *, record=None):
     """Yield a ready ChatState for the Anthropic-API backend (chat.py).
 
     This body is the verbatim logic moved out of server.py's old ``_open_chat_session``
     — key -> anthropic client -> MCP session -> tools — so the API backend behaviour is
-    byte-identical. Raises chat.ChatUnavailable when a dep/key is missing.
+    byte-identical. When ``record`` carries persisted ``wire_messages`` (a resumed
+    session), the ChatState is SEEDED with them so the model recalls prior turns. Raises
+    chat.ChatUnavailable when a dep/key is missing.
     """
     chat.require_api_key()
     client = chat.build_anthropic_client()
+    seed = chat.deserialize_messages((record or {}).get("wire_messages") or [])
     async with chat.mcp_client_session() as session:
         tools = await chat.list_allowed_tools(session)
-        yield chat.ChatState(host=host, messages=[], mcp_session=session,
+        yield chat.ChatState(host=host, messages=seed, mcp_session=session,
                              anthropic_client=client, tools=tools)
 
 
 @dataclass
 class _ApiSession:
-    """Uniform session wrapper over the API backend's ChatState."""
+    """Uniform session wrapper over the API backend's ChatState + its session record."""
     state: object
+    record: dict = None
+    host: str = None
 
     async def handle(self, text, *, emit, live_url=None):
-        await chat.handle_user_message(self.state, text, emit=emit, live_url=live_url)
+        # Record the user turn (never emitted — the client already showed it), wrap emit so
+        # every streamed frame is folded into the transcript, run the turn, then persist
+        # both the display transcript and the authoritative wire history for resume.
+        chat_store.append_display_frame(self.record, {"type": "user", "text": text})
+        sink = chat_store.TranscriptSink(self.record, emit)
+        await chat.handle_user_message(self.state, text, emit=sink, live_url=live_url)
+        self.record["wire_messages"] = chat.serialize_messages(self.state.messages)
+        chat_store.save(self.record)
 
 
 @dataclass
 class _ClaudeCodeSession:
-    """Uniform session wrapper over the Claude Code backend's SDK client."""
+    """Uniform session wrapper over the Claude Code backend's SDK client + its record."""
     client: object
+    record: dict = None
+    host: str = None
 
     async def handle(self, text, *, emit, live_url=None):
-        await chat_claude_code.handle_user_message(self.client, text, emit=emit,
-                                                   live_url=live_url)
+        chat_store.append_display_frame(self.record, {"type": "user", "text": text})
+        sink = chat_store.TranscriptSink(self.record, emit)
+
+        def on_sdk_session_id(sid):
+            # Capture the SDK's session id for a FUTURE resume (v1 restores display only).
+            if sid:
+                self.record["sdk_session_id"] = sid
+
+        await chat_claude_code.handle_user_message(
+            self.client, text, emit=sink, live_url=live_url,
+            on_sdk_session_id=on_sdk_session_id)
+        chat_store.save(self.record)
 
 
 @asynccontextmanager
-async def open_chat_session(host, *, backend_name=None):
+async def open_chat_session(host, *, backend_name=None, record=None):
     """Open the selected backend and yield a uniform session with ``handle()``.
 
-    ``backend_name`` overrides selection (tests pass it explicitly); when None the
-    backend is resolved from the environment via ``resolve_backend_name``.
+    A brand-new chat (``record is None``) mints one via chat_store.create with the
+    resolved (or overridden) backend. A RESUMED chat carries its record — and the backend
+    is PINNED to ``record["backend"]``, never re-resolved, so a session opened under the
+    API backend never silently continues under Claude Code (or vice-versa). ``backend_name``
+    overrides selection only for a brand-new chat (tests pass it explicitly).
     """
-    name = backend_name or resolve_backend_name()
+    if record is None:
+        record = chat_store.create(host, backend=(backend_name or resolve_backend_name()))
+    name = record["backend"]
+
     if name == "claude_code":
         async with chat_claude_code.open_client(host) as client:
-            yield _ClaudeCodeSession(client)
+            yield _ClaudeCodeSession(client=client, record=record, host=host)
     else:
-        async with _open_api_session(host) as state:
-            yield _ApiSession(state)
+        async with _open_api_session(host, record=record) as state:
+            yield _ApiSession(state=state, record=record, host=host)

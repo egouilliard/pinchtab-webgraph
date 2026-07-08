@@ -270,7 +270,7 @@ python3 -m venv /tmp/loginvenv && /tmp/loginvenv/bin/pip install keyring
 
 # 1. start an isolated bridge (in a real terminal — the harness can't bind sockets)
 #    a minimal crawl-config.json with allowedDomains incl. the test host, IDPI off.
-./start-crawl-browser.sh          # or your own bridge on some port, e.g. 9873
+scripts/start-crawl-browser.sh          # or your own bridge on some port, e.g. 9873
 
 # 2. store the test password in the OS keyring
 /tmp/loginvenv/bin/python -c "import keyring; keyring.set_password('pinchtab-webgraph','tomsmith','SuperSecretPassword!')"

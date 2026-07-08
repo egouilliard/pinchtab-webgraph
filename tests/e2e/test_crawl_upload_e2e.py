@@ -12,7 +12,7 @@ It SKIPS cleanly (never fails) when the environment can't run it:
   - no bridge is reachable at the server URL.
 Point it at a bridge with PWG_E2E_SERVER (default http://localhost:9871). The bridge
 auth token is read from $PINCHTAB_TOKEN, else from crawl-config.json at the repo root
-(both gitignored). Bring a bridge up with ./start-crawl-browser.sh.
+(both gitignored). Bring a bridge up with scripts/start-crawl-browser.sh.
 """
 import json
 import os
@@ -59,7 +59,7 @@ def _token():
 pytestmark = pytest.mark.skipif(
     shutil.which("pinchtab") is None or not _reachable(SERVER),
     reason="no pinchtab CLI or no reachable bridge at %s "
-           "(start one with ./start-crawl-browser.sh)" % SERVER,
+           "(start one with scripts/start-crawl-browser.sh)" % SERVER,
 )
 
 

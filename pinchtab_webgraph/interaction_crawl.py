@@ -22,15 +22,15 @@ way recipe.py already does — it is not app- or section-specific.
 Safe by design: opens & reads forms, then Escapes. Opening a "Create X" dialog
 persists nothing until submitted, and we never submit.
 
-  ./run-crawl-interactions.sh https://app.example.com/home
-  python3 interaction_crawl.py --start https://app.example.com/home --out interaction-graph
+  scripts/run-crawl-interactions.sh https://app.example.com/home
+  python3 pinchtab_webgraph/interaction_crawl.py --start https://app.example.com/home --out out/interaction-graph
 
 For long crawls the headless bridge can WEDGE (nav/click time out though health
 says ok). Pass your environment's bridge-relaunch and re-login commands to enable
 auto-recovery — a wedge is then detected, the bridge restarted, and the in-memory
 BFS resumed (partial output is still written if recovery gives up):
 
-  python3 interaction_crawl.py --start https://app.example.com/home \\
+  python3 pinchtab_webgraph/interaction_crawl.py --start https://app.example.com/home \\
       --restart-cmd '<relaunch the bridge>' --login-cmd '<re-authenticate>'
 """
 import argparse
@@ -223,7 +223,7 @@ def probe_bridge(server, start_url, timeout, single_url=False):
 
 
 def recover_bridge(server, restart_cmd, login_cmd, attempt):
-    # Mirror hard-bench.sh's ensure_browser(): kill the stale bridge by its PORT
+    # Mirror scripts/hard-bench.sh's ensure_browser(): kill the stale bridge by its PORT
     # pid (NEVER pkill -f — that self-kills this process, exit 144; see gotchas.md),
     # relaunch, poll health, re-login. Returns True if the bridge is healthy again.
     print("  ! WEDGE detected (attempt %d) — killing bridge + restarting…" % attempt,
@@ -263,7 +263,7 @@ def main():
     ap.add_argument("--start", required=True, help="start URL (the crawl root)")
     ap.add_argument("--server", default="http://localhost:9871")
     ap.add_argument("--config", default=os.environ.get("PINCHTAB_CONFIG", "crawl-config.json"))
-    ap.add_argument("--out", default="interaction-graph")
+    ap.add_argument("--out", default="out/interaction-graph")
     ap.add_argument("--max-states", type=int, default=500,
                     help="hard cap on distinct states to record (default 500 — raised so a "
                          "full-capture run isn't truncated; lower it to bound a huge app)")
@@ -342,6 +342,7 @@ def main():
     ap.add_argument("--settle-poll", type=float, default=recipe.SETTLE_POLL)
     ap.add_argument("--settle-delay", type=float, default=recipe.SETTLE_DELAY)
     a = ap.parse_args()
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
 
     recipe.RENDER_MS, recipe.SETTLE_POLL, recipe.SETTLE_DELAY = a.render_ms, a.settle_poll, a.settle_delay
     try:

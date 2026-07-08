@@ -12,7 +12,7 @@ It SKIPS cleanly (never fails) when the environment can't run it:
   - PINCHTAB_WEBGRAPH_ENABLE_CRAWL is not set (the feature is off by default).
 Point it at a bridge with PWG_E2E_SERVER (default http://localhost:9871). The bridge
 auth token is read from $PINCHTAB_TOKEN, else from crawl-config.json at the repo root.
-Bring a bridge up with ./start-crawl-browser.sh, then:
+Bring a bridge up with scripts/start-crawl-browser.sh, then:
   PINCHTAB_WEBGRAPH_ENABLE_CRAWL=1 PINCHTAB_CONFIG=crawl-config.json \\
       python3 -m pytest tests/e2e/test_ui_crawl_e2e.py -q
 """
@@ -61,7 +61,7 @@ pytestmark = pytest.mark.skipif(
     or not os.environ.get("PINCHTAB_WEBGRAPH_ENABLE_CRAWL"),
     reason="no pinchtab CLI / no reachable bridge at %s / crawl disabled "
            "(set PINCHTAB_WEBGRAPH_ENABLE_CRAWL=1 and start a bridge with "
-           "./start-crawl-browser.sh)" % SERVER,
+           "scripts/start-crawl-browser.sh)" % SERVER,
 )
 
 

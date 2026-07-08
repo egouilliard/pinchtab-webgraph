@@ -4,7 +4,7 @@
 crawl-config.json
 login-config.json
 .instance/
-bridge.log
+bridge*.log
 httpd.log
 *.crawl.log
 
@@ -15,7 +15,12 @@ httpd.log
 __pycache__/
 *.pyc
 
-# generated outputs (graphs, how-tos, screenshots, benchmarks)
+# generated outputs (graphs, how-tos, screenshots, benchmarks, logs) — the tools
+# default their --out here, so a normal run never litters the repo root.
+out/
+
+# ...the loose-in-root patterns below stay as a backstop for tools/scripts that
+# still write to the working directory instead of out/.
 *.html
 # ...but DO track the packaged web-UI static assets (shipped in the wheel)
 !pinchtab_webgraph/ui/static/*.html

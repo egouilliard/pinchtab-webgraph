@@ -70,7 +70,7 @@ _NO_CONFIG_HINT = (
     "crawl-config.json (it carries the bridge token the crawler self-loads).")
 _BRIDGE_UNREACHABLE_HINT = (
     "Could not reach the PinchTab bridge at %s. Start one (e.g. "
-    "./start-crawl-browser.sh) before launching a crawl.")
+    "scripts/start-crawl-browser.sh) before launching a crawl.")
 
 
 # --- pure ---------------------------------------------------------------------

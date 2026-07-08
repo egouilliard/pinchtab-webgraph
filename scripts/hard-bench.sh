@@ -5,8 +5,11 @@
 #   dashboard -> a section (Settings / Users & Roles) -> a tab -> the create button.
 # (1–2 click cases like "add cae", "create view", "add organization type" are NOT
 #  here — those triggers live on the dashboard or the default settings tab.)
-cd ~/pinchtab-webgraph
-export PINCHTAB_CONFIG=~/pinchtab-webgraph/crawl-config.json
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$DIR/.." && pwd)"
+cd "$ROOT"
+mkdir -p out/howto out/logs
+export PINCHTAB_CONFIG="$ROOT/crawl-config.json"
 LOGIN=~/.claude/skills/leytongo-testing-and-guides/scripts/leytongo-login
 DASH=https://go-staging.leyton.com/dashboard
 
@@ -15,7 +18,7 @@ ensure_browser () {
   echo "  (bridge down — restarting)"
   local bp; bp=$(ss -ltnp 2>/dev/null | grep 9871 | grep -oP 'pid=\K[0-9]+' | head -1)
   [ -n "$bp" ] && kill "$bp" 2>/dev/null; sleep 2
-  nohup setsid gnome-terminal -- bash -lc 'cd ~/pinchtab-webgraph && ./start-crawl-browser.sh 2>&1 | tee bridge.log; exec bash' >/dev/null 2>&1 & disown
+  nohup setsid gnome-terminal -- bash -lc "'$DIR/start-crawl-browser.sh' 2>&1 | tee '$ROOT/out/logs/bridge.log'; exec bash" >/dev/null 2>&1 & disown
   for _ in $(seq 1 25); do sleep 1; pinchtab health >/dev/null 2>&1 && break; done
 }
 
@@ -25,7 +28,7 @@ run () {
   "$LOGIN" >/dev/null 2>&1
   local s e out st cl f fc tr
   s=$(date +%s)
-  out=$(timeout 120 ./run-recipe.sh --goal "$goal" --start "$DASH" --max-discover 25 --out "howto-ht-$name" 2>&1)
+  out=$(timeout 120 "$DIR/run-recipe.sh" --goal "$goal" --start "$DASH" --max-discover 25 --out "out/howto/ht-$name" 2>&1)
   e=$(date +%s)
   st=$(printf '%s\n' "$out" | grep -c '· \[')
   cl=$(printf '%s\n' "$out" | grep -oE 'route — [0-9]+ click' | grep -oE '[0-9]+')

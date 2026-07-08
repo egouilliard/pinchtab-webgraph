@@ -25,9 +25,9 @@ NEVER run this against a browser holding a live authenticated session you
 care about (e.g. your monday.com tab) — it clicks things.
 
 Usage:
-  python3 crawl.py https://example.com
-  python3 crawl.py https://app.example.com --server http://localhost:9871 \
-      --max-pages 80 --interaction-depth 2 --out mygraph
+  python3 pinchtab_webgraph/crawl.py https://example.com
+  python3 pinchtab_webgraph/crawl.py https://app.example.com --server http://localhost:9871 \
+      --max-pages 80 --interaction-depth 2 --out out/mygraph
 """
 import argparse
 import hashlib
@@ -840,7 +840,8 @@ def build_argparser():
     p.add_argument("url", help="start URL (e.g. https://example.com)")
     p.add_argument("--server", default=None,
                    help="PinchTab server URL of an ISOLATED instance (e.g. http://localhost:9871)")
-    p.add_argument("--out", default="webgraph", help="output basename (default: webgraph)")
+    p.add_argument("--out", default="out/webgraph",
+                   help="output basename (default: out/webgraph); parent dirs are created")
     p.add_argument("--max-pages", type=int, default=60, help="max pages/nodes (default 60)")
     p.add_argument("--interaction-depth", type=int, default=2,
                    help="how many clicks deep to explore widgets/SPA states (0 = links only)")
@@ -880,6 +881,7 @@ def build_argparser():
 
 def main():
     args = build_argparser().parse_args()
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     if not args.url.lower().startswith(("http://", "https://")):
         args.url = "https://" + args.url
     print("Crawling %s  (depth=%d, max-pages=%d, destructive=%s)"

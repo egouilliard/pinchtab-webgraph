@@ -83,32 +83,31 @@ This installs the **`pinchtab-webgraph`** command (short alias **`pwg`**) with s
 #    (a PinchTab bridge — see Requirements; a helper script lives in the repo)
 
 # 2a. Full interaction + content graph of an app (the main tool):
-pinchtab-webgraph crawl https://app.example.com/dashboard --out app     # (pwg crawl …)
+pinchtab-webgraph crawl https://app.example.com/dashboard --out out/app     # (pwg crawl …)
 
 # 2b. …or a page→page link graph + interactive Cytoscape viewer:
-pinchtab-webgraph linkcrawl https://docs.example.com --interaction-depth 0 --out docs
-xdg-open docs.html
+pinchtab-webgraph linkcrawl https://docs.example.com --interaction-depth 0 --out out/docs
+xdg-open out/docs.html
 
 # 3. Ask the graph, offline, in milliseconds:
-pwg howto app.json --goal "create template"     # shortest click-path + form spec
-pwg howto app.json --find "invoice"             # where does this data live + how to reach it
-pwg howto app.json --list-content               # per-view data inventory
+pwg howto out/app.json --goal "create template"     # shortest click-path + form spec
+pwg howto out/app.json --find "invoice"             # where does this data live + how to reach it
+pwg howto out/app.json --list-content               # per-view data inventory
 ```
 
-Graphs and screenshots are written to the current working directory. From a git checkout you can
-also run any tool without installing: `python3 -m pinchtab_webgraph.cli crawl …`.
+Graphs and screenshots default to the gitignored `out/` directory (e.g. `out/webgraph.json`, `out/recipe.png`); pass `--out <path>` to change it — parent dirs are created for you. From a git checkout you can also run any tool without installing: `python3 -m pinchtab_webgraph.cli crawl …`.
 
-`run-*.sh` forward the bridge auth token automatically and point at the isolated browser. Copy `crawl-config.example.json` to `crawl-config.json` and set a real token (`openssl rand -hex 24`) before the first run — `crawl-config.json` is gitignored because it holds that token.
+The `scripts/run-*.sh` wrappers forward the bridge auth token automatically and point at the isolated browser. Copy `crawl-config.example.json` to `crawl-config.json` and set a real token (`openssl rand -hex 24`) before the first run — `crawl-config.json` is gitignored because it holds that token.
 
 ## 🛠️ The tools
 
 | Tool | What it does |
 | --- | --- |
-| `interaction_crawl.py` / `run-crawl-interactions.sh <url>` | **The core.** Crawls the live UI once into an interaction graph: states + action edges + every create-trigger's form spec. Full **capture-all is the default** — control inventory *and* data collections per state. Atomic checkpoints (never loses progress), explicit truncation reasons in `meta.stopped`. Modes: `--single-url` (app-shell SPAs), `--cross-host` (follow links + iframes to other hosts). Safe: opens and reads forms, never submits. |
+| `interaction_crawl.py` / `scripts/run-crawl-interactions.sh <url>` | **The core.** Crawls the live UI once into an interaction graph: states + action edges + every create-trigger's form spec. Full **capture-all is the default** — control inventory *and* data collections per state. Atomic checkpoints (never loses progress), explicit truncation reasons in `meta.stopped`. Modes: `--single-url` (app-shell SPAs), `--cross-host` (follow links + iframes to other hosts). Safe: opens and reads forms, never submits. |
 | `howto.py <graph.json>` | **Offline** BFS over a crawled graph → shortest click-path + form spec in ms, no browser. `--goal "…"` for actions; `--find TEXT` searches captured data → what matched, which view, and the path to it; `--list-content` = per-view data inventory. |
-| `ask.py` / `run-ask.sh` | **Cache-first** entry point. Routes by host to a per-host cache, answers offline via `howto.py`; on a miss runs a live discovery, then writes the result back so the next ask is an offline hit. `--verify` re-checks live. |
-| `recipe.py` / `run-recipe.sh` | **Live** how-to finder: priority-BFS over the running UI to a goal's trigger, opens the form, reads the fields, never submits. The live fallback for cache misses. |
-| `crawl.py` / `run-crawl.sh <url>` | Page→page **link graph** → `<out>.json` + a self-contained Cytoscape.js `<out>.html` viewer. |
+| `ask.py` / `scripts/run-ask.sh` | **Cache-first** entry point. Routes by host to a per-host cache, answers offline via `howto.py`; on a miss runs a live discovery, then writes the result back so the next ask is an offline hit. `--verify` re-checks live. |
+| `recipe.py` / `scripts/run-recipe.sh` | **Live** how-to finder: priority-BFS over the running UI to a goal's trigger, opens the form, reads the fields, never submits. The live fallback for cache misses. |
+| `crawl.py` / `scripts/run-crawl.sh <url>` | Page→page **link graph** → `<out>.json` + a self-contained Cytoscape.js `<out>.html` viewer. |
 | `paths.py` | Offline shortest / all click-paths over a crawled link graph (`--from`, `--to`, `--structural`, `--all`). |
 | `login.py` (`pinchtab-webgraph login`) | Open a persistent browser session and sign in to a host (credentials from the OS keyring) so subsequent crawls run authenticated. Needs the optional `login` extra (`keyring`). |
 | `cache_cmd.py` (`pinchtab-webgraph cache`) | Inspect / manage the per-host interaction-graph caches `ask.py` writes back: `cache list`, `cache path <host>`, `cache show <host>`, `cache clear <host>` / `--all` (destructive, dry-run unless `--yes`). |

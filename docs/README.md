@@ -27,7 +27,7 @@ The same crawl-once-query-offline capability is reachable three ways, all over o
 ## Reference & contributing
 
 - **[`utcp-manual.json`](../utcp-manual.json)** — the committed static UTCP manual (regenerate with `pwg manual --out utcp-manual.json`).
-- **[CONTRIBUTING.md](../CONTRIBUTING.md)** — branch model, Conventional Commits, the "stay generic" rule, safety, security, and how to open a PR.
+- **[CONTRIBUTING.md](../CONTRIBUTING.md)** — [repository layout](../CONTRIBUTING.md#repository-layout) (where things live, the `out/` convention), branch model, Conventional Commits, the "stay generic" rule, safety, security, and how to open a PR.
 - **[LICENSE](../LICENSE)** — MIT.
 
 ---

@@ -83,32 +83,31 @@ This installs the **`pinchtab-webgraph`** command (short alias **`pwg`**) with s
 #    (a PinchTab bridge — see Requirements; a helper script lives in the repo)
 
 # 2a. Full interaction + content graph of an app (the main tool):
-pinchtab-webgraph crawl https://app.example.com/dashboard --out app     # (pwg crawl …)
+pinchtab-webgraph crawl https://app.example.com/dashboard --out out/app     # (pwg crawl …)
 
 # 2b. …or a page→page link graph + interactive Cytoscape viewer:
-pinchtab-webgraph linkcrawl https://docs.example.com --interaction-depth 0 --out docs
-xdg-open docs.html
+pinchtab-webgraph linkcrawl https://docs.example.com --interaction-depth 0 --out out/docs
+xdg-open out/docs.html
 
 # 3. Ask the graph, offline, in milliseconds:
-pwg howto app.json --goal "create template"     # shortest click-path + form spec
-pwg howto app.json --find "invoice"             # where does this data live + how to reach it
-pwg howto app.json --list-content               # per-view data inventory
+pwg howto out/app.json --goal "create template"     # shortest click-path + form spec
+pwg howto out/app.json --find "invoice"             # where does this data live + how to reach it
+pwg howto out/app.json --list-content               # per-view data inventory
 ```
 
-Graphs and screenshots are written to the current working directory. From a git checkout you can
-also run any tool without installing: `python3 -m pinchtab_webgraph.cli crawl …`.
+Graphs and screenshots default to the gitignored `out/` directory (e.g. `out/webgraph.json`, `out/recipe.png`); pass `--out <path>` to change it — parent dirs are created for you. From a git checkout you can also run any tool without installing: `python3 -m pinchtab_webgraph.cli crawl …`.
 
-`run-*.sh` forward the bridge auth token automatically and point at the isolated browser. Copy `crawl-config.example.json` to `crawl-config.json` and set a real token (`openssl rand -hex 24`) before the first run — `crawl-config.json` is gitignored because it holds that token.
+The `scripts/run-*.sh` wrappers forward the bridge auth token automatically and point at the isolated browser. Copy `crawl-config.example.json` to `crawl-config.json` and set a real token (`openssl rand -hex 24`) before the first run — `crawl-config.json` is gitignored because it holds that token.
 
 ## 🛠️ The tools
 
 | Tool | What it does |
 | --- | --- |
-| `interaction_crawl.py` / `run-crawl-interactions.sh <url>` | **The core.** Crawls the live UI once into an interaction graph: states + action edges + every create-trigger's form spec. Full **capture-all is the default** — control inventory *and* data collections per state. Atomic checkpoints (never loses progress), explicit truncation reasons in `meta.stopped`. Modes: `--single-url` (app-shell SPAs), `--cross-host` (follow links + iframes to other hosts). Safe: opens and reads forms, never submits. |
+| `interaction_crawl.py` / `scripts/run-crawl-interactions.sh <url>` | **The core.** Crawls the live UI once into an interaction graph: states + action edges + every create-trigger's form spec. Full **capture-all is the default** — control inventory *and* data collections per state. Atomic checkpoints (never loses progress), explicit truncation reasons in `meta.stopped`. Modes: `--single-url` (app-shell SPAs), `--cross-host` (follow links + iframes to other hosts). Safe: opens and reads forms, never submits. |
 | `howto.py <graph.json>` | **Offline** BFS over a crawled graph → shortest click-path + form spec in ms, no browser. `--goal "…"` for actions; `--find TEXT` searches captured data → what matched, which view, and the path to it; `--list-content` = per-view data inventory. |
-| `ask.py` / `run-ask.sh` | **Cache-first** entry point. Routes by host to a per-host cache, answers offline via `howto.py`; on a miss runs a live discovery, then writes the result back so the next ask is an offline hit. `--verify` re-checks live. |
-| `recipe.py` / `run-recipe.sh` | **Live** how-to finder: priority-BFS over the running UI to a goal's trigger, opens the form, reads the fields, never submits. The live fallback for cache misses. |
-| `crawl.py` / `run-crawl.sh <url>` | Page→page **link graph** → `<out>.json` + a self-contained Cytoscape.js `<out>.html` viewer. |
+| `ask.py` / `scripts/run-ask.sh` | **Cache-first** entry point. Routes by host to a per-host cache, answers offline via `howto.py`; on a miss runs a live discovery, then writes the result back so the next ask is an offline hit. `--verify` re-checks live. |
+| `recipe.py` / `scripts/run-recipe.sh` | **Live** how-to finder: priority-BFS over the running UI to a goal's trigger, opens the form, reads the fields, never submits. The live fallback for cache misses. |
+| `crawl.py` / `scripts/run-crawl.sh <url>` | Page→page **link graph** → `<out>.json` + a self-contained Cytoscape.js `<out>.html` viewer. |
 | `paths.py` | Offline shortest / all click-paths over a crawled link graph (`--from`, `--to`, `--structural`, `--all`). |
 | `login.py` (`pinchtab-webgraph login`) | Open a persistent browser session and sign in to a host (credentials from the OS keyring) so subsequent crawls run authenticated. Needs the optional `login` extra (`keyring`). |
 | `cache_cmd.py` (`pinchtab-webgraph cache`) | Inspect / manage the per-host interaction-graph caches `ask.py` writes back: `cache list`, `cache path <host>`, `cache show <host>`, `cache clear <host>` / `--all` (destructive, dry-run unless `--yes`). |
@@ -149,7 +148,7 @@ The same crawl-once-query-offline capability is reachable through three interfac
 | **MCP server** | LLM agents / MCP hosts (Claude, IDEs) | `pinchtab-webgraph-mcp` over stdio — 6 offline query tools, 2 live tools (`crawl`, `ask_howto`) with streamed progress, and `graph://…` resources. See [MCP server](#-mcp-server). | `pip install 'pinchtab-webgraph[mcp]'` |
 | **UTCP manual** | any UTCP-aware tool-caller | a static [UTCP](https://www.utcp.io) manual (`pwg manual`, `--out`, or `--serve`) whose `cli` call templates invoke `pwg` directly — no wrapper server in the call path. See [UTCP interface](#-utcp-interface). | none to use (`[utcp]` only validates it) |
 
-For a point-and-click front end there's also an **optional local web UI** — a two-pane browser app (graph browsing · a "how do I…" chat agent · a live headless-browser pane) plus a read-only REST API over the same queries, behind the `pinchtab-webgraph-ui` script and the `[ui]` extra:
+For a point-and-click front end there's also an **optional local web UI** — a browser app with a **Workspace | Graph | Explore** view switcher: a Workspace of a "how do I…" chat agent + a live headless-browser pane, an interactive **Graph view** that renders the crawled interaction graph (states as blue circles, form-triggers as green diamonds) right in the browser, and an **Explore view** to search / browse everything the crawl captured — plus a read-only REST API over the same queries, behind the `pinchtab-webgraph-ui` script and the `[ui]` extra:
 
 | Interface | For | How | Extra dep |
 | --- | --- | --- | --- |
@@ -157,7 +156,15 @@ For a point-and-click front end there's also an **optional local web UI** — a 
 
 The chat pane can reach Claude two ways: the **Anthropic API** (`ANTHROPIC_API_KEY`, the default when a key is set) or your **locally-logged-in Claude Code** with no API key (add the separate `[ui-claude-code]` extra + a logged-in `claude` CLI). Both are locked to the same six offline graph tools. See [Chat backends](docs/ui.md#chat-backends).
 
+Chats are **persistent and multiple**: the chat pane's chip bar holds several **named chats per host**, each saved to disk (`<home>/sessions/<host>/<id>.json`) and restored on reconnect — new / switch / rename / delete right from the bar. The `api` backend continues a reopened chat; the `claude_code` backend restores it for display only in v1. See [Chat sessions](docs/ui.md#chat-sessions).
+
 A "how do I get to X" chat answer also offers a **"Show me How"** button: a guided tour that highlights each step directly on the live browser pane and, on **Next**, performs the real click to advance — stopping at the target form without ever submitting it. See [Show Me How guided tour](docs/ui.md#show-me-how-guided-tour).
+
+The **Graph view** renders the host's cached interaction graph entirely offline (via `GET /api/hosts/{host}/graph`), with search, an adjacency-highlight on node click, a detail panel, and an "Ask in chat" button that prefills the chat with the click-path question. Its Cytoscape libraries are lazy-loaded on first open so the SPA stays light. See [Graph view](docs/ui.md#graph-view).
+
+The UI can also **crawl a new URL and store it**: a sidebar **"New crawl"** form spawns the interaction crawler over a WebSocket, streams live progress, and atomically promotes the resulting graph into the cache so the new host appears in the sidebar and is instantly usable by the Graph view + chat. It is **opt-in** (off unless `PINCHTAB_WEBGRAPH_ENABLE_CRAWL` is set) because a crawl drives a real browser through the whole target app and opens every Create form (it never submits). See [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in).
+
+The **Explore view** is a read-only browser over everything the crawl captured, in three sub-tabs: **Search** (full-text search of captured page data, each hit showing reachable/click-count badges, the click-path, and the matched items), **Forms** (the create-form inventory + a free-text goal path-finder — each form has a **"Show me how"** button that reuses the live guided tour), and **Content** (the per-view inventory of captured collections). A **Ctrl/Cmd-K command palette** launches over the whole UI — switch host, jump view, new chat / new crawl, manage credentials, and a free-text "search content for …" hand-off into Explore. See [Explore view](docs/ui.md#explore-view).
 
 Only the **base install** (`pip install pinchtab-webgraph`, pure stdlib) is needed for the CLI and the UTCP manual; the MCP server and the web UI each live behind an optional extra (`[mcp]` / `[ui]`) so the base package stays dependency-free.
 
@@ -218,7 +225,7 @@ Deep-dive guides live in **[`docs/`](docs/README.md)** — start at the **[docum
 | --- | --- |
 | **[MCP server](docs/mcp-server.md)** | Run `pinchtab-webgraph-mcp`: the `[mcp]` extra, `.mcp.json` registration, the tool + resource inventory, env vars, and the live-tool safety model. |
 | **[UTCP interface](docs/utcp.md)** | The `pwg query` JSON surface + the `pwg manual` / `--serve` UTCP manual, the 8 tools, the scope subset, and the exit-code convention. |
-| **[Web UI](docs/ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the two-pane SPA, the REST API + vault endpoints, the chat + screencast WebSockets, env vars, and the loopback-only security model. |
+| **[Web UI](docs/ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the Workspace/[Graph](docs/ui.md#graph-view)/[Explore](docs/ui.md#explore-view) view switcher + [command palette](docs/ui.md#command-palette), the REST API + vault endpoints, the chat + screencast WebSockets, [persistent named chats](docs/ui.md#chat-sessions), the opt-in [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in) endpoint, env vars, and the loopback-only security model. |
 | **[Authenticated login](docs/authenticated-login.md)** | Crawl behind a login safely: hand-login vs. keyring automation, the threat model, sandbox/bot-account isolation, and how to test it. |
 | **[Contributing](CONTRIBUTING.md)** | Branch model, Conventional Commits, the stay-generic rule, safety, security, and PRs. |
 
@@ -261,7 +268,7 @@ The JSON graph is `{ nodes, edges, meta }`:
 - **Nodes** — **pages** (by normalized URL) and **SPA/modal states** (same URL, changed DOM). Cross-host mode adds `external` / `iframe` nodes. File-upload affordances become a distinct `upload` node carrying an `accept` field (the accepted file types). Each node can carry its **control inventory** and its **content collections**.
 - **Edges** — **links** (navigation) and **actions/clicks**. Destructive-looking actions that were deliberately skipped — and upload affordances, which are recorded but never clicked — are stored as dashed (skipped) edges so you can see what was avoided.
 - **meta** — crawl parameters plus `meta.stopped`: `frontier-exhausted` (complete) vs. `hit-max-*` / `wedge` (truncated). Truncation is always explicit. An additive `meta.uploads` counts the upload affordances found.
-- **Viewer** — the Cytoscape HTML viewer renders `upload` nodes distinctly (cyan, "tag" shape, a "file upload" legend entry) alongside the "SPA / modal state" and "skipped" legends; the `Uploads` stat is guarded, so older graphs without it still render.
+- **Viewer** — the Cytoscape HTML viewer renders `upload` nodes distinctly (cyan, "tag" shape, a "file upload" legend entry) alongside the "SPA / modal state" and "skipped" legends; the `Uploads` stat is guarded, so older graphs without it still render. The viewer is **truly self-contained and offline** — its six Cytoscape/layout libraries are vendored inline (no CDN, no network), so it opens and lays out with nothing but a browser. It uses a fast `fcose` layout by default (a big graph of ~2,500 edges lays out in well under a second) with a **High quality** button for an on-demand higher-fidelity relayout, and shows a "Laying out graph…" indicator while a layout runs.
 
 ## 🛡️ Safety model
 

@@ -12,6 +12,23 @@ Please read the project [`README.md`](README.md) first for setup, the tool inven
 - [License (MIT)](LICENSE)
 - [Code owners](CODEOWNERS)
 
+## Repository Layout
+
+Keep the root clean. Everything has a home:
+
+| Path | What lives there |
+| --- | --- |
+| `pinchtab_webgraph/` | The Python package — all crawler / path-finder / API / CLI / MCP / UI code. |
+| `pinchtab_webgraph/ui/static/` · `vendor/` | Shipped web-UI assets and vendored JS (tracked; the wheel bundles them). |
+| `scripts/` | Runnable shell wrappers — `start-crawl-browser.sh`, `run-*.sh`, `bench.sh`, `hard-bench.sh`, etc. Invoke them as `scripts/<name>.sh`. |
+| `tests/` | Unit + `tests/e2e/` (needs a live bridge; HTML fixtures in `tests/e2e/*.html` are tracked). |
+| `docs/` | Long-form docs, indexed by [`docs/README.md`](docs/README.md). |
+| `out/` | **All generated artifacts** — graphs, how-tos, screenshots, benchmark JSON/PNG, bridge logs. **Gitignored; never committed.** |
+| `caches/` | Per-host interaction-graph caches (`ask.py` write-back). Gitignored runtime data. |
+| root | Only project metadata + example configs: `README.md`, `CONTRIBUTING.md`, `LICENSE`, `CODEOWNERS`, `pyproject.toml`, `MANIFEST.in`, `.gitignore`, `*.example.json`. |
+
+**Generated output goes in `out/`.** The tools default `--out` to `out/…` (e.g. `out/webgraph.json`, `out/recipe.png`) and create parent dirs automatically — so a normal run never litters the root. If you add a tool or script that writes files, default its output under `out/` too, and never `git add` anything from it. The loose-in-root ignore patterns in `.gitignore` are only a backstop.
+
 ## 1. Ways to Contribute
 
 You don't need to write code to help:
@@ -92,7 +109,7 @@ The sign-off appends a `Signed-off-by: Your Name <your@email>` trailer.
 - Repeated-sibling / cluster detection
 - URL-path grouping
 
-App-specific strings belong **only** in config and benchmark files (e.g. `crawl-config.json`, `hard-bench.sh`). Individual apps are test *targets*, never something the code special-cases. A PR that adds an app name or a hand-picked selector into the logic will not be merged.
+App-specific strings belong **only** in config and benchmark files (e.g. `crawl-config.json`, `scripts/hard-bench.sh`). Individual apps are test *targets*, never something the code special-cases. A PR that adds an app name or a hand-picked selector into the logic will not be merged.
 
 ## 7. Stay Safe
 

@@ -34,6 +34,11 @@ class FakeTextBlock:
         self.type = "text"
         self.text = text
 
+    def model_dump(self, mode=None):
+        # match the real anthropic block: serialize_messages folds content blocks via
+        # model_dump(mode="json") when a turn is persisted for resume.
+        return {"type": self.type, "text": self.text}
+
 
 class FakeToolUseBlock:
     def __init__(self, id, name, input):
@@ -508,9 +513,20 @@ from pinchtab_webgraph.ui import server as ui_server  # noqa: E402
 ws_client = TestClient(ui_server.app)
 
 
-def test_ws_chat_streams_scripted_frames(monkeypatch):
+def _fake_session_record(host):
+    """A minimal in-memory session record — enough for chat_store.summary + the
+    TranscriptSink/save path the real _ApiSession.handle drives."""
+    return {"id": "0" * 32, "host": host, "backend": "api", "title": None,
+            "title_locked": False, "created_at": "t", "updated_at": "t",
+            "message_count": 0, "sdk_session_id": None, "transcript": [],
+            "wire_messages": [], "_disk_len": 0}
+
+
+def test_ws_chat_streams_scripted_frames(isolated_cache_home, monkeypatch):
     # A fake session whose real handle_user_message loop runs against injected fakes
-    # and emits a scripted single-turn reply (text + done, no tool use).
+    # and emits a scripted single-turn reply (text + done, no tool use). The leading
+    # bootstrap `session` frame is consumed first. isolated_cache_home keeps the per-turn
+    # chat_store.save writes off the real ~/.pinchtab-webgraph.
     stream = FakeStream(
         events=[FakeTextEvent("Hello there.")],
         final=FakeFinalMessage("end_turn", [FakeTextBlock("Hello there.")]))
@@ -518,14 +534,19 @@ def test_ws_chat_streams_scripted_frames(monkeypatch):
     session = FakeMCPSession(result=FakeCallToolResult(structuredContent={"status": "ok"}))
 
     @asynccontextmanager
-    async def fake_open(host):
+    async def fake_open(host, *, backend_name=None, record=None):
         state = chat.ChatState(host=host, messages=[], mcp_session=session,
                                anthropic_client=client, tools=[])
-        yield chat_backend._ApiSession(state)
+        yield chat_backend._ApiSession(state=state,
+                                       record=record or _fake_session_record(host),
+                                       host=host)
 
     monkeypatch.setattr(ui_server.chat_backend, "open_chat_session", fake_open)
 
     with ws_client.websocket_connect("/ws/chat?host=example.test") as ws:
+        boot = ws.receive_json()
+        assert boot["type"] == "session"
+        assert boot["transcript"] == []
         ws.send_json({"type": "user_message", "text": "hi"})
         f1 = ws.receive_json()
         f2 = ws.receive_json()
@@ -597,3 +618,102 @@ def test_tool_markup_filter_passes_normal_text():
 
 def test_tool_markup_filter_open_tag_split_on_boundary():
     assert _run_filter(["hi <function_", "calls>junk</function_calls> bye"]) == "hi  bye"
+
+
+# --- session persistence: serialize / deserialize / trim wire messages --------
+
+class FakeBlock:
+    """A stand-in for an anthropic 0.85.0 content block exposing model_dump(mode=...)."""
+
+    def __init__(self, d):
+        self._d = d
+
+    def model_dump(self, mode=None):
+        assert mode == "json"      # serialize_messages MUST pass mode="json"
+        return dict(self._d)
+
+
+def test_serialize_messages_maps_blocks_through_model_dump():
+    messages = [
+        {"role": "user", "content": "how do I add a role?"},
+        {"role": "assistant", "content": [FakeBlock({"type": "text", "text": "sure"})]},
+    ]
+    out = chat.serialize_messages(messages)
+    assert out[0] == {"role": "user", "content": "how do I add a role?"}
+    assert out[1] == {"role": "assistant", "content": [{"type": "text", "text": "sure"}]}
+
+
+def test_serialize_messages_passes_plain_dict_blocks_through():
+    messages = [{"role": "user",
+                 "content": [{"type": "tool_result", "tool_use_id": "t1",
+                              "content": "{}", "is_error": False}]}]
+    out = chat.serialize_messages(messages)
+    assert out[0]["content"][0]["tool_use_id"] == "t1"
+
+
+def test_serialize_messages_truncates_long_strings():
+    big = "x" * (chat.MAX_WIRE_TEXT_CHARS + 500)
+    # A completed turn (user + assistant reply) — the assistant turn keeps the user turn
+    # from being treated as unanswered error-residue and dropped.
+    messages = [{"role": "user", "content": big},
+                {"role": "assistant", "content": [FakeBlock({"type": "text", "text": "ok"})]}]
+    out = chat.serialize_messages(messages)
+    assert out[0]["content"].endswith("…[truncated]")
+    assert len(out[0]["content"]) < len(big)
+
+
+def test_serialize_messages_drops_trailing_unanswered_user_turn():
+    # An error mid-turn can leave a bare user message with no assistant reply. Persisting it
+    # would make the next resumed send two consecutive user turns (Anthropic API 400) — it
+    # must be dropped. A tool_result trailing "user" turn (a list) is NOT dropped.
+    completed = [{"role": "user", "content": "q1"},
+                 {"role": "assistant", "content": [FakeBlock({"type": "text", "text": "a1"})]}]
+    residue = completed + [{"role": "user", "content": "q2-unanswered"}]
+    out = chat.serialize_messages(residue)
+    assert len(out) == 2 and out[-1]["role"] == "assistant"
+    # a normal completed conversation is preserved intact
+    assert len(chat.serialize_messages(completed)) == 2
+
+
+def test_serialize_deserialize_round_trip():
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [FakeBlock({"type": "text", "text": "hello"})]},
+    ]
+    wire = chat.serialize_messages(messages)
+    back = chat.deserialize_messages(wire)
+    assert back == wire
+
+
+def test_deserialize_messages_defensive_on_garbage():
+    assert chat.deserialize_messages("not a list") == []
+    assert chat.deserialize_messages([{"role": "user", "content": "ok"}, 42, "x"]) == \
+        [{"role": "user", "content": "ok"}]
+
+
+def test_trim_wire_messages_keeps_trailing_turns_and_never_splits_tool_pairs():
+    # Build 5 user turns, each: user(str) -> assistant tool_use(list) -> tool_result(list).
+    messages = []
+    for i in range(5):
+        messages.append({"role": "user", "content": "q%d" % i})
+        messages.append({"role": "assistant",
+                         "content": [{"type": "tool_use", "id": "t%d" % i, "name": "howto"}]})
+        messages.append({"role": "user",
+                         "content": [{"type": "tool_result", "tool_use_id": "t%d" % i}]})
+    trimmed = chat.trim_wire_messages(messages, max_turns=2)
+    # keeps the last 2 genuine user turns (q3, q4) and everything after -> 6 messages.
+    assert len(trimmed) == 6
+    # starts on a genuine user turn (a plain-str content), NEVER a tool_use/tool_result.
+    assert trimmed[0]["role"] == "user" and isinstance(trimmed[0]["content"], str)
+    assert trimmed[0]["content"] == "q3"
+    # every assistant tool_use turn is immediately followed by its tool_result turn.
+    for i, m in enumerate(trimmed):
+        if m["role"] == "assistant" and isinstance(m["content"], list):
+            nxt = trimmed[i + 1]
+            assert nxt["role"] == "user" and isinstance(nxt["content"], list)
+            assert nxt["content"][0]["type"] == "tool_result"
+
+
+def test_trim_wire_messages_under_cap_is_identity():
+    messages = [{"role": "user", "content": "only one"}]
+    assert chat.trim_wire_messages(messages, max_turns=100) == messages

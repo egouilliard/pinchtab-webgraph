@@ -15,8 +15,8 @@ This script makes NO direct browser calls itself — it only shells out to howto
 (offline) and recipe.py (live). Generic: routing is by URL hostname, nothing
 app/section-specific.
 
-  ./run-ask.sh --goal "add item"   --start https://app.example.com/home
-  ./run-ask.sh --goal "create team" --start https://app/dashboard --verify
+  scripts/run-ask.sh --goal "add item"   --start https://app.example.com/home
+  scripts/run-ask.sh --goal "create team" --start https://app/dashboard --verify
 """
 import argparse
 import datetime
@@ -114,7 +114,7 @@ def main():
         print("--- verifying live ---", file=sys.stderr)
 
     # 2) LIVE: recipe.py drives the crawl browser. Pass the same token/config
-    #    run-recipe.sh exports, so a direct `python3 ask.py` works too.
+    #    scripts/run-recipe.sh exports, so a direct `python3 pinchtab_webgraph/ask.py` works too.
     env = dict(os.environ)
     try:
         env["PINCHTAB_TOKEN"] = json.load(open(CONFIG))["server"]["token"]

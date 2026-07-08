@@ -29,11 +29,12 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import api, cache_store, __version__
-from . import chat_backend, screencast, vault
+from . import chat_backend, chat_store, live_crawl, screencast, vault
 
 app = FastAPI(title="pinchtab-webgraph UI", version=__version__)
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+VENDOR_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "vendor")
 
 
 # --- shared helpers ----------------------------------------------------------
@@ -48,6 +49,9 @@ _STATUS_CODE = {
     "invalid_graph": 422,
     "no_credential_for_host": 404,
     "vault_unavailable": 503,
+    "session_not_found": 404,
+    "invalid_session": 400,
+    "too_many_sessions": 429,
     # NOTE: "invalid_args" is deliberately NOT here. It is an OVERLOADED status — a
     # 200 structured MISS for the read surface (howto with no goal/match), but a 400
     # for a vault PUT with a bad body. The vault PUT route maps it to 400 locally so
@@ -91,10 +95,11 @@ def _call(fn, path, **kwargs):
         return {"status": "invalid_graph", "path": path, "error": str(e)}
 
 
-def _resolve_vault_host(host):
+def _resolve_host_token(host):
     """Validate the host TOKEN only — unlike _resolve_host there is deliberately no
-    filesystem-existence precondition, since "no credential yet" is the normal state
-    for the vault write path. Returns None on success, else an invalid_host error dict.
+    filesystem-existence precondition, since "no credential yet" / "no session yet" is the
+    normal state for the vault + session write paths. Returns None on success, else an
+    invalid_host error dict. Shared by the vault routes and the session routes.
     """
     try:
         cache_store.validate_host(host)
@@ -222,7 +227,7 @@ def vault_credentials():
 
 @app.get("/api/vault/credentials/{host}")
 def vault_get_credential(host: str):
-    err = _resolve_vault_host(host)
+    err = _resolve_host_token(host)
     if err is not None:
         return _respond(err)
     r = vault.get_routing(host)
@@ -233,7 +238,7 @@ def vault_get_credential(host: str):
 
 @app.put("/api/vault/credentials/{host}")
 def vault_put_credential(host: str, payload: dict = Body(...)):
-    err = _resolve_vault_host(host)
+    err = _resolve_host_token(host)
     if err is not None:
         return _respond(err)
     try:
@@ -250,10 +255,88 @@ def vault_put_credential(host: str, payload: dict = Body(...)):
 
 @app.delete("/api/vault/credentials/{host}")
 def vault_delete_credential(host: str, delete_secret: bool = True):
-    err = _resolve_vault_host(host)
+    err = _resolve_host_token(host)
     if err is not None:
         return _respond(err)
     return _respond(vault.delete_credential(host, delete_secret=delete_secret))
+
+
+# --- chat session routes (Phase 4: persistent, named chats per host) ---------
+#
+# Multiple named chat sessions per host, persisted by chat_store. MIRRORS the vault
+# routes' _resolve_host_token / _respond / structured-status style. The heavy transcript
+# + wire history stay OUT of the list/summary responses (chips only need the summary);
+# only the single-session GET returns the full record, minus the resume-only internals
+# (wire_messages + sdk_session_id). Bad-id tokens are rejected as invalid_session (400)
+# before any filesystem access, the twin of invalid_host on the host segment.
+
+def _guard_session(host, session_id):
+    """Shared host+id guard for the per-session routes: returns None on success, else a
+    structured error dict (invalid_host / invalid_session). Blocks path traversal on the
+    id segment before any chat_store call touches the filesystem."""
+    err = _resolve_host_token(host)
+    if err is not None:
+        return err
+    try:
+        chat_store.validate_session_id(session_id)
+    except ValueError:
+        return {"status": "invalid_session", "session": session_id}
+    return None
+
+
+@app.get("/api/hosts/{host}/sessions")
+def host_sessions(host: str):
+    err = _resolve_host_token(host)
+    if err is not None:
+        return _respond(err)
+    return {"sessions": chat_store.list_sessions(host)}
+
+
+@app.post("/api/hosts/{host}/sessions")
+def create_host_session(host: str, payload: dict | None = Body(default=None)):
+    err = _resolve_host_token(host)
+    if err is not None:
+        return _respond(err)
+    try:
+        record = chat_store.create(host, backend=chat_backend.resolve_backend_name(),
+                                   title=(payload or {}).get("title"))
+    except chat_store.TooManySessions:
+        return _respond({"status": "too_many_sessions",
+                         "max": chat_store.MAX_SESSIONS_PER_HOST})
+    return _respond(chat_store.summary(record))
+
+
+@app.get("/api/hosts/{host}/sessions/{session_id}")
+def get_host_session(host: str, session_id: str):
+    err = _guard_session(host, session_id)
+    if err is not None:
+        return _respond(err)
+    rec = chat_store.load(host, session_id)
+    if rec is None:
+        return _respond({"status": "session_not_found", "session": session_id})
+    # the full record MINUS the resume-only internals + the ephemeral in-memory baseline.
+    return _respond({k: v for k, v in rec.items()
+                     if k not in ("wire_messages", "sdk_session_id", "_disk_len")})
+
+
+@app.patch("/api/hosts/{host}/sessions/{session_id}")
+def rename_host_session(host: str, session_id: str, payload: dict | None = Body(default=None)):
+    err = _guard_session(host, session_id)
+    if err is not None:
+        return _respond(err)
+    rec = chat_store.rename(host, session_id, (payload or {}).get("title"))
+    if rec is None:
+        return _respond({"status": "session_not_found", "session": session_id})
+    return _respond(chat_store.summary(rec))
+
+
+@app.delete("/api/hosts/{host}/sessions/{session_id}")
+def delete_host_session(host: str, session_id: str):
+    err = _guard_session(host, session_id)
+    if err is not None:
+        return _respond(err)
+    # idempotent — deleting an absent session is a green {"deleted": false}, never a 404.
+    return {"status": "ok", "deleted": chat_store.delete(host, session_id)}
 
 
 # --- chat WebSocket (Phase 3/6: Claude wired to the offline MCP tools) --------
@@ -268,7 +351,8 @@ def vault_delete_credential(host: str, delete_secret: bool = True):
 # ChatUnavailable frame rather than a crash.
 
 @app.websocket("/ws/chat")
-async def chat_ws(websocket: WebSocket, host: str = Query(...)):
+async def chat_ws(websocket: WebSocket, host: str = Query(...),
+                  session: str | None = Query(None)):
     await websocket.accept()
     try:
         cache_store.validate_host(host)
@@ -277,8 +361,32 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...)):
                                    "host": host})
         await websocket.close(code=1008)
         return
+    # Resolve the requested session (if any) BEFORE opening the backend. A bad id token is
+    # invalid_session; an id that doesn't resolve (or belongs to another host) is
+    # session_not_found — both close the socket rather than silently minting a new chat.
+    if session is not None:
+        try:
+            chat_store.validate_session_id(session)
+        except ValueError:
+            await websocket.send_json({"type": "error", "status": "invalid_session"})
+            await websocket.close(code=1008)
+            return
+        record = chat_store.load(host, session)
+        if record is None or record.get("host") != host:
+            await websocket.send_json({"type": "error", "status": "session_not_found",
+                                       "session": session})
+            await websocket.close(code=1008)
+            return
+    else:
+        record = None
     try:
-        async with chat_backend.open_chat_session(host) as session:
+        async with chat_backend.open_chat_session(host, record=record) as session_obj:
+            # Bootstrap FIRST: the SPA replays this frame's transcript to restore the log
+            # (a brand-new chat carries an empty transcript). Carries the summary so the
+            # client learns the session id it is now bound to.
+            await websocket.send_json({
+                "type": "session", **chat_store.summary(session_obj.record),
+                "transcript": session_obj.record.get("transcript", [])})
             while True:
                 try:
                     msg = await websocket.receive_json()
@@ -286,9 +394,9 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...)):
                     return
                 if msg.get("type") != "user_message":
                     continue
-                await session.handle(msg.get("text", ""),
-                                     live_url=msg.get("live_url"),
-                                     emit=websocket.send_json)
+                await session_obj.handle(msg.get("text", ""),
+                                         live_url=msg.get("live_url"),
+                                         emit=websocket.send_json)
     except chat_backend.ChatUnavailable as e:
         await websocket.send_json({"type": "error", "status": "chat_unavailable",
                                    "reason": e.reason, "detail": e.detail})
@@ -310,6 +418,8 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...)):
 # A process-wide cap on concurrently launched Chrome instances. Guarded by app.state
 # so it is per-app (a fresh TestClient app starts at 0) and reset cleanly in finally.
 app.state.live_sessions = 0
+# A separate cap on concurrently running crawl subprocesses (see /ws/crawl below).
+app.state.live_crawls = 0
 
 
 @app.websocket("/ws/screencast")
@@ -396,8 +506,126 @@ async def screencast_ws(websocket: WebSocket, host: str = Query(...)):
         app.state.live_sessions -= 1
 
 
-# Static mount — registered LAST, AFTER every /api route, so it never shadows the
-# API. `html=True` serves index.html at "/".
+# --- live crawl WebSocket (Phase 3: crawl a URL from the UI, store the result) ---
+#
+# The SPA sidebar's "New crawl" form posts a URL; we launch
+# `python -m pinchtab_webgraph.interaction_crawl` as a subprocess, stream its stderr
+# progress out over this socket, and — when it finishes or is cancelled — atomically
+# promote its written interaction-graph JSON into the cache so the new host appears in
+# the sidebar and is immediately usable by the Graph view + chat. The user URL NEVER
+# becomes a shell string (argv list + create_subprocess_exec inside live_crawl), and the
+# whole feature is OFF unless PINCHTAB_WEBGRAPH_ENABLE_CRAWL is truthy — the default
+# install must not launch a real browser click-through.
+
+def _crawl_enabled():
+    """Truthy PINCHTAB_WEBGRAPH_ENABLE_CRAWL gates the whole live-crawl feature."""
+    return (os.environ.get("PINCHTAB_WEBGRAPH_ENABLE_CRAWL") or "").strip().lower() \
+        in ("1", "true", "yes", "on")
+
+
+@app.websocket("/ws/crawl")
+async def crawl_ws(websocket: WebSocket, url: str = Query(...),
+                   max_states: int | None = Query(None),
+                   max_depth: int | None = Query(None)):
+    await websocket.accept()
+
+    # OFF by default: this route can make the server drive a REAL browser through the
+    # whole target app, so it must be explicitly enabled.
+    if not _crawl_enabled():
+        await websocket.send_json({"type": "error", "status": "crawl_unavailable",
+                                   "reason": "disabled",
+                                   "detail": live_crawl._DISABLED_HINT})
+        await websocket.close(code=1013)
+        return
+
+    # Validate the start URL -> host token (the same choke-point every cache path uses).
+    try:
+        host = live_crawl.parse_start_url(url)
+    except ValueError as e:
+        await websocket.send_json({"type": "error", "status": "invalid_url",
+                                   "url": url, "detail": str(e)})
+        await websocket.close(code=1008)
+        return
+
+    if app.state.live_crawls >= live_crawl.MAX_LIVE_CRAWLS:
+        await websocket.send_json({"type": "error", "status": "too_many_sessions",
+                                   "max": live_crawl.MAX_LIVE_CRAWLS})
+        await websocket.close(code=1013)
+        return
+
+    app.state.live_crawls += 1
+    try:
+        async with live_crawl.open_crawl_session(
+                url, host=host, max_states=max_states, max_depth=max_depth) as session:
+            await websocket.send_json({"type": "status", "state": "starting",
+                                       "host": host, "start_url": url})
+
+            # Progress streams OUT via a background task (crawler stderr -> frames). We
+            # concurrently wait for EITHER the process to exit OR a client cancel /
+            # disconnect; whichever happens first, we cancel the session (idempotent) and
+            # send the ONE terminal frame from the promoted graph.
+            pump = asyncio.create_task(
+                live_crawl.pump_progress(session, emit=websocket.send_json))
+            proc_wait = asyncio.create_task(session.process.wait())
+
+            cancelled = False
+            try:
+                while True:
+                    recv = asyncio.create_task(websocket.receive_json())
+                    done, _pending = await asyncio.wait(
+                        {recv, proc_wait}, return_when=asyncio.FIRST_COMPLETED)
+                    if proc_wait in done:
+                        recv.cancel()
+                        break
+                    # a client frame arrived first
+                    try:
+                        msg = recv.result()
+                    except WebSocketDisconnect:
+                        cancelled = True
+                        break
+                    except Exception:  # noqa: BLE001 — bad frame / closed socket
+                        cancelled = True
+                        break
+                    if isinstance(msg, dict) and msg.get("type") == "cancel":
+                        cancelled = True
+                        break
+            except WebSocketDisconnect:
+                cancelled = True
+
+            if not proc_wait.done():
+                proc_wait.cancel()
+            if cancelled:
+                await live_crawl.cancel_session(session)
+            # let the progress pump drain any buffered lines, then stop it.
+            try:
+                await asyncio.wait_for(pump, timeout=2.0)
+            except Exception:  # noqa: BLE001
+                pump.cancel()
+
+            terminal = await live_crawl.finish_session(session, cancelled=cancelled)
+            try:
+                await websocket.send_json(terminal)
+            except Exception:  # noqa: BLE001 — client already gone
+                pass
+    except live_crawl.CrawlUnavailable as e:
+        await websocket.send_json({"type": "error", "status": "crawl_unavailable",
+                                   "reason": e.reason, "detail": e.detail})
+        await websocket.close(code=1013)
+    except WebSocketDisconnect:
+        return
+    finally:
+        app.state.live_crawls -= 1
+
+
+# Vendor mount — the 6 Cytoscape libs the graph view lazy-loads. Registered BEFORE
+# the catch-all "/" mount because Starlette resolves mounts in REGISTRATION order: the
+# "/" StaticFiles below matches every path, so a /vendor mount registered after it would
+# be shadowed and never reached. It reuses pinchtab_webgraph/vendor/*.min.js (the same
+# 785KB crawl.py inlines) rather than duplicating them under static/.
+app.mount("/vendor", StaticFiles(directory=VENDOR_DIR), name="vendor")
+
+# Static mount — registered LAST, AFTER every /api route AND the /vendor mount, so it
+# never shadows the API or the vendor libs. `html=True` serves index.html at "/".
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 
@@ -417,13 +645,16 @@ def main():
         import sys
         print("WARNING: binding %s exposes the vault WRITE endpoints "
               "(PUT/DELETE /api/vault/credentials), the chat agent "
-              "(/ws/chat — a read-only, offline-tool Claude agent), AND the live "
-              "browser pane (/ws/screencast) with NO authentication — anyone who can "
-              "reach this port can store or delete keyring credentials, drive the "
-              "chat agent (spending API credits), and, biggest of all, make the "
-              "server LAUNCH LOCAL HEADLESS CHROME processes that best-effort drive "
-              "the credential-bearing PinchTab bridge to log in. This is the single "
-              "strongest reason to keep --host 127.0.0.1."
+              "(/ws/chat — a read-only, offline-tool Claude agent), the live "
+              "browser pane (/ws/screencast), AND — biggest of all — the live CRAWL "
+              "endpoint (/ws/crawl) with NO authentication. Anyone who can reach this "
+              "port can store or delete keyring credentials, drive the chat agent "
+              "(spending API credits), launch local headless Chrome, and, worst of "
+              "all, make the server drive a REAL browser that CLICKS THROUGH THE WHOLE "
+              "TARGET APP and OPENS EVERY CREATE FORM (it never submits) against the "
+              "credential-bearing PinchTab bridge. /ws/crawl is off unless "
+              "PINCHTAB_WEBGRAPH_ENABLE_CRAWL is set, but this is the single strongest "
+              "reason to keep --host 127.0.0.1."
               % a.host, file=sys.stderr)
 
     import uvicorn

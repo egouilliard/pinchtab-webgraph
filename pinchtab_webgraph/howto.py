@@ -4,9 +4,9 @@ Answer "how do I do X?" OFFLINE, in milliseconds, from an interaction-graph cach
 built by interaction_crawl.py. No live browser, no discovery budget, no per-state
 latency — just a BFS over the cached graph.
 
-  python3 howto.py interaction-graph.json --goal "create team"
-  python3 howto.py interaction-graph.json --goal "add template" --start https://app/x
-  python3 howto.py interaction-graph.json --list            # every create-form found
+  python3 pinchtab_webgraph/howto.py out/interaction-graph.json --goal "create team"
+  python3 pinchtab_webgraph/howto.py out/interaction-graph.json --goal "add template" --start https://app/x
+  python3 pinchtab_webgraph/howto.py out/interaction-graph.json --list            # every create-form found
 
 Given a goal, it finds the create-trigger whose label matches the goal, then the
 SHORTEST click-path to it (from --start if given, else the crawl root), and prints
@@ -231,7 +231,7 @@ def main():
     if not matches:
         print("✗ No cached trigger matches %r." % (a.match or a.goal))
         print("  → cache miss: refresh with interaction_crawl.py, or run live:")
-        print('     ./run-recipe.sh --goal "%s" --start <url>' % (a.goal or ""))
+        print('     scripts/run-recipe.sh --goal "%s" --start <url>' % (a.goal or ""))
         sys.exit(2)
 
     adj = build_adj(graph)

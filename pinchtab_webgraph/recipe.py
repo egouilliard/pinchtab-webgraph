@@ -14,8 +14,8 @@ Safe by design: it opens and reads a form, then cancels. It does not click
 Save/Submit/Create-confirm, so it does not persist data. (On most apps opening
 a "Create X" dialog creates nothing until you submit.)
 
-  ./run-recipe.sh --goal "add item"  --page https://app.example.com/items/123
-  ./run-recipe.sh --goal "create team" --start https://app.example.com/home
+  scripts/run-recipe.sh --goal "add item"  --page https://app.example.com/items/123
+  scripts/run-recipe.sh --goal "create team" --start https://app.example.com/home
 """
 import argparse
 import heapq
@@ -465,8 +465,9 @@ def main():
                     help="trailing settle delay after the DOM is stable (default %.2f)" % SETTLE_DELAY)
     ap.add_argument("--screenshot", action="store_true",
                     help="also save a PNG of the opened form (off by default for speed)")
-    ap.add_argument("--out", default="recipe")
+    ap.add_argument("--out", default="out/recipe")
     a = ap.parse_args()
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
 
     # apply settle tunables globally (settle() reads these module-level knobs)
     RENDER_MS, SETTLE_POLL, SETTLE_DELAY = a.render_ms, a.settle_poll, a.settle_delay

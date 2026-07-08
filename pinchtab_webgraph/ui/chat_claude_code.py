@@ -255,7 +255,7 @@ def _parse_tool_payload(content):
         return None
 
 
-async def run_conversation_turn(client, text, *, emit):
+async def run_conversation_turn(client, text, *, emit, on_sdk_session_id=None):
     """Drive one turn: send ``text``, stream the reply, map SDK messages -> frames.
 
     Emits the SAME frame protocol as chat.run_conversation_turn so the SPA is shared:
@@ -268,6 +268,12 @@ async def run_conversation_turn(client, text, *, emit):
     Message dispatch is by class NAME (not isinstance) so the frame-mapping tests can
     feed fakes without importing the real SDK. Text is streamed ONLY via StreamEvent
     deltas; AssistantMessage TextBlocks are dropped to avoid emitting text twice.
+
+    SESSION PERSISTENCE (Phase 4): v1 persists the DISPLAY transcript only for this
+    backend — it does NOT resume the SDK conversation, so a restored Claude Code chat
+    shows the earlier turns but the model won't recall them yet. As a forward step, when
+    ``on_sdk_session_id`` is given it is called (best-effort) with the SDK's ``init``
+    session id, which a future version can pass to ``client.query(..., resume=<id>)``.
     """
     await client.query(text, session_id="default")
     tool_names = {}  # tool_use_id -> qualified name, to label the matching result
@@ -324,20 +330,31 @@ async def run_conversation_turn(client, text, *, emit):
             await emit({"type": "done"})
             continue
 
-        # SystemMessage (and its task/hook subclasses) and anything else: no-op.
+        if kind == "SystemMessage":
+            # The SDK's init SystemMessage carries the session id. Capture it (best-effort,
+            # never raise) so the session record can store it for a future SDK resume.
+            if on_sdk_session_id and getattr(msg, "subtype", None) == "init":
+                try:
+                    on_sdk_session_id((getattr(msg, "data", None) or {}).get("session_id"))
+                except Exception:  # noqa: BLE001 — capture is best-effort, never break the turn
+                    pass
+            continue
+
+        # SystemMessage task/hook subclasses and anything else: no-op.
 
 
-async def handle_user_message(client, text, *, emit, live_url=None):
+async def handle_user_message(client, text, *, emit, live_url=None, on_sdk_session_id=None):
     """Run one turn. NEVER raises into the WebSocket; the client survives for reuse.
 
     Mirrors chat.handle_user_message: any ChatUnavailable / SDK / transport error is
     reported as a single structured {"type":"error", ...} frame. ``live_url`` (the live
     pane's current page) is folded in via the SHARED ``chat.augment_with_location`` so
-    both backends learn the user's position identically.
+    both backends learn the user's position identically. ``on_sdk_session_id`` is threaded
+    to run_conversation_turn to capture the SDK session id for a future resume.
     """
     try:
         await run_conversation_turn(client, chat.augment_with_location(text, live_url),
-                                    emit=emit)
+                                    emit=emit, on_sdk_session_id=on_sdk_session_id)
     except chat.ChatUnavailable as e:
         await emit({"type": "error", "status": "chat_unavailable",
                     "reason": e.reason, "detail": e.detail})

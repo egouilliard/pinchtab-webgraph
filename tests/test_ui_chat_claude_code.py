@@ -258,6 +258,41 @@ def test_frame_mapping_result_error_default_detail():
     assert frames[1] == {"type": "done"}
 
 
+# --- on_sdk_session_id: capture the SDK init session id ----------------------
+
+def test_run_conversation_turn_captures_sdk_session_id():
+    messages = [
+        SystemMessage(subtype="init", data={"session_id": "sess-abc"}),
+        _text_delta("hi"),
+        ResultMessage(is_error=False),
+    ]
+    captured = []
+
+    async def emit(f):
+        pass
+
+    _run(chat_claude_code.run_conversation_turn(
+        FakeClient(messages), "x", emit=emit,
+        on_sdk_session_id=lambda sid: captured.append(sid)))
+    assert captured == ["sess-abc"]
+
+
+def test_run_conversation_turn_ignores_non_init_system_message():
+    messages = [
+        SystemMessage(subtype="other", data={"session_id": "nope"}),
+        ResultMessage(is_error=False),
+    ]
+    captured = []
+
+    async def emit(f):
+        pass
+
+    _run(chat_claude_code.run_conversation_turn(
+        FakeClient(messages), "x", emit=emit,
+        on_sdk_session_id=lambda sid: captured.append(sid)))
+    assert captured == []      # only the init subtype triggers capture
+
+
 # --- handle_user_message: never raises ---------------------------------------
 
 def test_handle_user_message_swallows_query_error():

@@ -25,13 +25,14 @@ NEVER run this against a browser holding a live authenticated session you
 care about (e.g. your monday.com tab) — it clicks things.
 
 Usage:
-  python3 crawl.py https://example.com
-  python3 crawl.py https://app.example.com --server http://localhost:9871 \
-      --max-pages 80 --interaction-depth 2 --out mygraph
+  python3 pinchtab_webgraph/crawl.py https://example.com
+  python3 pinchtab_webgraph/crawl.py https://app.example.com --server http://localhost:9871 \
+      --max-pages 80 --interaction-depth 2 --out out/mygraph
 """
 import argparse
 import hashlib
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -556,9 +557,30 @@ class Crawler:
         return graph
 
 
+_VENDOR_DIR = os.path.join(os.path.dirname(__file__), "vendor")
+_VENDOR_FILES = ("cytoscape.min.js", "dagre.min.js", "cytoscape-dagre.min.js",
+                 "layout-base.min.js", "cose-base.min.js", "cytoscape-fcose.min.js")
+
+
+def _vendor_js():
+    """Inline the six minified libs as self-contained <script> tags (no CDN).
+
+    Each file's contents are escaped so a literal </script> (or any </) inside
+    the minified JS can't break out of the tag; load order is significant."""
+    out = []
+    for name in _VENDOR_FILES:
+        with open(os.path.join(_VENDOR_DIR, name), encoding="utf-8") as f:
+            js = f.read().replace("</", "<\\/")
+        out.append("<script>" + js + "</script>")
+    return "\n".join(out)
+
+
 def render_html(graph):
-    data = json.dumps(graph)
-    return HTML_TEMPLATE.replace("/*__GRAPH__*/null", data)
+    # Escape </ so a crawled title containing </script> can't break the tag.
+    data = json.dumps(graph).replace("</", "<\\/")
+    return (HTML_TEMPLATE
+            .replace("<!--__VENDOR_JS__-->", _vendor_js())
+            .replace("/*__GRAPH__*/null", data))
 
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -567,18 +589,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Navigation Graph</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
-<script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
-<script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
-<script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
+<!--__VENDOR_JS__-->
 <style>
 :root{--bg:#eef2f7;--panel:#fff;--ink:#0f172a;--muted:#64748b;--border:#e2e8f0;--accent:#2563eb;}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--bg)}
 #app{display:flex;height:100%}
-#cy{flex:1;height:100%;background:radial-gradient(circle at 32% 18%,#ffffff 0,rgba(255,255,255,0) 55%),var(--bg)}
+#cy{position:relative;flex:1;height:100%;background:radial-gradient(circle at 32% 18%,#ffffff 0,rgba(255,255,255,0) 55%),var(--bg)}
+#cyload{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:none;z-index:5;padding:7px 14px;border:1px solid var(--border);background:var(--panel);color:var(--muted);border-radius:20px;font-size:12px;box-shadow:0 4px 14px rgba(15,23,42,.08)}
+#cyload.on{display:block}
 #side{width:344px;min-width:344px;height:100%;background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column;box-shadow:-6px 0 22px rgba(15,23,42,.05)}
 .sec{padding:13px 16px;border-bottom:1px solid var(--border)}
 h1{font-size:15px;margin:0 0 3px;display:flex;align-items:center;gap:8px}
@@ -613,7 +632,7 @@ button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
 </head>
 <body>
 <div id="app">
-  <div id="cy"></div>
+  <div id="cy"><div id="cyload">Laying out graph…</div></div>
   <aside id="side">
     <div class="sec">
       <h1>&#129517; Navigation Graph</h1>
@@ -625,6 +644,7 @@ button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
       <div class="btns">
         <button onclick="relayout('fcose')" id="b-fcose" class="on">Clusters</button>
         <button onclick="relayout('dagre')" id="b-dagre">Tree</button>
+        <button onclick="relayout('fcose-proof')" id="b-fcose-proof">High quality</button>
         <button onclick="toggleGlobal()" id="b-global">Show global nav</button>
         <button onclick="cy.fit(null,40)">Fit</button>
         <button onclick="resetView()">Reset</button>
@@ -694,15 +714,21 @@ const cy=cytoscape({container:document.getElementById('cy'),elements:els,wheelSe
     {selector:'edge.path',style:{'display':'element','line-opacity':1,'width':3.5,'line-color':'#16a34a','target-arrow-color':'#16a34a','line-style':'solid','z-index':50}},
   ]});
 const LAYOUTS={
-  fcose:{name:'fcose',quality:'proof',animate:false,randomize:true,nodeRepulsion:14000,idealEdgeLength:75,nestingFactor:0.2,gravity:0.12,gravityCompound:1.4,gravityRangeCompound:2,packComponents:true,nodeSeparation:130,tile:true,componentSpacing:140},
+  fcose:{name:'fcose',quality:'default',animate:false,randomize:false,nodeDimensionsIncludeLabels:false,nodeRepulsion:14000,idealEdgeLength:75,nestingFactor:0.2,gravity:0.12,gravityCompound:1.4,gravityRangeCompound:2,packComponents:true,nodeSeparation:130,tile:true,componentSpacing:140},
+  'fcose-proof':{name:'fcose',quality:'proof',animate:false,randomize:true,nodeDimensionsIncludeLabels:false,nodeRepulsion:14000,idealEdgeLength:75,nestingFactor:0.2,gravity:0.12,gravityCompound:1.4,gravityRangeCompound:2,packComponents:true,nodeSeparation:130,tile:true,componentSpacing:140},
   dagre:{name:'dagre',rankDir:'LR',nodeSep:16,rankSep:90,animate:false},
 };
 let hideGlobal=true;
-function curLayout(){return document.querySelector('#b-dagre.on')?'dagre':'fcose';}
-function relayout(name){document.querySelectorAll('#b-fcose,#b-dagre').forEach(b=>b.classList.remove('on'));
+function showLoad(){const e=document.getElementById('cyload');if(e)e.classList.add('on');}
+function hideLoad(){const e=document.getElementById('cyload');if(e)e.classList.remove('on');}
+function curLayout(){if(document.querySelector('#b-dagre.on'))return 'dagre';
+  if(document.querySelector('#b-fcose-proof.on'))return 'fcose-proof';return 'fcose';}
+function relayout(name){document.querySelectorAll('#b-fcose,#b-dagre,#b-fcose-proof').forEach(b=>b.classList.remove('on'));
   const b=document.getElementById('b-'+name);if(b)b.classList.add('on');
-  try{cy.elements(':visible').layout(LAYOUTS[name]||LAYOUTS.fcose).run();}
-  catch(e){cy.elements(':visible').layout(LAYOUTS.dagre).run();}}
+  // Yield a frame so the overlay paints before the synchronous layout blocks.
+  showLoad();setTimeout(()=>{const lay=cy.elements(':visible').layout(LAYOUTS[name]||LAYOUTS.fcose);
+    lay.one('layoutstop',hideLoad);
+    try{lay.run();}catch(e){hideLoad();cy.elements(':visible').layout(LAYOUTS.dagre).run();}},16);}
 function applyGlobal(){cy.edges().forEach(e=>e.toggleClass('ghide',hideGlobal&&!!e.data('glob')));}
 function toggleGlobal(){hideGlobal=!hideGlobal;
   const b=document.getElementById('b-global');if(b){b.classList.toggle('on',!hideGlobal);
@@ -814,7 +840,8 @@ def build_argparser():
     p.add_argument("url", help="start URL (e.g. https://example.com)")
     p.add_argument("--server", default=None,
                    help="PinchTab server URL of an ISOLATED instance (e.g. http://localhost:9871)")
-    p.add_argument("--out", default="webgraph", help="output basename (default: webgraph)")
+    p.add_argument("--out", default="out/webgraph",
+                   help="output basename (default: out/webgraph); parent dirs are created")
     p.add_argument("--max-pages", type=int, default=60, help="max pages/nodes (default 60)")
     p.add_argument("--interaction-depth", type=int, default=2,
                    help="how many clicks deep to explore widgets/SPA states (0 = links only)")
@@ -854,6 +881,7 @@ def build_argparser():
 
 def main():
     args = build_argparser().parse_args()
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     if not args.url.lower().startswith(("http://", "https://")):
         args.url = "https://" + args.url
     print("Crawling %s  (depth=%d, max-pages=%d, destructive=%s)"

@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>pinchtab-webgraph</title>
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="graph.css" />
+  <link rel="stylesheet" href="explore.css" />
+  <!-- Apply the saved theme BEFORE first paint so there's no light/dark flash.
+       Falls through to the CSS prefers-color-scheme default when nothing is saved. -->
+  <script>try{var t=localStorage.getItem("pwg-theme");if(t==="dark"||t==="light")document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
 </head>
 <body>
   <!-- The real two-pane SPA. Layout: a top bar, a left sidebar (crawled hosts +
@@ -19,6 +24,10 @@
         <span class="brand-mark">pinchtab</span><span class="brand-sub">webgraph</span>
       </div>
       <p class="caches-dir muted" id="caches-dir"></p>
+      <button type="button" id="theme-toggle" class="btn-ghost theme-toggle-btn"
+              title="Toggle light/dark theme" aria-label="Toggle light/dark theme">🌙</button>
+      <button type="button" id="cmdk-open" class="btn-ghost cmdk-open-btn"
+              title="Command palette (Ctrl/Cmd+K)">⌘K</button>
     </header>
 
     <!-- sidebar: the list of all crawled graphs (hosts) ---------------------->
@@ -29,6 +38,38 @@
           Credentials
         </button>
       </div>
+      <!-- New crawl: enter a URL and the server crawls it into a graph, streaming
+           live progress below. Off unless PINCHTAB_WEBGRAPH_ENABLE_CRAWL is set; a
+           `crawl_unavailable`/`disabled` frame is shown gracefully. -->
+      <form id="crawl-form" class="crawl-form" autocomplete="off">
+        <input id="crawl-url" type="url" placeholder="https://app.example.com/home"
+               aria-label="URL to crawl" />
+        <details class="advanced">
+          <summary>Advanced (crawl limits)</summary>
+          <div class="field-row">
+            <label>max states
+              <input id="crawl-max-states" type="number" min="10" max="500"
+                     placeholder="60" />
+            </label>
+            <label>max depth
+              <input id="crawl-max-depth" type="number" min="1" max="8"
+                     placeholder="4" />
+            </label>
+          </div>
+        </details>
+        <div class="crawl-actions">
+          <button type="submit" id="crawl-submit">New crawl</button>
+          <button type="button" id="crawl-cancel" class="crawl-cancel-btn" hidden>
+            Cancel
+          </button>
+        </div>
+        <p class="crawl-safety muted">
+          The crawler clicks through every page and opens every Create form to read it —
+          it never submits anything.
+        </p>
+        <div id="crawl-progress" class="crawl-progress muted" hidden></div>
+      </form>
+
       <ul id="hosts" class="hosts"><li class="muted pad">loading…</li></ul>
     </aside>
 
@@ -38,6 +79,14 @@
         <h1 class="host-name" id="host-name"></h1>
         <span class="host-kind badge" id="host-kind"></span>
         <span class="host-counts muted" id="host-counts"></span>
+        <!-- view switcher: flips the main area between the Workspace (chat + live
+             browser) and the interactive Graph. Toggling ONLY flips `hidden`; it
+             never touches the chat/live sockets (app.js owns those). -->
+        <div class="view-tabs" id="view-tabs">
+          <button type="button" id="tab-workspace" class="view-tab on">Workspace</button>
+          <button type="button" id="tab-graph" class="view-tab">Graph</button>
+          <button type="button" id="tab-explore" class="view-tab">Explore</button>
+        </div>
       </div>
       <p class="placeholder muted" id="placeholder">
         Pick a graph on the left to open a chat and a live browser session for that host.
@@ -49,6 +98,12 @@
           <div class="pane-head">
             <h2>Chat</h2>
             <span class="pane-status muted" id="chat-status">pick a host to start.</span>
+          </div>
+          <!-- per-host session chips: one chat per chip, "+ New" mints another. Populated
+               by app.js from /api/hosts/{host}/sessions; hidden until a host is picked. -->
+          <div id="chat-sessions" class="chat-sessions" hidden>
+            <button type="button" id="chat-session-new" class="chat-session-new">+ New</button>
+            <div id="chat-session-list" class="chat-session-list" role="tablist"></div>
           </div>
           <div id="chat-log" class="chat-log" aria-live="polite"></div>
           <form id="chat-form" class="chat-form" autocomplete="off">
@@ -81,6 +136,66 @@
             </div>
           </div>
         </section>
+      </div>
+
+      <!-- GRAPH view: an interactive Cytoscape rendering of the host's interaction
+           graph. Hidden until the Graph tab is picked; graph.js + the vendored libs
+           are injected lazily by app.js on first switch. -->
+      <div class="graph-view" id="graph-view" hidden>
+        <div class="graph-toolbar">
+          <input id="graph-search" type="text" autocomplete="off"
+                 placeholder="Search states by URL or label…" />
+          <span id="graph-status" class="muted"></span>
+        </div>
+        <div class="graph-body">
+          <div id="graph-canvas"></div>
+          <aside id="graph-detail">
+            <p class="hint muted">Click a node to inspect it.</p>
+          </aside>
+        </div>
+      </div>
+
+      <!-- EXPLORE view: a read-only browser over the crawled cache — full-text
+           search of captured data, a path-finder to any create-form, and a form
+           inventory. Hidden until the Explore tab is picked; explore.js drives it
+           and reuses app.js globals (setView/startTour). Every crawled string is
+           rendered via textContent; crawled URLs are shown as plain text, never a
+           live <a href> (clicking one would navigate away from the app). -->
+      <div class="explore-view" id="explore-view" hidden>
+        <div class="explore-toolbar">
+          <div class="explore-subtabs">
+            <button type="button" id="explore-tab-search" class="explore-subtab on">Search</button>
+            <button type="button" id="explore-tab-forms" class="explore-subtab">Forms</button>
+            <button type="button" id="explore-tab-content" class="explore-subtab">Content</button>
+          </div>
+          <span id="explore-status" class="muted"></span>
+        </div>
+
+        <!-- Search panel: full-text search of captured data collections -->
+        <div class="explore-panel" id="explore-panel-search">
+          <form id="explore-search-form" class="explore-search-form" autocomplete="off">
+            <input id="explore-search-input" type="text"
+                   placeholder="Search captured page data…" aria-label="Search content" />
+            <button type="submit">Search</button>
+          </form>
+          <ul id="explore-search-results" class="explore-results"></ul>
+        </div>
+
+        <!-- Forms panel: a path-finder box + the full create-form inventory -->
+        <div class="explore-panel" id="explore-panel-forms" hidden>
+          <form id="explore-goal-form" class="explore-goal-form" autocomplete="off">
+            <input id="explore-goal-input" type="text"
+                   placeholder="How do I… (e.g. create a role)" aria-label="Path-finder goal" />
+            <button type="submit">Find path</button>
+          </form>
+          <div id="explore-goal-result"></div>
+          <ul id="explore-forms-list" class="explore-list"></ul>
+        </div>
+
+        <!-- Content panel: per-view inventory of captured data collections -->
+        <div class="explore-panel" id="explore-panel-content" hidden>
+          <ul id="explore-content-list" class="explore-list"></ul>
+        </div>
       </div>
     </main>
   </div>
@@ -151,6 +266,17 @@
     </div>
   </div>
 
+  <!-- command palette (Ctrl/Cmd+K; hidden by default) --------------------->
+  <div id="cmdk-modal" class="modal" hidden>
+    <div class="modal-backdrop" id="cmdk-backdrop"></div>
+    <div class="cmdk-card" role="dialog" aria-modal="true" aria-label="Command palette">
+      <input id="cmdk-input" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Type a command or a host…" aria-label="Command palette" />
+      <ul id="cmdk-results" class="cmdk-results" role="listbox"></ul>
+    </div>
+  </div>
+
   <script src="app.js"></script>
+  <script src="explore.js"></script>
 </body>
 </html>

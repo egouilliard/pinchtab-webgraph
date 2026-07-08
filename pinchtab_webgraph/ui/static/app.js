@@ -26,11 +26,32 @@ const hostCountsEl = el("host-counts");
 const placeholderEl = el("placeholder");
 const panesEl = el("panes");
 
+// view switcher (Workspace | Graph | Explore) + the lazily-populated graph container
+const viewTabsEl = el("view-tabs");
+const tabWorkspaceEl = el("tab-workspace");
+const tabGraphEl = el("tab-graph");
+const tabExploreEl = el("tab-explore");
+const graphViewEl = el("graph-view");
+const exploreViewEl = el("explore-view");
+
+// command palette (Ctrl/Cmd+K)
+const cmdkModalEl = el("cmdk-modal");
+const cmdkOpenEl = el("cmdk-open");
+const cmdkBackdropEl = el("cmdk-backdrop");
+const cmdkInputEl = el("cmdk-input");
+const cmdkResultsEl = el("cmdk-results");
+const themeToggleEl = el("theme-toggle");
+
 const chatLogEl = el("chat-log");
 const chatStatusEl = el("chat-status");
 const chatFormEl = el("chat-form");
 const chatInputEl = el("chat-input");
 const chatSendEl = chatFormEl ? chatFormEl.querySelector("button") : null;
+
+// per-host chat sessions (chips + "+ New")
+const chatSessionsEl = el("chat-sessions");
+const chatSessionNewEl = el("chat-session-new");
+const chatSessionListEl = el("chat-session-list");
 
 const liveViewEl = el("live-view");
 const liveStatusEl = el("live-status");
@@ -59,10 +80,25 @@ const credMsgEl = el("cred-msg");
 const CRED_FIELDS = ["url", "username", "userField", "passField", "submit",
   "successUrl", "keyringService"];
 
+// new-crawl form
+const crawlFormEl = el("crawl-form");
+const crawlUrlEl = el("crawl-url");
+const crawlSubmitEl = el("crawl-submit");
+const crawlCancelEl = el("crawl-cancel");
+const crawlMaxStatesEl = el("crawl-max-states");
+const crawlMaxDepthEl = el("crawl-max-depth");
+const crawlProgressEl = el("crawl-progress");
+
 // --- shared socket / selection state -----------------------------------------
 let chatWs = null;
 let liveWs = null;
+let crawlWs = null;              // the live-crawl progress socket (one at a time)
 let selectedHost = null;
+let chatSessions = [];           // the selected host's session summaries (updated_at desc)
+let activeSessionId = null;      // the session id the chat socket is currently bound to
+let currentView = "workspace";   // "workspace" | "graph" — flips ONLY the `hidden` panes
+let vendorPromise = null;        // memoized sequential load of the Cytoscape libs + graph.js
+let selectedGraphKind = null;    // the selected host's graph_kind, for the Graph view
 let currentLiveUrl = null; // the live pane's current page, tracked from `location` frames
 let currentBubble = null; // the assistant bubble currently streaming
 
@@ -76,6 +112,115 @@ let currentRect = null;         // last resolved viewport-CSS-px rect for the st
 function wsUrl(pathAndQuery) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return proto + "//" + location.host + pathAndQuery;
+}
+
+// --- view switcher: Workspace <-> Graph --------------------------------------
+// The Graph view is heavy (785KB of Cytoscape) and only needed on demand, so its
+// libs + controller (graph.js) are injected lazily on the first switch, memoized in
+// vendorPromise. Toggling views ONLY flips the `hidden` panes + the active tab — it
+// NEVER opens/closes chatWs/liveWs (selectHost owns the socket lifecycle).
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = () => resolve(src);
+    s.onerror = () => reject(new Error("failed to load " + src));
+    document.head.appendChild(s);
+  });
+}
+
+// Loaded SEQUENTIALLY: cytoscape core first, then the layout-base/cose-base deps, then
+// the fcose extension that registers itself against them, then our controller. A wrong
+// ORDER silently no-ops the fcose registration (the layout would fall back / throw), so
+// this list order is significant — do not parallelize it.
+const VENDOR_SCRIPTS = [
+  "/vendor/cytoscape.min.js",
+  "/vendor/dagre.min.js",
+  "/vendor/cytoscape-dagre.min.js",
+  "/vendor/layout-base.min.js",
+  "/vendor/cose-base.min.js",
+  "/vendor/cytoscape-fcose.min.js",
+  "/graph.js",
+];
+
+function loadVendorSequential() {
+  let chain = Promise.resolve();
+  for (const src of VENDOR_SCRIPTS) chain = chain.then(() => loadScript(src));
+  return chain;
+}
+
+// The Graph view's DOM lives in index.html and is DRIVEN by the lazily-loaded graph.js
+// (which resolves these by id). app.js only asserts the markup is present before the
+// hand-off; listing the ids here also keeps the app.js<->index.html id cross-check honest.
+const GRAPH_VIEW_IDS = ["graph-canvas", "graph-detail", "graph-search", "graph-status"];
+
+// The Explore view's DOM lives in index.html and is DRIVEN by explore.js (loaded eagerly
+// after this file). app.js only lists the ids here to keep the app.js<->index.html id
+// cross-check honest (the same discipline as GRAPH_VIEW_IDS).
+const EXPLORE_VIEW_IDS = ["explore-tab-search", "explore-search-input",
+  "explore-search-results", "explore-tab-forms", "explore-goal-input",
+  "explore-goal-result", "explore-forms-list", "explore-tab-content",
+  "explore-content-list"];
+
+// Three-way view switcher: Workspace (chat + live) | Graph (Cytoscape) | Explore (a
+// read-only browser over the cache). Toggling ONLY flips the `hidden` panes + the active
+// tab — it NEVER opens/closes chatWs/liveWs (selectHost owns the socket lifecycle).
+function setView(view) {
+  currentView = view;
+  const graph = view === "graph";
+  const explore = view === "explore";
+  const workspace = !graph && !explore;
+  if (panesEl) panesEl.hidden = !workspace;
+  if (graphViewEl) graphViewEl.hidden = !graph;
+  if (exploreViewEl) exploreViewEl.hidden = !explore;
+  if (tabWorkspaceEl) tabWorkspaceEl.classList.toggle("on", workspace);
+  if (tabGraphEl) tabGraphEl.classList.toggle("on", graph);
+  if (tabExploreEl) tabExploreEl.classList.toggle("on", explore);
+  if (graph) ensureGraphView();
+  if (explore) ensureExploreView();
+}
+
+// explore.js is eager (no vendor deps), so the controller is already present — just hand
+// it the selected host. Guarded in case the markup or the script is missing.
+function ensureExploreView() {
+  const status = el("explore-status");
+  const missing = EXPLORE_VIEW_IDS.filter((id) => !el(id));
+  if (missing.length) {
+    if (status) status.textContent = "explore markup missing: " + missing.join(", ");
+    return;
+  }
+  if (typeof openExploreView === "function") openExploreView(selectedHost);
+}
+
+async function ensureGraphView() {
+  const statusEl = el("graph-status");
+  const missing = GRAPH_VIEW_IDS.filter((id) => !el(id));
+  if (missing.length) {
+    if (statusEl) statusEl.textContent = "graph markup missing: " + missing.join(", ");
+    return;
+  }
+  if (statusEl && !statusEl.textContent) statusEl.textContent = "loading graph…";
+  if (!vendorPromise) vendorPromise = loadVendorSequential();
+  try {
+    await vendorPromise;
+    if (typeof openGraphView === "function") openGraphView(selectedHost);
+  } catch (err) {
+    // memoized failure would poison every retry — clear it so a later switch retries.
+    vendorPromise = null;
+    if (statusEl) {
+      statusEl.textContent = "Graph libraries failed to load — " +
+        (err && err.message ? err.message : "unknown error");
+    }
+  }
+}
+
+// graph.js keeps chat-input ownership here (app.js): its "Ask in chat" button calls
+// this to prefill the chat box without reaching into the chat socket itself.
+function prefillChat(text) {
+  if (!chatInputEl) return;
+  chatInputEl.value = text;
+  chatInputEl.focus();
 }
 
 // --- sidebar: list of crawled graphs -----------------------------------------
@@ -146,6 +291,22 @@ function buildHostRow(h) {
 async function selectHost(h) {
   const host = h.host;
   selectedHost = host;
+  // a host switch drops the prior host's session set — loadChatSessions repopulates it.
+  chatSessions = [];
+  activeSessionId = null;
+
+  // A host switch always returns to the Workspace view and tears down any prior
+  // graph render (destroyGraphView is defined in the lazily-loaded graph.js, so it may
+  // not exist yet). setView here only flips `hidden` — it does NOT touch the sockets,
+  // which the openChat/openLiveView calls below own.
+  setView("workspace");
+  if (typeof destroyGraphView === "function") destroyGraphView();
+  if (typeof destroyExploreView === "function") destroyExploreView();
+  // Stash the (cheap, index) graph_kind now; the fresh-summary .then refreshes it.
+  selectedGraphKind = h.summary ? h.summary.graph_kind : null;
+  // A host whose cache failed to load can't render a graph or be explored — disable both.
+  if (tabGraphEl) tabGraphEl.disabled = !!h.error;
+  if (tabExploreEl) tabExploreEl.disabled = !!h.error;
 
   // reflect selection in the sidebar.
   for (const row of hostsEl.children) row.classList.remove("selected");
@@ -167,10 +328,13 @@ async function selectHost(h) {
     const summary = await res.json();
     if (selectedHost === host && summary && !summary.status) {
       renderHostHeader(host, summary, null);
+      selectedGraphKind = summary.graph_kind;
     }
   } catch (err) { /* keep the index summary */ }
 
-  openChat(host);
+  // loadChatSessions lists (or mints) this host's chats, renders the chips, and opens
+  // the most-recent one on the chat socket (openChat owns the socket lifecycle).
+  await loadChatSessions(host);
   openLiveView(host);
 }
 
@@ -277,7 +441,7 @@ function finalizeBubble() {
   currentBubble = null;
 }
 
-function openChat(host) {
+function openChat(host, sessionId) {
   endTour();                         // drop any active tour on host switch
   if (chatWs) {
     try { chatWs.close(); } catch (e) { /* ignore */ }
@@ -288,7 +452,11 @@ function openChat(host) {
   chatSetEnabled(false);
   chatStatusEl.textContent = "connecting…";
 
-  const ws = new WebSocket(wsUrl("/ws/chat?host=" + encodeURIComponent(host)));
+  // The session id (when known) binds the socket to a persisted chat so its transcript
+  // is restored via the leading `session` frame; without it the server mints a new chat.
+  let q = "/ws/chat?host=" + encodeURIComponent(host);
+  if (sessionId) q += "&session=" + encodeURIComponent(sessionId);
+  const ws = new WebSocket(wsUrl(q));
   chatWs = ws;
 
   ws.onopen = () => {
@@ -310,6 +478,17 @@ function openChat(host) {
     let data;
     try { data = JSON.parse(ev.data); } catch (e) { return; }
     switch (data.type) {
+      case "session":
+        // leading bootstrap frame: bind to this session + replay its stored transcript.
+        activeSessionId = data.id;
+        highlightActiveChip();
+        currentBubble = null;
+        chatLogEl.textContent = "";
+        if (Array.isArray(data.transcript)) {
+          for (const entry of data.transcript) renderTranscriptEntry(entry);
+        }
+        maybeShowRestoreNote(data);
+        break;
       case "text":
         if (!currentBubble) { currentBubble = chatAddLine("msg-assistant", ""); currentBubble._md = ""; }
         currentBubble._md += (data.delta || "");
@@ -334,6 +513,7 @@ function openChat(host) {
         chatAddLine("msg-error", "chat unavailable: " +
           (data.reason || data.status || "unknown") +
           (data.detail ? " — " + data.detail : ""));
+        refreshChatSessions();          // an error can still have auto-titled the chat
         break;
       case "tour":
         finalizeBubble();
@@ -341,6 +521,9 @@ function openChat(host) {
         break;
       case "done":
         finalizeBubble();
+        // a completed turn may have auto-titled the chat + bumped its recency — refresh
+        // the chips (fire-and-forget) without touching the live socket.
+        refreshChatSessions();
         break;
       default:
         break;
@@ -385,6 +568,251 @@ if (chatFormEl) {
     chatInputEl.value = "";
   });
 }
+
+// --- chat sessions (chips: one persisted chat each; "+ New" mints another) ---
+// The chip bar lists /api/hosts/{host}/sessions. Clicking a chip reconnects the chat
+// socket to that session (its transcript is restored via the leading `session` frame);
+// "+ New" POSTs a session; dbl-click a title renames (PATCH); the trailing × confirms
+// then DELETEs. All server strings go through textContent (chips) or renderMarkdown
+// (restored assistant text, which escapes first) — never a raw-innerHTML path.
+
+function sessionUrl(host, id) {
+  let u = "/api/hosts/" + encodeURIComponent(host) + "/sessions";
+  if (id) u += "/" + encodeURIComponent(id);
+  return u;
+}
+
+// List (or, when a host has none yet, mint) this host's chats, render the chips, and
+// open the most-recent one. Guards against a host switch racing the awaits.
+async function loadChatSessions(host) {
+  activeSessionId = null;
+  chatSessions = [];
+  let sessions = [];
+  try {
+    const res = await fetch(sessionUrl(host));
+    const data = await res.json();
+    sessions = data.sessions || [];
+  } catch (err) { sessions = []; }
+  if (sessions.length === 0) {
+    try {
+      const res = await fetch(sessionUrl(host), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const created = await res.json();
+      if (created && created.id) sessions = [created];
+    } catch (err) { sessions = []; }
+  }
+  if (selectedHost !== host) return;   // a newer host switch already took over
+  chatSessions = sessions;
+  renderChatChips();
+  if (sessions.length) openChat(host, sessions[0].id);   // most recent (updated_at desc)
+}
+
+// Fire-and-forget re-list to keep chip titles + recency order fresh WITHOUT reconnecting
+// the socket (called after each done/error frame, and after rename/delete of a non-active
+// chat). Never disturbs the active socket.
+async function refreshChatSessions() {
+  const host = selectedHost;
+  if (!host) return;
+  try {
+    const res = await fetch(sessionUrl(host));
+    const data = await res.json();
+    if (selectedHost !== host) return;
+    chatSessions = data.sessions || [];
+    renderChatChips();
+  } catch (err) { /* keep the current chips */ }
+}
+
+function renderChatChips() {
+  if (!chatSessionListEl) return;
+  chatSessionListEl.textContent = "";
+  for (const s of chatSessions) chatSessionListEl.appendChild(buildSessionChip(s));
+  if (chatSessionsEl) chatSessionsEl.hidden = chatSessions.length === 0;
+}
+
+function highlightActiveChip() {
+  if (!chatSessionListEl) return;
+  for (const chip of chatSessionListEl.children) {
+    chip.classList.toggle("on", chip.dataset.sessionId === activeSessionId);
+  }
+}
+
+function buildSessionChip(s) {
+  const chip = document.createElement("div");
+  chip.className = "chat-session-chip" + (s.id === activeSessionId ? " on" : "");
+  chip.dataset.sessionId = s.id;
+  chip.setAttribute("role", "tab");
+
+  const title = document.createElement("span");
+  title.className = "chat-session-title";
+  title.textContent = s.title || "Untitled chat";   // server string -> textContent
+  chip.appendChild(title);
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "chat-session-del";
+  del.textContent = "×";                             // fixed glyph, not server data
+  del.title = "Delete chat";
+  chip.appendChild(del);
+
+  // click a different chip -> reconnect the socket to it (openChat closes the old one).
+  chip.addEventListener("click", (e) => {
+    if (e.target === del) return;
+    if (chip.querySelector(".chat-session-rename")) return;   // mid-rename
+    if (s.id === activeSessionId) return;
+    openChat(selectedHost, s.id);
+  });
+
+  // dbl-click the title -> inline rename input.
+  title.addEventListener("dblclick", (e) => {
+    e.stopPropagation();
+    beginRenameChip(chip, s);
+  });
+
+  // × -> first click arms (.confirm, auto-disarms ~2s); a second click deletes.
+  del.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (del.classList.contains("confirm")) {
+      deleteSession(s.id);
+    } else {
+      del.classList.add("confirm");
+      del.textContent = "delete?";
+      setTimeout(() => {
+        del.classList.remove("confirm");
+        del.textContent = "×";
+      }, 2000);
+    }
+  });
+
+  return chip;
+}
+
+function beginRenameChip(chip, s) {
+  const titleEl = chip.querySelector(".chat-session-title");
+  if (!titleEl) return;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "chat-session-rename";
+  input.value = s.title || "";
+  chip.replaceChild(input, titleEl);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const commit = (save) => {
+    if (settled) return;
+    settled = true;
+    const next = input.value.trim();
+    if (save && next && next !== (s.title || "")) {
+      renameSession(s.id, next);       // renameSession re-renders the chips
+    } else {
+      renderChatChips();               // restore the chip unchanged
+      highlightActiveChip();
+    }
+  };
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("dblclick", (e) => e.stopPropagation());
+  input.addEventListener("blur", () => commit(true));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(true); }
+    else if (e.key === "Escape") { e.preventDefault(); commit(false); }
+  });
+}
+
+async function renameSession(id, title) {
+  const host = selectedHost;
+  if (!host) return;
+  try {
+    await fetch(sessionUrl(host, id), {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+  } catch (err) { /* ignore — the refresh below reflects whatever stuck */ }
+  await refreshChatSessions();
+  highlightActiveChip();
+}
+
+async function deleteSession(id) {
+  const host = selectedHost;
+  if (!host) return;
+  try {
+    await fetch(sessionUrl(host, id), { method: "DELETE" });
+  } catch (err) { /* ignore */ }
+  if (id === activeSessionId) {
+    // deleting the open chat: reload the set (loadChatSessions auto-creates + opens a
+    // replacement when none are left) so the pane never ends up bound to nothing.
+    activeSessionId = null;
+    await loadChatSessions(host);
+  } else {
+    await refreshChatSessions();
+    highlightActiveChip();
+  }
+}
+
+async function newChat() {
+  const host = selectedHost;
+  if (!host) return;
+  try {
+    const res = await fetch(sessionUrl(host), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const created = await res.json();
+    if (created && created.id) {
+      await refreshChatSessions();
+      openChat(host, created.id);
+    }
+  } catch (err) { /* ignore */ }
+}
+
+// Replay ONE stored transcript entry into the chat log. Reuses the SAME safe renderers
+// the live stream uses — chatAddLine (textContent), renderMarkdown (escapes first), and
+// addTourOffer — so restored (untrusted) content never hits a raw-innerHTML path.
+function renderTranscriptEntry(entry) {
+  if (!entry || typeof entry !== "object") return;
+  switch (entry.type) {
+    case "user":
+      chatAddLine("msg-user", entry.text || "");
+      break;
+    case "text": {
+      const bubble = chatAddLine("msg-assistant", "");
+      bubble.innerHTML = renderMarkdown(entry.text || "");   // renderMarkdown escapes raw
+      chatLogEl.scrollTop = chatLogEl.scrollHeight;
+      break;
+    }
+    case "tool_use":
+      chatAddLine("msg-tool", "→ " + (entry.name || "tool"));
+      break;
+    case "tool_result":
+      chatAddLine("msg-tool", "✓ " + (entry.name || "tool") + " · " +
+        (entry.status || "?"));
+      break;
+    case "tour":
+      addTourOffer(entry.data);
+      break;
+    case "error":
+      chatAddLine("msg-error", "chat unavailable: " +
+        (entry.reason || entry.status || "unknown") +
+        (entry.detail ? " — " + entry.detail : ""));
+      break;
+    default:
+      break;
+  }
+}
+
+// The Claude Code backend restores the transcript for DISPLAY only (v1) — it won't recall
+// earlier turns yet, so flag a restored view so the user isn't surprised.
+function maybeShowRestoreNote(data) {
+  if (!chatStatusEl) return;
+  if (data.backend === "claude_code" && Array.isArray(data.transcript) &&
+      data.transcript.length > 0) {
+    chatStatusEl.textContent =
+      "restored view — this backend won't recall earlier turns yet";
+  }
+}
+
+if (chatSessionNewEl) chatSessionNewEl.addEventListener("click", newChat);
 
 // --- live browser pane -------------------------------------------------------
 function openLiveView(host) {
@@ -682,11 +1110,16 @@ function closeVault() {
   if (vaultModalEl) vaultModalEl.hidden = true;
 }
 
+if (tabWorkspaceEl) tabWorkspaceEl.addEventListener("click", () => setView("workspace"));
+if (tabGraphEl) tabGraphEl.addEventListener("click", () => setView("graph"));
+if (tabExploreEl) tabExploreEl.addEventListener("click", () => setView("explore"));
+
 if (vaultOpenEl) vaultOpenEl.addEventListener("click", openVault);
 if (vaultCloseEl) vaultCloseEl.addEventListener("click", closeVault);
 if (vaultBackdropEl) vaultBackdropEl.addEventListener("click", closeVault);
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && vaultModalEl && !vaultModalEl.hidden) closeVault();
+  if (e.key === "Escape" && cmdkModalEl && !cmdkModalEl.hidden) closeCmdk();
 });
 
 async function loadVaultStatus() {
@@ -804,6 +1237,305 @@ if (credFormEl) {
     }
     loadCredentials();
   });
+}
+
+// --- new crawl ---------------------------------------------------------------
+// Enter a URL -> open /ws/crawl, stream progress/log lines into #crawl-progress,
+// and on a terminal frame re-enable the form + auto-select the new host so its graph
+// opens immediately. The feature is off by default (a `crawl_unavailable`/`disabled`
+// frame is shown gracefully). textContent only for every server-sourced string.
+
+function crawlAddLine(text) {
+  if (!crawlProgressEl) return;
+  crawlProgressEl.hidden = false;
+  const div = document.createElement("div");
+  div.className = "crawl-line";
+  div.textContent = text;                    // textContent — never innerHTML
+  crawlProgressEl.appendChild(div);
+  crawlProgressEl.scrollTop = crawlProgressEl.scrollHeight;
+}
+
+function crawlSetRunning(on) {
+  if (crawlUrlEl) crawlUrlEl.disabled = on;
+  if (crawlSubmitEl) crawlSubmitEl.disabled = on;
+  if (crawlMaxStatesEl) crawlMaxStatesEl.disabled = on;
+  if (crawlMaxDepthEl) crawlMaxDepthEl.disabled = on;
+  if (crawlCancelEl) crawlCancelEl.hidden = !on;
+}
+
+// Re-fetch /api/hosts, find the freshly-promoted host, and open it via selectHost so
+// its Graph view + chat are immediately usable.
+async function autoSelectHost(host) {
+  try {
+    const res = await fetch("/api/hosts");
+    const data = await res.json();
+    const entry = (data.hosts || []).find((h) => h.host === host);
+    if (entry) selectHost(entry);
+  } catch (err) { /* the sidebar refresh already ran; ignore */ }
+}
+
+function cancelCrawl() {
+  if (crawlWs && crawlWs.readyState === WebSocket.OPEN) {
+    crawlWs.send(JSON.stringify({ type: "cancel" }));
+  }
+}
+
+function startCrawl(url, opts) {
+  if (crawlWs) { try { crawlWs.close(); } catch (e) { /* ignore */ } crawlWs = null; }
+  if (crawlProgressEl) crawlProgressEl.textContent = "";
+  crawlSetRunning(true);
+  crawlAddLine("connecting…");
+
+  let q = "/ws/crawl?url=" + encodeURIComponent(url);
+  if (opts && opts.maxStates) q += "&max_states=" + encodeURIComponent(opts.maxStates);
+  if (opts && opts.maxDepth) q += "&max_depth=" + encodeURIComponent(opts.maxDepth);
+
+  const ws = new WebSocket(wsUrl(q));
+  crawlWs = ws;
+  let doneHost = null;
+
+  ws.onmessage = (ev) => {
+    if (crawlWs !== ws) return;
+    let data;
+    try { data = JSON.parse(ev.data); } catch (e) { return; }
+    switch (data.type) {
+      case "status":
+        crawlAddLine("starting crawl of " + (data.host || "") + "…");
+        break;
+      case "progress":
+        crawlAddLine("· " + (data.states || 0) + " states / " +
+          (data.visits || 0) + " visits · depth " + (data.depth || 0) +
+          " · " + (data.url || ""));
+        break;
+      case "log":
+        crawlAddLine(data.line || "");
+        break;
+      case "done":
+        doneHost = data.host || null;
+        crawlAddLine("✓ done: " + (data.states || 0) + " states, " +
+          (data.edges || 0) + " edges, " + (data.triggers || 0) + " triggers" +
+          (data.complete ? "" : " (partial: " + (data.stopped || "stopped") + ")"));
+        break;
+      case "cancelled":
+        doneHost = data.promoted ? (data.host || null) : null;
+        crawlAddLine("cancelled" + (data.promoted ?
+          " — saved partial graph (" + (data.states || 0) + " states)" :
+          " (nothing saved)"));
+        break;
+      case "error":
+        if (data.status === "crawl_unavailable" && data.reason === "disabled") {
+          crawlAddLine("live crawl is disabled on this server.");
+        } else {
+          crawlAddLine("crawl failed: " + (data.reason || data.status || "unknown") +
+            (data.detail ? " — " + data.detail : ""));
+        }
+        break;
+      default:
+        break;
+    }
+  };
+  ws.onclose = () => {
+    if (crawlWs !== ws) return;
+    crawlWs = null;
+    crawlSetRunning(false);
+    loadHosts();
+    if (doneHost) autoSelectHost(doneHost);
+  };
+  ws.onerror = () => {
+    if (crawlWs === ws) crawlAddLine("crawl connection error.");
+  };
+}
+
+if (crawlFormEl) {
+  crawlFormEl.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const url = crawlUrlEl ? crawlUrlEl.value.trim() : "";
+    if (!url) { crawlAddLine("enter a URL first."); return; }
+    startCrawl(url, {
+      maxStates: crawlMaxStatesEl ? crawlMaxStatesEl.value.trim() : "",
+      maxDepth: crawlMaxDepthEl ? crawlMaxDepthEl.value.trim() : "",
+    });
+  });
+}
+if (crawlCancelEl) crawlCancelEl.addEventListener("click", cancelCrawl);
+
+// --- command palette (Ctrl/Cmd+K) --------------------------------------------
+// A keyboard launcher over EXISTING state + functions — it opens NO new fetches. It
+// mirrors openVault/closeVault for the modal lifecycle, builds its action list from the
+// current view tabs + sidebar rows, and runs each action through the same globals the UI
+// already exposes (setView / newChat / openVault / setExploreSubtab). Every row is built
+// with createElement + textContent (host names are untrusted crawled data).
+
+let cmdkItems = [];   // the currently rendered (filtered) action list
+let cmdkIndex = 0;    // index of the highlighted row
+
+function openCmdk() {
+  if (!cmdkModalEl) return;
+  cmdkModalEl.hidden = false;
+  if (cmdkInputEl) cmdkInputEl.value = "";
+  cmdkIndex = 0;
+  renderCmdk();
+  if (cmdkInputEl) cmdkInputEl.focus();
+}
+
+function closeCmdk() {
+  if (cmdkModalEl) cmdkModalEl.hidden = true;
+}
+
+// Build the candidate actions from live state. `disabled` rows still render (greyed with a
+// hint) so the palette explains WHY an action is unavailable instead of hiding it.
+function cmdkActions() {
+  const hasHost = !!selectedHost;
+  const graphOff = !!(tabGraphEl && tabGraphEl.disabled);
+  const exploreOff = !!(tabExploreEl && tabExploreEl.disabled);
+  const actions = [
+    { label: "Go to Workspace", run: () => setView("workspace") },
+    { label: "Go to Graph", disabled: graphOff,
+      hint: graphOff ? "unavailable for this host" : "", run: () => setView("graph") },
+    { label: "Go to Explore", disabled: exploreOff,
+      hint: exploreOff ? "unavailable for this host" : "", run: () => setView("explore") },
+    { label: "New chat", disabled: !hasHost, hint: hasHost ? "" : "pick a host first",
+      run: () => { if (typeof newChat === "function") newChat(); } },
+    // The sidebar crawl form works with NO host selected (it's how you crawl your first
+    // host), so this action is never host-gated — only the server's opt-in gate applies.
+    { label: "New crawl", run: () => { if (crawlUrlEl) crawlUrlEl.focus(); } },
+    { label: "Manage credentials", run: () => openVault() },
+  ];
+  // dynamic "Switch to <host>" rows — read each sidebar row's label + replay its click.
+  if (hostsEl) {
+    for (const row of hostsEl.children) {
+      const labelEl = row.querySelector(".host-label");
+      if (!labelEl || !labelEl.textContent) continue;
+      const name = labelEl.textContent;          // untrusted — only ever used via textContent
+      actions.push({ label: "Switch to " + name, run: () => row.click() });
+    }
+  }
+  return actions;
+}
+
+function submitExploreSearch(query) {
+  setView("explore");
+  if (typeof setExploreSubtab === "function") setExploreSubtab("search");
+  const input = el("explore-search-input");
+  if (input) input.value = query;
+  const form = el("explore-search-form");
+  if (form) {
+    if (typeof form.requestSubmit === "function") form.requestSubmit();
+    else form.dispatchEvent(new Event("submit", { cancelable: true }));
+  }
+}
+
+function renderCmdk() {
+  if (!cmdkResultsEl) return;
+  const q = (cmdkInputEl ? cmdkInputEl.value : "").trim();
+  const ql = q.toLowerCase();
+  let items = cmdkActions();
+  if (ql) items = items.filter((a) => a.label.toLowerCase().includes(ql));
+  // free-text fallback: search captured content for the typed query.
+  if (q) {
+    const hasHost = !!selectedHost;
+    items.push({
+      label: "Search content for “" + q + "”",
+      disabled: !hasHost, hint: hasHost ? "" : "pick a host first",
+      run: () => submitExploreSearch(q),
+    });
+  }
+  cmdkItems = items;
+  if (cmdkIndex >= items.length) cmdkIndex = Math.max(0, items.length - 1);
+
+  cmdkResultsEl.textContent = "";
+  items.forEach((a, i) => {
+    const li = document.createElement("li");
+    li.className = "cmdk-item" + (i === cmdkIndex ? " active" : "") +
+      (a.disabled ? " disabled" : "");
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", i === cmdkIndex ? "true" : "false");
+    const label = document.createElement("span");
+    label.className = "cmdk-label";
+    label.textContent = a.label;                 // includes untrusted host name — textContent
+    li.appendChild(label);
+    if (a.hint) {
+      const hint = document.createElement("span");
+      hint.className = "cmdk-hint";
+      hint.textContent = a.hint;
+      li.appendChild(hint);
+    }
+    li.addEventListener("mouseenter", () => { cmdkIndex = i; highlightCmdk(); });
+    li.addEventListener("click", () => runCmdkItem(a));
+    cmdkResultsEl.appendChild(li);
+  });
+}
+
+function highlightCmdk() {
+  if (!cmdkResultsEl) return;
+  const rows = cmdkResultsEl.children;
+  for (let i = 0; i < rows.length; i++) {
+    const on = i === cmdkIndex;
+    rows[i].classList.toggle("active", on);
+    rows[i].setAttribute("aria-selected", on ? "true" : "false");
+    if (on && rows[i].scrollIntoView) rows[i].scrollIntoView({ block: "nearest" });
+  }
+}
+
+function runCmdkItem(item) {
+  if (!item || item.disabled) return;
+  closeCmdk();
+  try { item.run(); } catch (err) { /* an action's own failure never breaks the palette */ }
+}
+
+if (cmdkOpenEl) cmdkOpenEl.addEventListener("click", openCmdk);
+if (cmdkBackdropEl) cmdkBackdropEl.addEventListener("click", closeCmdk);
+if (cmdkInputEl) {
+  cmdkInputEl.addEventListener("input", () => { cmdkIndex = 0; renderCmdk(); });
+  cmdkInputEl.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (cmdkItems.length) { cmdkIndex = (cmdkIndex + 1) % cmdkItems.length; highlightCmdk(); }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (cmdkItems.length) {
+        cmdkIndex = (cmdkIndex - 1 + cmdkItems.length) % cmdkItems.length;
+        highlightCmdk();
+      }
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      runCmdkItem(cmdkItems[cmdkIndex]);
+    }
+  });
+}
+// The global Ctrl/Cmd+K shortcut — works even while a chat/crawl input is focused.
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    openCmdk();
+  }
+});
+
+// --- light/dark theme toggle -------------------------------------------------
+// The saved theme is applied pre-paint by an inline <head> script (no flash). Here we
+// only wire the topbar button + keep its icon in sync. No stored choice => follow the
+// OS preference (the CSS media query handles that); the button then flips to an explicit
+// data-theme and persists it.
+function effectiveTheme() {
+  const explicit = document.documentElement.getAttribute("data-theme");
+  if (explicit === "dark" || explicit === "light") return explicit;
+  return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches)
+    ? "dark" : "light";
+}
+function updateThemeButton(theme) {
+  if (!themeToggleEl) return;
+  themeToggleEl.textContent = theme === "dark" ? "☀️" : "🌙";  // shows what you'll switch TO
+  themeToggleEl.title = "Switch to " + (theme === "dark" ? "light" : "dark") + " theme";
+}
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  try { localStorage.setItem("pwg-theme", theme); } catch (e) { /* private mode */ }
+  updateThemeButton(theme);
+}
+if (themeToggleEl) {
+  updateThemeButton(effectiveTheme());
+  themeToggleEl.addEventListener("click", () =>
+    applyTheme(effectiveTheme() === "dark" ? "light" : "dark"));
 }
 
 // --- boot --------------------------------------------------------------------

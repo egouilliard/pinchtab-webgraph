@@ -243,6 +243,109 @@ def _extract_tour(payload):
             "form": r.get("form"), "opens_at": r.get("opens_at")}
 
 
+# --- session persistence: wire-message (de)serialization ----------------------
+#
+# Phase 4 persists the API backend's ``ChatState.messages`` to disk so a reconnect can
+# RESUME the conversation (the model recalls prior turns). These three pure functions are
+# the seam chat_store/chat_backend use; they are the ONLY change to this module and touch
+# nothing in the agent loop.
+
+# Cap on any single serialized text / tool_result string, so one runaway tool payload
+# can't bloat a session file unboundedly. Long strings are truncated with a marker.
+MAX_WIRE_TEXT_CHARS = 20000
+
+
+def _truncate(s):
+    if isinstance(s, str) and len(s) > MAX_WIRE_TEXT_CHARS:
+        return s[:MAX_WIRE_TEXT_CHARS] + "…[truncated]"
+    return s
+
+
+def _serialize_block(block):
+    """One content block -> a JSON-safe dict. anthropic 0.85.0 blocks expose
+    ``.model_dump(mode="json")``; a plain dict passes through. Long text/tool_result
+    strings are truncated."""
+    dump = getattr(block, "model_dump", None)
+    if callable(dump):
+        d = dump(mode="json")
+    elif isinstance(block, dict):
+        d = dict(block)
+    else:
+        d = block
+    if isinstance(d, dict):
+        if isinstance(d.get("text"), str):
+            d["text"] = _truncate(d["text"])
+        if isinstance(d.get("content"), str):
+            d["content"] = _truncate(d["content"])
+    return d
+
+
+def serialize_messages(messages):
+    """Serialize a ChatState.messages list to a JSON-safe, trimmed wire list.
+
+    Each message's ``content`` is either a plain str (a genuine user turn) or a list of
+    content blocks (assistant tool_use turns, tool_result turns) — the latter are mapped
+    through ``.model_dump(mode="json")`` (or passed through if already dicts). The whole
+    list is then trimmed to the trailing turns via trim_wire_messages so a long session
+    never grows unboundedly.
+    """
+    out = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if isinstance(content, list):
+            content = [_serialize_block(b) for b in content]
+        elif isinstance(content, str):
+            content = _truncate(content)
+        out.append({"role": role, "content": content})
+    # A trailing genuine user turn (role=user + plain-str content) with no assistant reply
+    # after it is error-rollback residue (run_conversation_turn snapshots BEFORE the user
+    # turn and restores on a mid-turn exception, but the caught path can still leave the
+    # user message). Persisting it would make the NEXT resumed send two consecutive user
+    # turns, which the Anthropic API rejects — drop it so a resumed session stays valid.
+    if out and _is_new_user_turn(out[-1]):
+        out.pop()
+    return trim_wire_messages(out)
+
+
+def deserialize_messages(data):
+    """Defensive identity: accept a persisted wire list back as ChatState.messages.
+
+    The wire list is already the exact ``{role, content}`` shape the Anthropic API and the
+    agent loop consume, so this is a validated pass-through — a non-list, or a list with a
+    non-dict element, degrades to an empty history rather than corrupting the next turn.
+    """
+    if not isinstance(data, list):
+        return []
+    return [m for m in data if isinstance(m, dict) and "role" in m]
+
+
+def _is_new_user_turn(msg):
+    """True for a GENUINE new user turn — role=="user" AND content is a plain str.
+
+    A tool_result turn is ALSO role=="user" but carries a LIST of tool_result blocks; it
+    must never be treated as a conversation boundary (splitting there would orphan the
+    assistant tool_use turn it answers).
+    """
+    return msg.get("role") == "user" and isinstance(msg.get("content"), str)
+
+
+def trim_wire_messages(messages, max_turns=100):
+    """Keep only the trailing ``max_turns`` genuine user turns and everything after them.
+
+    The history always resumes on a valid user-turn boundary — never on a dangling
+    assistant tool_use turn (which the real API rejects on the next message). We find the
+    index of the (max_turns)-th-from-last genuine user turn and slice from there; a
+    tool_result "user" turn is NOT a boundary, so a tool_use/tool_result pair is never
+    split across the cut.
+    """
+    user_idxs = [i for i, m in enumerate(messages) if _is_new_user_turn(m)]
+    if len(user_idxs) <= max_turns:
+        return messages
+    cut = user_idxs[-max_turns]
+    return messages[cut:]
+
+
 @dataclass
 class ChatState:
     """Injected agent context — the anthropic client + mcp session live HERE, not global."""

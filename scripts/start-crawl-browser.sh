@@ -3,14 +3,15 @@
 # Separate config + profile from your daemon (9867) and your monday attach.
 # Headless, ad/image/media-blocked, JS-eval enabled, no auth (localhost only).
 #
-#   ./start-crawl-browser.sh          # run in its own terminal; leave it open
-#   python3 crawl.py https://site.com --server http://localhost:9871
+#   scripts/start-crawl-browser.sh    # run in its own terminal; leave it open
+#   scripts/run-crawl.sh https://site.com
 #
 # Stop it with Ctrl-C in this terminal (or: pkill -f 'pinchtab bridge').
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PINCHTAB_CONFIG="$DIR/crawl-config.json"
-mkdir -p "$DIR/.instance/state" "$DIR/.instance/profiles"
+ROOT="$(cd "$DIR/.." && pwd)"
+export PINCHTAB_CONFIG="$ROOT/crawl-config.json"
+mkdir -p "$ROOT/.instance/state" "$ROOT/.instance/profiles"
 echo "Starting isolated crawl browser on http://localhost:9871"
 echo "Config: $PINCHTAB_CONFIG"
 exec pinchtab bridge --engine chrome

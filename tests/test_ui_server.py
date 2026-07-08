@@ -93,6 +93,62 @@ def test_forms(populated_cache_home):
     assert {f["label"] for f in body["forms"]} == {"Create Role", "Add Report", "Add Widget"}
 
 
+# --- content (list + search) -------------------------------------------------
+
+def test_content(populated_cache_home):
+    r = client.get("/api/hosts/%s/content" % HOST)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    labels = {v["view_label"] for v in body["views"]}
+    assert "Team" in labels and "Reports" in labels
+    team = next(v for v in body["views"] if v["view_label"] == "Team")
+    assert team["collections"][0]["kind"] == "list"
+    assert team["collections"][0]["count"] == 1
+
+
+def test_content_empty(isolated_cache_home):
+    # A graph whose states carry no data collections resolves to status "empty".
+    from pathlib import Path
+    import json as _json
+    from pinchtab_webgraph import cache_store
+    fixtures = Path(__file__).parent / "fixtures"
+    graph = _json.loads((fixtures / "sample_interaction_graph.json").read_text())
+    for s in graph["states"]:
+        s.pop("collections", None)
+    cache_store.atomic_write("nocontent.test", graph)
+    r = client.get("/api/hosts/nocontent.test/content")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "empty"
+    assert body["views"] == []
+
+
+def test_content_search_ok(populated_cache_home):
+    r = client.get("/api/hosts/%s/content/search" % HOST, params={"text": "Alice"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["total_matches"] == 1
+    assert body["views_matched"] == 1
+    view = body["views"][0]
+    assert view["view_label"] == "Team"
+    assert view["reachable"] is True
+    assert view["distance_clicks"] == 1
+    assert view["items"][0]["text"] == "Alice Martin"
+    assert view["truncated"] is False
+
+
+def test_content_search_no_match(populated_cache_home):
+    r = client.get("/api/hosts/%s/content/search" % HOST,
+                   params={"text": "zzzznomatch"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "no_match"
+    assert body["total_matches"] == 0
+    assert body["views"] == []
+
+
 # --- howto -------------------------------------------------------------------
 
 def test_howto_ok(populated_cache_home):
@@ -317,6 +373,125 @@ def test_ws_screencast_locate_null_rect_when_not_found(monkeypatch):
         assert located == {"type": "located", "stepId": "s2", "rect": None}
 
 
+# --- chat sessions: REST CRUD + WS bootstrap / restore -----------------------
+#
+# The session store is exercised against an isolated home (PINCHTAB_WEBGRAPH_HOME -> a
+# tmp dir) so no test touches a real ~/.pinchtab-webgraph. The WS restore test
+# monkeypatches open_chat_session so it needs no ANTHROPIC key / MCP subprocess — the
+# route's own load + bootstrap-frame logic is what's under test.
+
+from types import SimpleNamespace  # noqa: E402
+
+from pinchtab_webgraph.ui import chat_store  # noqa: E402
+
+SESS_HOST = "sess.example.com"
+
+
+def test_sessions_crud_round_trip(isolated_cache_home):
+    # empty to start
+    r = client.get("/api/hosts/%s/sessions" % SESS_HOST)
+    assert r.status_code == 200
+    assert r.json()["sessions"] == []
+
+    # create
+    r = client.post("/api/hosts/%s/sessions" % SESS_HOST, json={"title": "my chat"})
+    assert r.status_code == 200
+    created = r.json()
+    sid = created["id"]
+    assert created["title"] == "my chat"
+    assert created["host"] == SESS_HOST
+    assert "transcript" not in created  # summary only
+
+    # list shows it
+    r = client.get("/api/hosts/%s/sessions" % SESS_HOST)
+    assert sid in {s["id"] for s in r.json()["sessions"]}
+
+    # get the full record — WITHOUT the resume-only internals
+    r = client.get("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == sid
+    assert "transcript" in body
+    assert "wire_messages" not in body and "sdk_session_id" not in body
+
+    # rename -> summary reflects it
+    r = client.patch("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid),
+                     json={"title": "renamed"})
+    assert r.status_code == 200
+    assert r.json()["title"] == "renamed"
+
+    # delete -> deleted True, then gone (404), then idempotent False
+    r = client.delete("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid))
+    assert r.status_code == 200 and r.json()["deleted"] is True
+    r = client.get("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid))
+    assert r.status_code == 404 and r.json()["status"] == "session_not_found"
+    r = client.delete("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid))
+    assert r.status_code == 200 and r.json()["deleted"] is False
+
+
+def test_sessions_too_many_returns_429(isolated_cache_home):
+    for _ in range(chat_store.MAX_SESSIONS_PER_HOST):
+        assert client.post("/api/hosts/%s/sessions" % SESS_HOST).status_code == 200
+    r = client.post("/api/hosts/%s/sessions" % SESS_HOST)
+    assert r.status_code == 429
+    body = r.json()
+    assert body["status"] == "too_many_sessions"
+    assert body["max"] == chat_store.MAX_SESSIONS_PER_HOST
+
+
+def test_session_not_found_on_get_and_patch(isolated_cache_home):
+    sid = "a" * 32  # a valid-shaped but non-existent id
+    r = client.get("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid))
+    assert r.status_code == 404 and r.json()["status"] == "session_not_found"
+    r = client.patch("/api/hosts/%s/sessions/%s" % (SESS_HOST, sid), json={"title": "x"})
+    assert r.status_code == 404 and r.json()["status"] == "session_not_found"
+
+
+def test_invalid_session_id_on_get(isolated_cache_home):
+    r = client.get("/api/hosts/%s/sessions/%s" % (SESS_HOST, "NOT-HEX"))
+    assert r.status_code == 400 and r.json()["status"] == "invalid_session"
+
+
+def test_invalid_session_id_on_ws(isolated_cache_home):
+    with client.websocket_connect(
+            "/ws/chat?host=%s&session=%s" % (SESS_HOST, "NOT-HEX")) as ws:
+        frame = ws.receive_json()
+        assert frame["type"] == "error"
+        assert frame["status"] == "invalid_session"
+
+
+def test_ws_chat_restores_transcript_on_bootstrap(isolated_cache_home, monkeypatch):
+    # Pre-seed a session with a transcript, then connect with ?session=ID and assert the
+    # leading bootstrap `session` frame carries that transcript back verbatim.
+    rec = chat_store.create(SESS_HOST, backend="api", title="restored chat")
+    rec["transcript"] = [
+        {"role": "user", "type": "user", "text": "how do I add a role?", "ts": "t"},
+        {"role": "assistant", "type": "text", "text": "Go to Team.", "ts": "t"}]
+    chat_store.save(rec)
+    sid = rec["id"]
+
+    @asynccontextmanager
+    async def fake_open(host, *, backend_name=None, record=None):
+        # the route loads the record from disk and passes it in; echo it back.
+        yield SimpleNamespace(record=record)
+
+    monkeypatch.setattr(ui_server.chat_backend, "open_chat_session", fake_open)
+
+    with client.websocket_connect(
+            "/ws/chat?host=%s&session=%s" % (SESS_HOST, sid)) as ws:
+        boot = ws.receive_json()
+        assert boot["type"] == "session"
+        assert boot["id"] == sid
+        assert boot["title"] == "restored chat"
+        texts = [e.get("text") for e in boot["transcript"]]
+        assert "how do I add a role?" in texts and "Go to Team." in texts
+
+
+def test_session_routes_reject_invalid_host(isolated_cache_home):
+    r = client.get("/api/hosts/%s/sessions" % "bad%20host")
+    assert r.status_code == 400 and r.json()["status"] == "invalid_host"
+
+
 # --- SPA static page: index.html <-> app.js element-id contract --------------
 #
 # The SPA is vanilla HTML/JS with no build step, so nothing enforces that the IDs
@@ -330,6 +505,15 @@ def test_ws_screencast_locate_null_rect_when_not_found(monkeypatch):
 SPA_IDS = [
     "caches-dir", "hosts",                        # sidebar: crawled-graphs list
     "host-header", "host-name", "host-kind", "host-counts", "panes",  # host header
+    "view-tabs", "tab-workspace", "tab-graph", "tab-explore",         # view switcher
+    "graph-view", "graph-canvas", "graph-detail", "graph-search", "graph-status",  # graph view
+    "explore-view", "explore-tab-search", "explore-search-input",     # explore: search
+    "explore-search-results",
+    "explore-tab-forms", "explore-goal-input", "explore-goal-result", # explore: forms
+    "explore-forms-list",
+    "explore-tab-content", "explore-content-list",                    # explore: content
+    "cmdk-modal", "cmdk-open", "cmdk-input", "cmdk-results",          # command palette
+    "theme-toggle",                                                   # light/dark toggle
     "chat-form", "chat-input", "chat-log", "chat-status",             # chat pane
     "live-view", "live-status",                                       # live pane
     "vault-modal", "vault-open", "vault-close", "vault-status",       # vault modal
@@ -353,3 +537,92 @@ def test_app_js_references_the_same_ids():
     # The controller resolves elements by id string literal; each SPA id must appear.
     for _id in SPA_IDS:
         assert ('"%s"' % _id) in js, "app.js never references id=%r" % _id
+
+
+# --- Phase 2 graph view: /vendor mount, lazy graph.js, adapter contract ------
+#
+# The Graph view reuses the SAME 6 vendored Cytoscape libs crawl.py inlines, served from
+# a NEW /vendor StaticFiles mount registered BEFORE the catch-all "/" mount (else "/"
+# would shadow it). graph.js is injected lazily by app.js (never an eager <script>).
+
+def test_vendor_mounted_all_six_files():
+    from pinchtab_webgraph import crawl
+    for name in crawl._VENDOR_FILES:
+        r = client.get("/vendor/%s" % name)
+        assert r.status_code == 200, "missing /vendor/%s" % name
+        assert len(r.text) > 3000, "/vendor/%s looks truncated" % name
+
+
+def test_vendor_path_traversal_rejected():
+    # A traversal attempt out of the vendor dir must never resolve to server.py (or any
+    # source) — StaticFiles rejects it with a 403/404, never a 200 leak.
+    # Percent-encode the dot-segments so httpx does NOT normalize `..` away client-side
+    # (a bare "/vendor/../server.py" is collapsed to "/server.py" before it ever reaches
+    # the app, which would test nothing) — this drives the raw `..` into StaticFiles.
+    r = client.get("/vendor/%2e%2e/server.py")
+    assert r.status_code in (403, 404)
+    assert r.status_code != 200
+    assert "app.mount" not in r.text
+
+
+def test_graph_js_lazy_not_eager():
+    # graph.js is served, but the index HTML must NOT eager-load it via a <script> tag —
+    # app.js injects it (and the vendor libs) dynamically on the first Graph-tab switch.
+    r = client.get("/graph.js")
+    assert r.status_code == 200
+    html = client.get("/").text
+    assert 'src="graph.js"' not in html
+    assert 'src="/graph.js"' not in html
+
+
+def test_graph_css_served():
+    r = client.get("/graph.css")
+    assert r.status_code == 200
+
+
+# --- Phase 5 explore view + command palette: static assets -------------------
+#
+# Unlike graph.js (lazy — 785KB of Cytoscape deps), explore.js has NO vendor deps and is
+# loaded EAGERLY via a <script> right after app.js (it calls app.js globals), so the
+# inverse of test_graph_js_lazy_not_eager holds: its <script> tag IS present in the HTML.
+
+def test_explore_js_served():
+    r = client.get("/explore.js")
+    assert r.status_code == 200
+
+
+def test_explore_css_served():
+    r = client.get("/explore.css")
+    assert r.status_code == 200
+
+
+def test_theme_toggle_wired():
+    # The manual light/dark toggle needs three load-bearing pieces the SPA_IDS check
+    # (which only covers the button id) can't see: the pre-paint inline script that
+    # applies the saved theme, and the explicit data-theme CSS override.
+    html = client.get("/").text
+    assert 'localStorage.getItem("pwg-theme")' in html          # pre-paint anti-flash script
+    assert 'data-theme' in html
+    css = client.get("/style.css").text
+    assert ':root[data-theme="dark"]' in css                    # explicit dark override wins
+    assert ':root:not([data-theme])' in css                     # OS default only when unset
+
+
+def test_explore_js_eager_not_lazy():
+    # explore.js is eager: its <script> tag must be present in the index HTML (the inverse
+    # of graph.js, which app.js injects dynamically only on the first Graph-tab switch).
+    html = client.get("/").text
+    assert 'src="explore.js"' in html
+
+
+def test_graph_raw_edge_shape_locks_adapter_contract(populated_cache_home):
+    # The client-side adapter (graph.js adaptInteractionGraph) maps {from,to,...} edges to
+    # Cytoscape {source,target,...}. This locks the RAW server shape it consumes: edges carry
+    # from/to/label/kind and deliberately NOT source/target (regression guard for the contract).
+    r = client.get("/api/hosts/%s/graph" % HOST)
+    assert r.status_code == 200
+    edges = r.json()["edges"]
+    assert edges, "fixture should have at least one edge"
+    for e in edges:
+        assert "from" in e and "to" in e and "label" in e and "kind" in e
+        assert "source" not in e and "target" not in e

@@ -1,0 +1,156 @@
+/* pinchtab-webgraph — the Explore view (Phase 5).
+   Everything is scoped under .explore-view so it can never leak into the Workspace
+   or Graph views. Three sub-tabs — Search / Forms / Content — reuse the SPA's CSS
+   custom properties so light/dark theming works with the rest of the app. Layout
+   mirrors graph.css (a toolbar over a scrolling result column). */
+
+.explore-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  gap: 0.75rem;
+}
+/* a display:flex base rule beats the bare UA [hidden] (same reason graph.css needs it). */
+.explore-view[hidden] { display: none; }
+
+/* toolbar: the sub-tab pills + a status line ------------------------------ */
+.explore-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.explore-subtabs { display: flex; gap: 0.4rem; }
+.explore-subtab {
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 0.3rem 0.8rem;
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.explore-subtab:hover:not(.on) { border-color: var(--accent); }
+.explore-subtab.on {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+#explore-status { font-size: 0.78rem; }
+
+/* panels: one visible at a time -------------------------------------------- */
+.explore-panel { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.explore-panel[hidden] { display: none; }
+
+/* forms (reuse the .crawl-form input look) --------------------------------- */
+.explore-search-form,
+.explore-goal-form {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.8rem;
+  flex-wrap: wrap;
+}
+.explore-search-form input,
+.explore-goal-form input {
+  flex: 1 1 320px;
+  min-width: 0;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font: inherit;
+  background: var(--panel-2);
+  color: var(--text);
+}
+.explore-search-form input:focus,
+.explore-goal-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--panel);
+}
+.explore-search-form button,
+.explore-goal-form button {
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  padding: 0.45rem 1rem;
+  font: inherit;
+  cursor: pointer;
+}
+.explore-search-form button:hover,
+.explore-goal-form button:hover { background: var(--accent-hover); }
+
+/* result card rows (match .creds li / #graph-detail) ----------------------- */
+.explore-results,
+.explore-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.explore-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.7rem 0.9rem;
+}
+.explore-card.muted-card { opacity: 0.7; }
+.explore-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.3rem;
+}
+.explore-card-title { font-weight: 600; font-size: 0.9rem; word-break: break-word; }
+.explore-card-url {
+  display: block;
+  font-size: 0.76rem;
+  color: var(--accent);
+  word-break: break-all;
+  margin: 0.15rem 0 0.35rem;
+}
+.explore-steps {
+  margin: 0.3rem 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.explore-steps li { padding: 0.1rem 0; word-break: break-word; }
+.explore-items {
+  margin: 0.35rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.82rem;
+}
+.explore-items li { padding: 0.12rem 0; word-break: break-word; }
+.explore-item-kind { color: var(--muted); font-size: 0.74rem; margin-right: 0.4rem; }
+.explore-more { font-size: 0.76rem; color: var(--muted); margin-top: 0.35rem; }
+.explore-empty { font-size: 0.85rem; color: var(--muted); padding: 0.4rem 0; }
+.explore-low-note { font-size: 0.78rem; color: var(--muted); margin: 0.8rem 0 0.3rem; }
+
+.explore-how-btn {
+  margin-left: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  padding: 0.25rem 0.7rem;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.explore-how-btn:hover { background: var(--accent-soft); }
+.explore-how-note { font-size: 0.76rem; color: var(--muted); margin-left: 0.5rem; }
+
+/* responsive: let the forms stack on narrow viewports ---------------------- */
+@media (max-width: 860px) {
+  .explore-search-form input,
+  .explore-goal-form input { flex: 1 1 100%; }
+}

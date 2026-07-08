@@ -27,7 +27,7 @@ pip install --user --break-system-packages 'pinchtab-webgraph[mcp]'
 
 The **offline** tools and resources need only a populated cache. The **live** tools
 (`crawl`, `ask_howto`) additionally need a running PinchTab browser bridge — the same
-bridge the CLI crawler uses (see the repo's `start-crawl-browser.sh` / Requirements).
+bridge the CLI crawler uses (see the repo's `scripts/start-crawl-browser.sh` / Requirements).
 
 ## Register the server
 

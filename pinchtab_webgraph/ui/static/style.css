@@ -658,6 +658,53 @@ button {
 .cred-form button[type="submit"]:hover { background: var(--accent-hover); }
 .vault-msg { font-size: 0.8rem; }
 
+/* --- command palette (Ctrl/Cmd+K) ---------------------------------------- */
+.cmdk-open-btn { font-size: 0.8rem; padding: 0.2rem 0.55rem; }
+/* top-anchored, not centered like the vault modal */
+#cmdk-modal { align-items: flex-start; }
+.cmdk-card {
+  position: relative;
+  width: min(560px, 92vw);
+  margin-top: 12vh;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+#cmdk-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.8rem 1rem;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  font: inherit;
+  font-size: 0.95rem;
+  background: transparent;
+  color: var(--text);
+}
+#cmdk-input:focus { outline: none; }
+.cmdk-results {
+  list-style: none;
+  margin: 0;
+  padding: 0.35rem;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.cmdk-results li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: 8px;
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+.cmdk-results li.active { background: var(--accent-soft); }
+.cmdk-results li.disabled { opacity: 0.5; cursor: default; }
+.cmdk-results .cmdk-label { flex: 1 1 auto; word-break: break-word; }
+.cmdk-results .cmdk-hint { font-size: 0.74rem; color: var(--muted); flex: none; }
+
 /* --- responsive ----------------------------------------------------------- */
 @media (max-width: 860px) {
   .app {

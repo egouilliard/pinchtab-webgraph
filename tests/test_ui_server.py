@@ -93,6 +93,62 @@ def test_forms(populated_cache_home):
     assert {f["label"] for f in body["forms"]} == {"Create Role", "Add Report", "Add Widget"}
 
 
+# --- content (list + search) -------------------------------------------------
+
+def test_content(populated_cache_home):
+    r = client.get("/api/hosts/%s/content" % HOST)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    labels = {v["view_label"] for v in body["views"]}
+    assert "Team" in labels and "Reports" in labels
+    team = next(v for v in body["views"] if v["view_label"] == "Team")
+    assert team["collections"][0]["kind"] == "list"
+    assert team["collections"][0]["count"] == 1
+
+
+def test_content_empty(isolated_cache_home):
+    # A graph whose states carry no data collections resolves to status "empty".
+    from pathlib import Path
+    import json as _json
+    from pinchtab_webgraph import cache_store
+    fixtures = Path(__file__).parent / "fixtures"
+    graph = _json.loads((fixtures / "sample_interaction_graph.json").read_text())
+    for s in graph["states"]:
+        s.pop("collections", None)
+    cache_store.atomic_write("nocontent.test", graph)
+    r = client.get("/api/hosts/nocontent.test/content")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "empty"
+    assert body["views"] == []
+
+
+def test_content_search_ok(populated_cache_home):
+    r = client.get("/api/hosts/%s/content/search" % HOST, params={"text": "Alice"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["total_matches"] == 1
+    assert body["views_matched"] == 1
+    view = body["views"][0]
+    assert view["view_label"] == "Team"
+    assert view["reachable"] is True
+    assert view["distance_clicks"] == 1
+    assert view["items"][0]["text"] == "Alice Martin"
+    assert view["truncated"] is False
+
+
+def test_content_search_no_match(populated_cache_home):
+    r = client.get("/api/hosts/%s/content/search" % HOST,
+                   params={"text": "zzzznomatch"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "no_match"
+    assert body["total_matches"] == 0
+    assert body["views"] == []
+
+
 # --- howto -------------------------------------------------------------------
 
 def test_howto_ok(populated_cache_home):
@@ -449,8 +505,14 @@ def test_session_routes_reject_invalid_host(isolated_cache_home):
 SPA_IDS = [
     "caches-dir", "hosts",                        # sidebar: crawled-graphs list
     "host-header", "host-name", "host-kind", "host-counts", "panes",  # host header
-    "view-tabs", "tab-workspace", "tab-graph",                        # view switcher
+    "view-tabs", "tab-workspace", "tab-graph", "tab-explore",         # view switcher
     "graph-view", "graph-canvas", "graph-detail", "graph-search", "graph-status",  # graph view
+    "explore-view", "explore-tab-search", "explore-search-input",     # explore: search
+    "explore-search-results",
+    "explore-tab-forms", "explore-goal-input", "explore-goal-result", # explore: forms
+    "explore-forms-list",
+    "explore-tab-content", "explore-content-list",                    # explore: content
+    "cmdk-modal", "cmdk-open", "cmdk-input", "cmdk-results",          # command palette
     "chat-form", "chat-input", "chat-log", "chat-status",             # chat pane
     "live-view", "live-status",                                       # live pane
     "vault-modal", "vault-open", "vault-close", "vault-status",       # vault modal
@@ -515,6 +577,29 @@ def test_graph_js_lazy_not_eager():
 def test_graph_css_served():
     r = client.get("/graph.css")
     assert r.status_code == 200
+
+
+# --- Phase 5 explore view + command palette: static assets -------------------
+#
+# Unlike graph.js (lazy — 785KB of Cytoscape deps), explore.js has NO vendor deps and is
+# loaded EAGERLY via a <script> right after app.js (it calls app.js globals), so the
+# inverse of test_graph_js_lazy_not_eager holds: its <script> tag IS present in the HTML.
+
+def test_explore_js_served():
+    r = client.get("/explore.js")
+    assert r.status_code == 200
+
+
+def test_explore_css_served():
+    r = client.get("/explore.css")
+    assert r.status_code == 200
+
+
+def test_explore_js_eager_not_lazy():
+    # explore.js is eager: its <script> tag must be present in the index HTML (the inverse
+    # of graph.js, which app.js injects dynamically only on the first Graph-tab switch).
+    html = client.get("/").text
+    assert 'src="explore.js"' in html
 
 
 def test_graph_raw_edge_shape_locks_adapter_contract(populated_cache_home):

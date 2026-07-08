@@ -6,6 +6,7 @@
   <title>pinchtab-webgraph</title>
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="graph.css" />
+  <link rel="stylesheet" href="explore.css" />
 </head>
 <body>
   <!-- The real two-pane SPA. Layout: a top bar, a left sidebar (crawled hosts +
@@ -20,6 +21,8 @@
         <span class="brand-mark">pinchtab</span><span class="brand-sub">webgraph</span>
       </div>
       <p class="caches-dir muted" id="caches-dir"></p>
+      <button type="button" id="cmdk-open" class="btn-ghost cmdk-open-btn"
+              title="Command palette (Ctrl/Cmd+K)">⌘K</button>
     </header>
 
     <!-- sidebar: the list of all crawled graphs (hosts) ---------------------->
@@ -77,6 +80,7 @@
         <div class="view-tabs" id="view-tabs">
           <button type="button" id="tab-workspace" class="view-tab on">Workspace</button>
           <button type="button" id="tab-graph" class="view-tab">Graph</button>
+          <button type="button" id="tab-explore" class="view-tab">Explore</button>
         </div>
       </div>
       <p class="placeholder muted" id="placeholder">
@@ -143,6 +147,49 @@
           <aside id="graph-detail">
             <p class="hint muted">Click a node to inspect it.</p>
           </aside>
+        </div>
+      </div>
+
+      <!-- EXPLORE view: a read-only browser over the crawled cache — full-text
+           search of captured data, a path-finder to any create-form, and a form
+           inventory. Hidden until the Explore tab is picked; explore.js drives it
+           and reuses app.js globals (setView/startTour). Every crawled string is
+           rendered via textContent; crawled URLs are shown as plain text, never a
+           live <a href> (clicking one would navigate away from the app). -->
+      <div class="explore-view" id="explore-view" hidden>
+        <div class="explore-toolbar">
+          <div class="explore-subtabs">
+            <button type="button" id="explore-tab-search" class="explore-subtab on">Search</button>
+            <button type="button" id="explore-tab-forms" class="explore-subtab">Forms</button>
+            <button type="button" id="explore-tab-content" class="explore-subtab">Content</button>
+          </div>
+          <span id="explore-status" class="muted"></span>
+        </div>
+
+        <!-- Search panel: full-text search of captured data collections -->
+        <div class="explore-panel" id="explore-panel-search">
+          <form id="explore-search-form" class="explore-search-form" autocomplete="off">
+            <input id="explore-search-input" type="text"
+                   placeholder="Search captured page data…" aria-label="Search content" />
+            <button type="submit">Search</button>
+          </form>
+          <ul id="explore-search-results" class="explore-results"></ul>
+        </div>
+
+        <!-- Forms panel: a path-finder box + the full create-form inventory -->
+        <div class="explore-panel" id="explore-panel-forms" hidden>
+          <form id="explore-goal-form" class="explore-goal-form" autocomplete="off">
+            <input id="explore-goal-input" type="text"
+                   placeholder="How do I… (e.g. create a role)" aria-label="Path-finder goal" />
+            <button type="submit">Find path</button>
+          </form>
+          <div id="explore-goal-result"></div>
+          <ul id="explore-forms-list" class="explore-list"></ul>
+        </div>
+
+        <!-- Content panel: per-view inventory of captured data collections -->
+        <div class="explore-panel" id="explore-panel-content" hidden>
+          <ul id="explore-content-list" class="explore-list"></ul>
         </div>
       </div>
     </main>
@@ -214,6 +261,17 @@
     </div>
   </div>
 
+  <!-- command palette (Ctrl/Cmd+K; hidden by default) --------------------->
+  <div id="cmdk-modal" class="modal" hidden>
+    <div class="modal-backdrop" id="cmdk-backdrop"></div>
+    <div class="cmdk-card" role="dialog" aria-modal="true" aria-label="Command palette">
+      <input id="cmdk-input" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Type a command or a host…" aria-label="Command palette" />
+      <ul id="cmdk-results" class="cmdk-results" role="listbox"></ul>
+    </div>
+  </div>
+
   <script src="app.js"></script>
+  <script src="explore.js"></script>
 </body>
 </html>

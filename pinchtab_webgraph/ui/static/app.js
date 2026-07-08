@@ -26,11 +26,20 @@ const hostCountsEl = el("host-counts");
 const placeholderEl = el("placeholder");
 const panesEl = el("panes");
 
-// view switcher (Workspace | Graph) + the lazily-populated graph container
+// view switcher (Workspace | Graph | Explore) + the lazily-populated graph container
 const viewTabsEl = el("view-tabs");
 const tabWorkspaceEl = el("tab-workspace");
 const tabGraphEl = el("tab-graph");
+const tabExploreEl = el("tab-explore");
 const graphViewEl = el("graph-view");
+const exploreViewEl = el("explore-view");
+
+// command palette (Ctrl/Cmd+K)
+const cmdkModalEl = el("cmdk-modal");
+const cmdkOpenEl = el("cmdk-open");
+const cmdkBackdropEl = el("cmdk-backdrop");
+const cmdkInputEl = el("cmdk-input");
+const cmdkResultsEl = el("cmdk-results");
 
 const chatLogEl = el("chat-log");
 const chatStatusEl = el("chat-status");
@@ -145,14 +154,42 @@ function loadVendorSequential() {
 // hand-off; listing the ids here also keeps the app.js<->index.html id cross-check honest.
 const GRAPH_VIEW_IDS = ["graph-canvas", "graph-detail", "graph-search", "graph-status"];
 
+// The Explore view's DOM lives in index.html and is DRIVEN by explore.js (loaded eagerly
+// after this file). app.js only lists the ids here to keep the app.js<->index.html id
+// cross-check honest (the same discipline as GRAPH_VIEW_IDS).
+const EXPLORE_VIEW_IDS = ["explore-tab-search", "explore-search-input",
+  "explore-search-results", "explore-tab-forms", "explore-goal-input",
+  "explore-goal-result", "explore-forms-list", "explore-tab-content",
+  "explore-content-list"];
+
+// Three-way view switcher: Workspace (chat + live) | Graph (Cytoscape) | Explore (a
+// read-only browser over the cache). Toggling ONLY flips the `hidden` panes + the active
+// tab — it NEVER opens/closes chatWs/liveWs (selectHost owns the socket lifecycle).
 function setView(view) {
   currentView = view;
   const graph = view === "graph";
-  if (panesEl) panesEl.hidden = graph;
+  const explore = view === "explore";
+  const workspace = !graph && !explore;
+  if (panesEl) panesEl.hidden = !workspace;
   if (graphViewEl) graphViewEl.hidden = !graph;
-  if (tabWorkspaceEl) tabWorkspaceEl.classList.toggle("on", !graph);
+  if (exploreViewEl) exploreViewEl.hidden = !explore;
+  if (tabWorkspaceEl) tabWorkspaceEl.classList.toggle("on", workspace);
   if (tabGraphEl) tabGraphEl.classList.toggle("on", graph);
+  if (tabExploreEl) tabExploreEl.classList.toggle("on", explore);
   if (graph) ensureGraphView();
+  if (explore) ensureExploreView();
+}
+
+// explore.js is eager (no vendor deps), so the controller is already present — just hand
+// it the selected host. Guarded in case the markup or the script is missing.
+function ensureExploreView() {
+  const status = el("explore-status");
+  const missing = EXPLORE_VIEW_IDS.filter((id) => !el(id));
+  if (missing.length) {
+    if (status) status.textContent = "explore markup missing: " + missing.join(", ");
+    return;
+  }
+  if (typeof openExploreView === "function") openExploreView(selectedHost);
 }
 
 async function ensureGraphView() {
@@ -263,10 +300,12 @@ async function selectHost(h) {
   // which the openChat/openLiveView calls below own.
   setView("workspace");
   if (typeof destroyGraphView === "function") destroyGraphView();
+  if (typeof destroyExploreView === "function") destroyExploreView();
   // Stash the (cheap, index) graph_kind now; the fresh-summary .then refreshes it.
   selectedGraphKind = h.summary ? h.summary.graph_kind : null;
-  // A host whose cache failed to load can't render a graph — disable the Graph tab.
+  // A host whose cache failed to load can't render a graph or be explored — disable both.
   if (tabGraphEl) tabGraphEl.disabled = !!h.error;
+  if (tabExploreEl) tabExploreEl.disabled = !!h.error;
 
   // reflect selection in the sidebar.
   for (const row of hostsEl.children) row.classList.remove("selected");
@@ -1072,12 +1111,14 @@ function closeVault() {
 
 if (tabWorkspaceEl) tabWorkspaceEl.addEventListener("click", () => setView("workspace"));
 if (tabGraphEl) tabGraphEl.addEventListener("click", () => setView("graph"));
+if (tabExploreEl) tabExploreEl.addEventListener("click", () => setView("explore"));
 
 if (vaultOpenEl) vaultOpenEl.addEventListener("click", openVault);
 if (vaultCloseEl) vaultCloseEl.addEventListener("click", closeVault);
 if (vaultBackdropEl) vaultBackdropEl.addEventListener("click", closeVault);
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && vaultModalEl && !vaultModalEl.hidden) closeVault();
+  if (e.key === "Escape" && cmdkModalEl && !cmdkModalEl.hidden) closeCmdk();
 });
 
 async function loadVaultStatus() {
@@ -1316,6 +1357,158 @@ if (crawlFormEl) {
   });
 }
 if (crawlCancelEl) crawlCancelEl.addEventListener("click", cancelCrawl);
+
+// --- command palette (Ctrl/Cmd+K) --------------------------------------------
+// A keyboard launcher over EXISTING state + functions — it opens NO new fetches. It
+// mirrors openVault/closeVault for the modal lifecycle, builds its action list from the
+// current view tabs + sidebar rows, and runs each action through the same globals the UI
+// already exposes (setView / newChat / openVault / setExploreSubtab). Every row is built
+// with createElement + textContent (host names are untrusted crawled data).
+
+let cmdkItems = [];   // the currently rendered (filtered) action list
+let cmdkIndex = 0;    // index of the highlighted row
+
+function openCmdk() {
+  if (!cmdkModalEl) return;
+  cmdkModalEl.hidden = false;
+  if (cmdkInputEl) cmdkInputEl.value = "";
+  cmdkIndex = 0;
+  renderCmdk();
+  if (cmdkInputEl) cmdkInputEl.focus();
+}
+
+function closeCmdk() {
+  if (cmdkModalEl) cmdkModalEl.hidden = true;
+}
+
+// Build the candidate actions from live state. `disabled` rows still render (greyed with a
+// hint) so the palette explains WHY an action is unavailable instead of hiding it.
+function cmdkActions() {
+  const hasHost = !!selectedHost;
+  const graphOff = !!(tabGraphEl && tabGraphEl.disabled);
+  const exploreOff = !!(tabExploreEl && tabExploreEl.disabled);
+  const actions = [
+    { label: "Go to Workspace", run: () => setView("workspace") },
+    { label: "Go to Graph", disabled: graphOff,
+      hint: graphOff ? "unavailable for this host" : "", run: () => setView("graph") },
+    { label: "Go to Explore", disabled: exploreOff,
+      hint: exploreOff ? "unavailable for this host" : "", run: () => setView("explore") },
+    { label: "New chat", disabled: !hasHost, hint: hasHost ? "" : "pick a host first",
+      run: () => { if (typeof newChat === "function") newChat(); } },
+    // The sidebar crawl form works with NO host selected (it's how you crawl your first
+    // host), so this action is never host-gated — only the server's opt-in gate applies.
+    { label: "New crawl", run: () => { if (crawlUrlEl) crawlUrlEl.focus(); } },
+    { label: "Manage credentials", run: () => openVault() },
+  ];
+  // dynamic "Switch to <host>" rows — read each sidebar row's label + replay its click.
+  if (hostsEl) {
+    for (const row of hostsEl.children) {
+      const labelEl = row.querySelector(".host-label");
+      if (!labelEl || !labelEl.textContent) continue;
+      const name = labelEl.textContent;          // untrusted — only ever used via textContent
+      actions.push({ label: "Switch to " + name, run: () => row.click() });
+    }
+  }
+  return actions;
+}
+
+function submitExploreSearch(query) {
+  setView("explore");
+  if (typeof setExploreSubtab === "function") setExploreSubtab("search");
+  const input = el("explore-search-input");
+  if (input) input.value = query;
+  const form = el("explore-search-form");
+  if (form) {
+    if (typeof form.requestSubmit === "function") form.requestSubmit();
+    else form.dispatchEvent(new Event("submit", { cancelable: true }));
+  }
+}
+
+function renderCmdk() {
+  if (!cmdkResultsEl) return;
+  const q = (cmdkInputEl ? cmdkInputEl.value : "").trim();
+  const ql = q.toLowerCase();
+  let items = cmdkActions();
+  if (ql) items = items.filter((a) => a.label.toLowerCase().includes(ql));
+  // free-text fallback: search captured content for the typed query.
+  if (q) {
+    const hasHost = !!selectedHost;
+    items.push({
+      label: "Search content for “" + q + "”",
+      disabled: !hasHost, hint: hasHost ? "" : "pick a host first",
+      run: () => submitExploreSearch(q),
+    });
+  }
+  cmdkItems = items;
+  if (cmdkIndex >= items.length) cmdkIndex = Math.max(0, items.length - 1);
+
+  cmdkResultsEl.textContent = "";
+  items.forEach((a, i) => {
+    const li = document.createElement("li");
+    li.className = "cmdk-item" + (i === cmdkIndex ? " active" : "") +
+      (a.disabled ? " disabled" : "");
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", i === cmdkIndex ? "true" : "false");
+    const label = document.createElement("span");
+    label.className = "cmdk-label";
+    label.textContent = a.label;                 // includes untrusted host name — textContent
+    li.appendChild(label);
+    if (a.hint) {
+      const hint = document.createElement("span");
+      hint.className = "cmdk-hint";
+      hint.textContent = a.hint;
+      li.appendChild(hint);
+    }
+    li.addEventListener("mouseenter", () => { cmdkIndex = i; highlightCmdk(); });
+    li.addEventListener("click", () => runCmdkItem(a));
+    cmdkResultsEl.appendChild(li);
+  });
+}
+
+function highlightCmdk() {
+  if (!cmdkResultsEl) return;
+  const rows = cmdkResultsEl.children;
+  for (let i = 0; i < rows.length; i++) {
+    const on = i === cmdkIndex;
+    rows[i].classList.toggle("active", on);
+    rows[i].setAttribute("aria-selected", on ? "true" : "false");
+    if (on && rows[i].scrollIntoView) rows[i].scrollIntoView({ block: "nearest" });
+  }
+}
+
+function runCmdkItem(item) {
+  if (!item || item.disabled) return;
+  closeCmdk();
+  try { item.run(); } catch (err) { /* an action's own failure never breaks the palette */ }
+}
+
+if (cmdkOpenEl) cmdkOpenEl.addEventListener("click", openCmdk);
+if (cmdkBackdropEl) cmdkBackdropEl.addEventListener("click", closeCmdk);
+if (cmdkInputEl) {
+  cmdkInputEl.addEventListener("input", () => { cmdkIndex = 0; renderCmdk(); });
+  cmdkInputEl.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (cmdkItems.length) { cmdkIndex = (cmdkIndex + 1) % cmdkItems.length; highlightCmdk(); }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (cmdkItems.length) {
+        cmdkIndex = (cmdkIndex - 1 + cmdkItems.length) % cmdkItems.length;
+        highlightCmdk();
+      }
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      runCmdkItem(cmdkItems[cmdkIndex]);
+    }
+  });
+}
+// The global Ctrl/Cmd+K shortcut — works even while a chat/crawl input is focused.
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    openCmdk();
+  }
+});
 
 // --- boot --------------------------------------------------------------------
 loadHosts();

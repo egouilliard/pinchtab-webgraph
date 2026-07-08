@@ -513,6 +513,7 @@ SPA_IDS = [
     "explore-forms-list",
     "explore-tab-content", "explore-content-list",                    # explore: content
     "cmdk-modal", "cmdk-open", "cmdk-input", "cmdk-results",          # command palette
+    "theme-toggle",                                                   # light/dark toggle
     "chat-form", "chat-input", "chat-log", "chat-status",             # chat pane
     "live-view", "live-status",                                       # live pane
     "vault-modal", "vault-open", "vault-close", "vault-status",       # vault modal
@@ -593,6 +594,18 @@ def test_explore_js_served():
 def test_explore_css_served():
     r = client.get("/explore.css")
     assert r.status_code == 200
+
+
+def test_theme_toggle_wired():
+    # The manual light/dark toggle needs three load-bearing pieces the SPA_IDS check
+    # (which only covers the button id) can't see: the pre-paint inline script that
+    # applies the saved theme, and the explicit data-theme CSS override.
+    html = client.get("/").text
+    assert 'localStorage.getItem("pwg-theme")' in html          # pre-paint anti-flash script
+    assert 'data-theme' in html
+    css = client.get("/style.css").text
+    assert ':root[data-theme="dark"]' in css                    # explicit dark override wins
+    assert ':root:not([data-theme])' in css                     # OS default only when unset
 
 
 def test_explore_js_eager_not_lazy():

@@ -40,6 +40,7 @@ const cmdkOpenEl = el("cmdk-open");
 const cmdkBackdropEl = el("cmdk-backdrop");
 const cmdkInputEl = el("cmdk-input");
 const cmdkResultsEl = el("cmdk-results");
+const themeToggleEl = el("theme-toggle");
 
 const chatLogEl = el("chat-log");
 const chatStatusEl = el("chat-status");
@@ -1509,6 +1510,33 @@ document.addEventListener("keydown", (e) => {
     openCmdk();
   }
 });
+
+// --- light/dark theme toggle -------------------------------------------------
+// The saved theme is applied pre-paint by an inline <head> script (no flash). Here we
+// only wire the topbar button + keep its icon in sync. No stored choice => follow the
+// OS preference (the CSS media query handles that); the button then flips to an explicit
+// data-theme and persists it.
+function effectiveTheme() {
+  const explicit = document.documentElement.getAttribute("data-theme");
+  if (explicit === "dark" || explicit === "light") return explicit;
+  return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches)
+    ? "dark" : "light";
+}
+function updateThemeButton(theme) {
+  if (!themeToggleEl) return;
+  themeToggleEl.textContent = theme === "dark" ? "☀️" : "🌙";  // shows what you'll switch TO
+  themeToggleEl.title = "Switch to " + (theme === "dark" ? "light" : "dark") + " theme";
+}
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  try { localStorage.setItem("pwg-theme", theme); } catch (e) { /* private mode */ }
+  updateThemeButton(theme);
+}
+if (themeToggleEl) {
+  updateThemeButton(effectiveTheme());
+  themeToggleEl.addEventListener("click", () =>
+    applyTheme(effectiveTheme() === "dark" ? "light" : "dark"));
+}
 
 // --- boot --------------------------------------------------------------------
 loadHosts();

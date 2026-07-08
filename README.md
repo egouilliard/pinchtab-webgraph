@@ -157,6 +157,8 @@ For a point-and-click front end there's also an **optional local web UI** — a 
 
 The chat pane can reach Claude two ways: the **Anthropic API** (`ANTHROPIC_API_KEY`, the default when a key is set) or your **locally-logged-in Claude Code** with no API key (add the separate `[ui-claude-code]` extra + a logged-in `claude` CLI). Both are locked to the same six offline graph tools. See [Chat backends](docs/ui.md#chat-backends).
 
+Chats are **persistent and multiple**: the chat pane's chip bar holds several **named chats per host**, each saved to disk (`<home>/sessions/<host>/<id>.json`) and restored on reconnect — new / switch / rename / delete right from the bar. The `api` backend continues a reopened chat; the `claude_code` backend restores it for display only in v1. See [Chat sessions](docs/ui.md#chat-sessions).
+
 A "how do I get to X" chat answer also offers a **"Show me How"** button: a guided tour that highlights each step directly on the live browser pane and, on **Next**, performs the real click to advance — stopping at the target form without ever submitting it. See [Show Me How guided tour](docs/ui.md#show-me-how-guided-tour).
 
 The **Graph view** renders the host's cached interaction graph entirely offline (via `GET /api/hosts/{host}/graph`), with search, an adjacency-highlight on node click, a detail panel, and an "Ask in chat" button that prefills the chat with the click-path question. Its Cytoscape libraries are lazy-loaded on first open so the SPA stays light. See [Graph view](docs/ui.md#graph-view).
@@ -222,7 +224,7 @@ Deep-dive guides live in **[`docs/`](docs/README.md)** — start at the **[docum
 | --- | --- |
 | **[MCP server](docs/mcp-server.md)** | Run `pinchtab-webgraph-mcp`: the `[mcp]` extra, `.mcp.json` registration, the tool + resource inventory, env vars, and the live-tool safety model. |
 | **[UTCP interface](docs/utcp.md)** | The `pwg query` JSON surface + the `pwg manual` / `--serve` UTCP manual, the 8 tools, the scope subset, and the exit-code convention. |
-| **[Web UI](docs/ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the Workspace/[Graph](docs/ui.md#graph-view) view switcher, the REST API + vault endpoints, the chat + screencast WebSockets, the opt-in [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in) endpoint, env vars, and the loopback-only security model. |
+| **[Web UI](docs/ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the Workspace/[Graph](docs/ui.md#graph-view) view switcher, the REST API + vault endpoints, the chat + screencast WebSockets, [persistent named chats](docs/ui.md#chat-sessions), the opt-in [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in) endpoint, env vars, and the loopback-only security model. |
 | **[Authenticated login](docs/authenticated-login.md)** | Crawl behind a login safely: hand-login vs. keyring automation, the threat model, sandbox/bot-account isolation, and how to test it. |
 | **[Contributing](CONTRIBUTING.md)** | Branch model, Conventional Commits, the stay-generic rule, safety, security, and PRs. |
 

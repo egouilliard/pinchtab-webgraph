@@ -34,7 +34,9 @@ Selecting a host in the sidebar opens two live WebSocket sessions for it at once
 - **Sidebar** — every host with a persisted crawl cache (from `/api/hosts`), plus a
   **Credentials** button that opens the vault modal.
 - **Chat pane** (left) — a conversational "how do I do X on this site?" agent. It drives
-  Claude with the project's **offline** MCP tools and streams the reply as it lands.
+  Claude with the project's **offline** MCP tools and streams the reply as it lands. A chip
+  bar across its top holds **multiple named, persisted chats** per host — see
+  [Chat sessions](#chat-sessions).
 - **Live browser pane** (right) — a private headless Chrome, navigated to the host's home
   page, streamed frame-by-frame into an `<img>` via a CDP screencast.
 - **Credentials modal** — the vault: store per-host login routing + a password (password
@@ -155,6 +157,101 @@ is removed (`tools=[]`), the two live tools (`crawl`, `ask_howto`) are stripped,
 not on the allow-list. It can never run a shell command on the host or drive a live crawl.
 See [Security model](#security-model).
 
+## Chat sessions
+
+Chat history is **persistent and multiple**. Each host owns a set of **named chats**;
+the chat pane carries a **session chip bar** across its top, and every chat is durably
+saved to disk keyed by `(host, session-id)` — so switching host, reloading the page, or
+dropping the WebSocket no longer discards the conversation.
+
+```
+┌──────────────────────────────────────────────┐
+│  Chat                                          │
+│  ┌────────────┬────────────┬───────┐ ┌──────┐ │
+│  │ Templates ×│ Billing  × │ Chat× │ │ + New│ │  ← session chip bar
+│  └────────────┴────────────┴───────┘ └──────┘ │
+│  ────────────────────────────────────────────  │
+│  “how do I create a template?” → …             │
+└──────────────────────────────────────────────┘
+```
+
+- **`+ New`** mints another chat for the host (`POST …/sessions`) and connects to it.
+- **Click a chip** to switch: the SPA reconnects the chat socket to that session (closing
+  the old one) and the chat log is restored from the reopened session's transcript.
+- **Double-click a chip title** to rename it inline (`PATCH …/sessions/{id}`). An explicit
+  title is *locked* so the auto-title never overwrites it.
+- **The trailing `×`** deletes with a **two-click confirm** (first click arms it and
+  auto-disarms after ~2s; a second click issues `DELETE …/sessions/{id}`).
+
+A chat with no explicit title is **auto-titled** from its first user message (collapsed
+whitespace, capped at 60 chars).
+
+### On-disk layout
+
+Records live under the [cache/config home](#environment-variables)
+(`$PINCHTAB_WEBGRAPH_HOME`, default `$HOME/.pinchtab-webgraph`), one JSON file per chat:
+
+```
+<home>/sessions/<host>/<id>.json
+```
+
+`chat_store.py` mirrors `cache_store.py` exactly: stdlib-only, a per-host directory,
+**atomic writes** (tmp file + `os.replace`, so a reader never sees a half-written record),
+and a single validation choke-point. `<host>` is run through `cache_store.validate_host`;
+`<id>` is a **uuid4 hex** (`^[0-9a-f]{32}$`) validated by `chat_store.validate_session_id`
+— no separators or dots, so a raw id can never resolve outside its host's directory.
+
+Each record carries `id`, `host`, `backend`, `title` / `title_locked`, `created_at` /
+`updated_at`, `message_count`, `sdk_session_id`, and **two** history fields:
+
+- **`transcript`** — the display-only fold of the emitted WS frames (user text +
+  assistant `text` / `tool_use` / `tool_result` / `tour` / `error` entries). Replayed
+  verbatim on reconnect, so the chat **log** is restored for **every** backend. A
+  `TranscriptSink` wraps the route's `emit` and folds each frame into the record as it is
+  sent, so both backends persist identically.
+- **`wire_messages`** — the `api` backend's serialized Anthropic message list, so it can
+  **resume** the conversation. `null` for the `claude_code` backend.
+
+### Load-on-connect (the `session` bootstrap frame)
+
+Reconnecting to an existing chat replays it. When `/ws/chat` opens with a
+[`session=` param](#get-wschathosthost), the server resolves that record **before** opening
+the backend and sends a **leading bootstrap frame** — the session summary plus its
+transcript — as the very first frame, ahead of any turn:
+
+```json
+{"type":"session","id":"…","host":"…","backend":"api|claude_code",
+ "title":"…","created_at":"…","updated_at":"…","message_count":N,
+ "transcript":[ … ]}
+```
+
+The SPA learns the id it is now bound to from the summary and **replays** the transcript to
+rebuild the log. A brand-new chat simply carries an empty `transcript`. Restored (untrusted)
+content only ever travels the existing escaping paths — `textContent` for chips and plain
+text, the HTML-escape-first `renderMarkdown` for assistant messages — never a raw
+`innerHTML` sink.
+
+### Restore: full continuation vs. display-only
+
+The two [chat backends](#chat-backends) restore differently, and the backend is **pinned**
+to whatever the chat was created with (it is never re-resolved on resume):
+
+| Backend | On reopen | Recalls earlier turns? |
+| --- | --- | --- |
+| **`api`** | full **save + restore-to-continue** — `wire_messages` are rehydrated so the Anthropic-API conversation continues. Trimming is turn-boundary-aware (`trim_wire_messages` never splits a `tool_use`/`tool_result` pair, and drops a trailing unanswered user turn so a resumed session can't send two consecutive user turns → API 400). | **Yes** — the model continues the conversation. |
+| **`claude_code`** | **display-only** in v1: the transcript replays so the log is restored, but the SDK session is fresh. The `sdk_session_id` is captured for a future resume. | **No** — flagged in the UI (see badge). |
+
+Because a restored `claude_code` chat looks complete but the agent won't remember it, the
+chat status line shows a **badge** when a non-empty `claude_code` transcript is restored:
+*"restored view — this backend won't recall earlier turns yet"*.
+
+### Limits
+
+- **`MAX_SESSIONS_PER_HOST` = 50.** A host at the cap **rejects** a new chat (`POST` →
+  **429 `too_many_sessions`**) — there is **no silent eviction** of an old chat.
+- **`MAX_TRANSCRIPT_ENTRIES` = 500.** A transcript is trimmed to its trailing 500 entries
+  on each save, so a very long chat's on-disk record stays bounded.
+
 ## Prerequisites & install
 
 ```bash
@@ -273,6 +370,24 @@ The PUT body's optional fields mirror what `login.py` understands: `userField`,
 the OS keyring under the exact `(service, username)` pair `login.py` reads back at crawl
 time. See [Authenticated login](authenticated-login.md) for how that credential is used.
 
+### Chat sessions
+
+The CRUD surface behind the [session chip bar](#chat-sessions) — multiple named chats per
+host, persisted by `chat_store`. All five routes run the same host/id validation
+choke-point as the vault routes, so a bad `host` or `session_id` token is rejected before
+any filesystem access.
+
+| Method · Path | Does | Notes |
+| --- | --- | --- |
+| `GET /api/hosts/{host}/sessions` | list a host's chats | `{"sessions":[…]}`, lightweight **summaries** (no transcript / wire state), newest `updated_at` first |
+| `POST /api/hosts/{host}/sessions` | create a chat | optional `{"title"}` body; returns the new summary. **429 `too_many_sessions`** at `MAX_SESSIONS_PER_HOST` (50) |
+| `GET /api/hosts/{host}/sessions/{id}` | one chat's full record | includes `transcript`, **minus** the resume-only internals (`wire_messages`, `sdk_session_id`). `session_not_found` (**404**) if absent |
+| `PATCH /api/hosts/{host}/sessions/{id}` | rename | body `{"title"}`; locks the title. `session_not_found` (**404**) if absent |
+| `DELETE /api/hosts/{host}/sessions/{id}` | delete | **idempotent** — deleting an absent chat is a green `{"deleted": false}`, never a 404 |
+
+A bad `session_id` token (not a uuid4 hex) is `invalid_session` (**400**); a bad `host`
+token is `invalid_host` (**400**).
+
 ### HTTP status contract
 
 Only three resolver statuses map to a non-200 code; every structured **miss**
@@ -283,9 +398,12 @@ CLI/MCP surface uses.
 | Status | HTTP code |
 | --- | --- |
 | `invalid_host` | `400` |
+| `invalid_session` | `400` |
 | `no_cache_for_host` | `404` |
 | `no_credential_for_host` | `404` |
+| `session_not_found` | `404` |
 | `invalid_graph` | `422` |
+| `too_many_sessions` | `429` |
 | `vault_unavailable` | `503` |
 | any structured miss (`no_match`, `unreachable`, `empty`, `no_path`, …) | `200` |
 
@@ -308,6 +426,13 @@ backend (Anthropic API, `ANTHROPIC_API_KEY`, model default `claude-opus-4-8` via
 via the Claude Agent SDK — no key, model via `PINCHTAB_UI_CLAUDE_CODE_MODEL`). Both stream
 the same frames below and enforce the same offline-only tool lockdown.
 
+The optional **`session=<id>`** query param binds the socket to a persisted
+[chat session](#chat-sessions). When present the server resolves that record first and
+replays it via a leading `session` bootstrap frame (below); a bad id token closes the
+socket with `invalid_session`, and an id that doesn't resolve (or belongs to another host)
+closes it with `session_not_found`. When absent, the connection uses/mints the host's chat
+without restoring a prior transcript.
+
 **Client → server:**
 
 | Frame | Meaning |
@@ -318,6 +443,7 @@ the same frames below and enforce the same offline-only tool lockdown.
 
 | Frame | Meaning |
 | --- | --- |
+| `{"type":"session",…summary,"transcript":[…]}` | the **leading** bootstrap frame, sent once on connect ahead of any turn: the [session](#chat-sessions) summary (`id`/`host`/`backend`/`title`/`created_at`/`updated_at`/`message_count`) + its `transcript`, which the SPA replays to restore the log. Empty transcript for a new chat |
 | `{"type":"text","delta":<str>}` | a streamed text delta of the reply |
 | `{"type":"tool_use","name":<str>,"input":<dict>}` | the agent is about to call a tool |
 | `{"type":"tool_result","name":<str>,"status":"ok"\|"error"}` | a tool returned |
@@ -325,6 +451,7 @@ the same frames below and enforce the same offline-only tool lockdown.
 | `{"type":"done"}` | end of the turn (exactly once) |
 | `{"type":"error","detail":<str>}` | a per-turn error (e.g. tool-iteration limit) |
 | `{"type":"error","status":"invalid_host",…}` | bad host token; the socket then closes |
+| `{"type":"error","status":"invalid_session"}` / `{"…":"session_not_found","session":…}` | the `session=` id was malformed, or didn't resolve for this host; the socket then closes. See [Chat sessions](#chat-sessions) |
 | `{"type":"error","status":"chat_unavailable","reason":…,"detail":…}` | key / dep / CLI missing — `api` backend: `no_api_key` / `no_anthropic_package` / `no_mcp_package`; `claude_code` backend: `no_claude_cli` / `no_claude_code_package` / `claude_code_startup_error` |
 
 ### `GET /ws/screencast?host=<host>`
@@ -541,6 +668,14 @@ graph first (its own SIGTERM handler), a cancelled crawl can still promote what 
   with a hostname the `cache_store.validate_host` choke-point accepts, so a crawl can never
   resolve or write outside `caches_dir()`. Concurrency is capped at one, and the result is
   promoted by an **atomic same-filesystem move** so a failed crawl can't corrupt a good cache.
+- **Per-host path quarantine (defense-in-depth).** Both the cache and the
+  [chat-session store](#chat-sessions) route every `host` through the shared
+  `cache_store.validate_host` choke-point before touching the filesystem. That guard was
+  hardened to also **reject all-dots tokens** (`"."`, `".."`, …): the host regex accepted
+  them, harmless for `cache_path` (which appends `.json`) but not for `chat_store`, which
+  uses the bare host as a **directory segment** — so `/ws/chat?host=..` would otherwise
+  escape the per-host quarantine up into the home dir. Now rejected at the single choke
+  point (with a regression test).
 - **No endpoint authentication.** There is deliberately none — the design assumes a
   localhost-only deployment. Do not put this behind a public reverse proxy without adding
   your own auth in front.
@@ -560,6 +695,11 @@ graph first (its own SIGTERM handler), a cancelled crawl can still promote what 
 - **One Chrome + one MCP subprocess per connection.** Each live-pane socket launches a
   private headless Chrome; each chat socket spawns a pinchtab-webgraph MCP stdio
   subprocess. `MAX_LIVE_SESSIONS` (3) caps concurrent Chrome instances.
+- **Chats are persistent and multiple.** Each host owns a set of named chats saved to
+  `<home>/sessions/<host>/<id>.json`, switched from the chat pane's chip bar and restored on
+  reconnect. The `api` backend fully continues a reopened chat; the `claude_code` backend
+  restores the transcript for **display only** in v1 (with a UI badge). See
+  [Chat sessions](#chat-sessions).
 - **Chat replies render as markdown.** The SPA renders the assistant's reply — bold,
   italics, headings, ordered/unordered lists, inline + block code, links, and GitHub-style
   **tables** — through a small HTML-escape-first renderer, so no model or crawled-site text

@@ -1,0 +1,75 @@
+{
+  "_comment": "10-site regression audit. Goals are the 5 hard questions per site from the 2026-07-08 audit (.audit/reports/). `phase` = the improvement-plan phase expected to satisfy each goal (1 already works). `expect.status` no_match = a false-positive trap the tool SHOULD decline. dup_ratio (states sharing a normalized URL) is the Phase-1 gate and is computed separately, not a goal.",
+  "sites": [
+    {"name": "hackernews", "start_url": "https://news.ycombinator.com", "host": "news.ycombinator.com", "max_states": 40, "max_depth": 2, "goals": [
+      {"goal": "submit", "expect": {"status": "ok", "url_contains": "submit", "phase": 4}},
+      {"goal": "login", "expect": {"status": "ok", "url_contains": "login", "phase": 4}},
+      {"goal": "comments", "expect": {"status": "ok", "phase": 4}},
+      {"goal": "jobs", "expect": {"status": "ok", "url_contains": "jobs", "phase": 4}},
+      {"goal": "newest", "expect": {"status": "ok", "phase": 4}}
+    ]},
+    {"name": "books", "start_url": "https://books.toscrape.com", "host": "books.toscrape.com", "max_states": 50, "max_depth": 2, "goals": [
+      {"goal": "travel", "expect": {"status": "ok", "url_contains": "travel", "phase": 2}},
+      {"goal": "philosophy", "expect": {"status": "ok", "url_contains": "philosophy", "phase": 6}},
+      {"goal": "add to basket", "expect": {"status": "ok", "phase": 3}},
+      {"goal": "next page", "expect": {"status": "ok", "phase": 2}},
+      {"goal": "login", "expect": {"status": "ok", "url_contains": "login", "phase": 6}}
+    ]},
+    {"name": "quotes", "start_url": "https://quotes.toscrape.com", "host": "quotes.toscrape.com", "max_states": 50, "max_depth": 3, "goals": [
+      {"goal": "login", "expect": {"status": "ok", "url_contains": "login", "min_fields": 2, "phase": 1}},
+      {"goal": "sign in", "expect": {"status": "ok", "url_contains": "login", "phase": 3}},
+      {"goal": "next page", "expect": {"status": "ok", "phase": 2}},
+      {"goal": "love", "expect": {"status": "ok", "phase": 6}},
+      {"goal": "einstein", "expect": {"status": "ok", "phase": 2}}
+    ]},
+    {"name": "python", "start_url": "https://www.python.org", "host": "www.python.org", "max_states": 60, "max_depth": 2, "goals": [
+      {"goal": "sign in", "expect": {"status": "ok", "url_contains": "login", "phase": 1}},
+      {"goal": "log in", "expect": {"status": "ok", "url_contains": "login", "phase": 3}},
+      {"goal": "download", "expect": {"status": "ok", "url_contains": "download", "phase": 2}},
+      {"goal": "create account", "expect": {"status": "ok", "url_contains": "signup", "phase": 1}},
+      {"goal": "search", "expect": {"status": "ok", "phase": 5}}
+    ]},
+    {"name": "bootstrap", "start_url": "https://getbootstrap.com", "host": "getbootstrap.com", "max_states": 50, "max_depth": 2, "goals": [
+      {"goal": "buttons", "expect": {"status": "ok", "phase": 2}},
+      {"goal": "search", "expect": {"status": "ok", "phase": 2}},
+      {"goal": "version", "expect": {"status": "ok", "phase": 2}},
+      {"goal": "modal", "expect": {"status": "no_match", "phase": 5}},
+      {"goal": "download", "expect": {"status": "ok", "phase": 2}}
+    ]},
+    {"name": "mdn", "start_url": "https://developer.mozilla.org/en-US/", "host": "developer.mozilla.org", "max_states": 45, "max_depth": 2, "goals": [
+      {"goal": "javascript", "expect": {"status": "ok", "phase": 2}},
+      {"goal": "flexbox", "expect": {"status": "ok", "phase": 2}},
+      {"goal": "search", "expect": {"status": "ok", "phase": 2}},
+      {"goal": "sign in", "expect": {"status": "ok", "phase": 3}},
+      {"goal": "report a problem", "expect": {"status": "ok", "phase": 3}}
+    ]},
+    {"name": "govuk", "start_url": "https://www.gov.uk", "host": "www.gov.uk", "max_states": 45, "max_depth": 2, "goals": [
+      {"goal": "sign in universal credit", "expect": {"status": "ok", "phase": 3}},
+      {"goal": "renew passport", "expect": {"status": "ok", "url_contains": "passport", "phase": 2}},
+      {"goal": "vehicle tax", "expect": {"status": "ok", "url_contains": "vehicle", "phase": 2}},
+      {"goal": "start now", "expect": {"status": "ok", "phase": 2}},
+      {"goal": "sign in", "expect": {"status": "ok", "phase": 1}}
+    ]},
+    {"name": "wikipedia", "start_url": "https://en.wikipedia.org/wiki/Web_scraping", "host": "en.wikipedia.org", "max_states": 40, "max_depth": 2, "goals": [
+      {"goal": "edit", "expect": {"status": "ok", "url_contains": "edit", "phase": 1}},
+      {"goal": "cite this page", "expect": {"status": "ok", "phase": 1}},
+      {"goal": "create account", "expect": {"status": "ok", "phase": 1}},
+      {"goal": "log in", "expect": {"status": "ok", "phase": 1}},
+      {"goal": "web crawler", "expect": {"status": "ok", "phase": 2}}
+    ]},
+    {"name": "stripe", "start_url": "https://stripe.com", "host": "stripe.com", "max_states": 35, "max_depth": 2, "goals": [
+      {"goal": "create payment link", "expect": {"status": "ok", "url_contains": "payment", "phase": 1}},
+      {"goal": "payments", "expect": {"status": "ok", "phase": 4}},
+      {"goal": "contact sales", "expect": {"status": "ok", "phase": 2}},
+      {"goal": "sign in", "expect": {"status": "ok", "phase": 2}},
+      {"goal": "start now", "expect": {"status": "ok", "phase": 3}}
+    ]},
+    {"name": "autoex", "start_url": "https://automationexercise.com", "host": "automationexercise.com", "max_states": 40, "max_depth": 2, "goals": [
+      {"goal": "login", "expect": {"status": "ok", "url_contains": "login", "phase": 1}},
+      {"goal": "contact us", "expect": {"status": "ok", "url_contains": "contact", "min_fields": 5, "phase": 1}},
+      {"goal": "add to cart", "expect": {"status": "no_match", "phase": 3}},
+      {"goal": "view cart", "expect": {"status": "ok", "url_contains": "view_cart", "phase": 3}},
+      {"goal": "register", "expect": {"status": "ok", "phase": 5}}
+    ]}
+  ]
+}

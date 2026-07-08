@@ -44,7 +44,7 @@ import subprocess
 import sys
 import time
 from collections import deque
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl, urlencode
 
 from . import recipe  # proven primitives — see module docstring
 
@@ -179,6 +179,9 @@ def capture_collections(server, max_rounds=50):
 
 
 def state_sig(url, controls, view=None):
+    # SINGLE-URL MODE ONLY. Normal nav mode uses nav_state_key(url) for a deterministic
+    # URL-primary identity (see the sig assignment in the crawl loop); this structural
+    # signature is reserved for app-shell SPAs where the URL never changes.
     # Signature on the STRUCTURALLY meaningful controls only (nav + create-triggers),
     # not volatile page content (counts, notifications, timestamps) — so the same
     # logical page/tab dedups to one state instead of many cosmetic variants.
@@ -198,10 +201,36 @@ def section_key(u):
     return base + ("?" + p.query if p.query else "")
 
 
+# Generic web-analytics TRACKING params (key-pattern denylist, NOT app/section vocabulary
+# — the same "generic web-standard" class as the create-VERB list; see generality.md). A
+# link decorated with tracking junk must dedup to the same state as its clean form.
+_TRACKING_RE = re.compile(r"^utm_|^mc_|^(gclid|fbclid|_ga|igshid|ref|ref_src|yclid|msclkid)$", re.I)
+
+
 def norm(u):
-    # Same URL-normalization the comparisons elsewhere use (drop #fragment, trailing
-    # /). Keys the global url->state dedup so each distinct URL is visited once.
-    return u.split("#")[0].rstrip("/")
+    # URL-normalization used for BOTH state identity (nav mode) and every URL dedup
+    # (url_to_sig, enq_urls, cross-edge match, self-link skip) — so they all agree.
+    # Drops #fragment + trailing '/', strips generic TRACKING params, and re-emits the
+    # remaining query SORTED (stable order). Content/revision/pagination params (oldid,
+    # page, section, q, …) are KEPT distinct — folding them would wrongly merge pages.
+    parts = urlsplit(u.split("#")[0])
+    if parts.query:
+        kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                if not _TRACKING_RE.match(k)]
+        query = urlencode(sorted(kept))
+    else:
+        query = ""
+    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), query, ""))
+
+
+def nav_state_key(url):
+    # Nav-mode state identity is URL-primary: one normalized URL == one state, so
+    # control-count / feed-content jitter between reads can't mint duplicate states
+    # (the over-noding bug — MDN 20 states = 5 URLs). The 'u::' namespace keeps a nav
+    # key from ever colliding with a single-URL structural state_sig value. Known
+    # limitation: hash-router SPAs ('/#/route') collapse to one state here since norm()
+    # drops '#' (single-URL app-shells keep the structural state_sig instead).
+    return "u::" + norm(url)
 
 
 def probe_bridge(server, start_url, timeout, single_url=False):
@@ -751,7 +780,11 @@ def main():
             continue
         visits += 1
         restart_attempts = 0                               # progress clears the consecutive-wedge tally
-        sig = state_sig(cur, controls, view)
+        # State identity: URL-primary in normal nav mode (one normalized URL == one
+        # state → same-URL re-materializations collapse at the `if sig in states` dedup
+        # below, killing over-noding); structural signature + ARIA view ONLY for
+        # single-URL app-shells (Teams etc.) where the URL never changes.
+        sig = state_sig(cur, controls, view) if a.single_url else nav_state_key(cur)
 
         # record the edge that brought us here (even to an already-known state)
         if psig is not None and pact is not None:

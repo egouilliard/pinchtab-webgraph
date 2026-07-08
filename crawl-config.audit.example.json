@@ -1,0 +1,49 @@
+{
+  "_comment": "Copy to crawl-config.audit.json and set a real server.token (openssl rand -hex 24). Used ONLY by scripts/site-audit.sh to crawl the 10 PUBLIC audit sites on a dedicated port (9872). IDPI is DISABLED so any public host is reachable (the website whitelist is inactive); this is fine for public sites but do NOT reuse it for an authenticated session you care about. crawl-config.audit.json is gitignored (holds the token).",
+  "server": {
+    "port": "9872",
+    "bind": "127.0.0.1",
+    "token": "REPLACE_WITH_RANDOM_TOKEN",
+    "stateDir": "/home/youruser/pinchtab-webgraph/.instance-audit/state"
+  },
+  "instanceDefaults": {
+    "mode": "headless",
+    "maxTabs": 20,
+    "stealthLevel": "light",
+    "blockAds": true,
+    "blockImages": true,
+    "blockMedia": true
+  },
+  "security": {
+    "allowEvaluate": true,
+    "allowDownload": false,
+    "allowUpload": false,
+    "enableActionGuards": true,
+    "allowedDomains": [
+      "127.0.0.1", "::1", "localhost",
+      "cdnjs.cloudflare.com", "unpkg.com", "cdn.jsdelivr.net",
+      "news.ycombinator.com", "books.toscrape.com", "quotes.toscrape.com",
+      "www.python.org", "python.org", "getbootstrap.com",
+      "developer.mozilla.org", "www.gov.uk", "en.wikipedia.org", "wikipedia.org",
+      "stripe.com", "www.stripe.com", "automationexercise.com", "www.automationexercise.com"
+    ],
+    "idpi": {
+      "enabled": false,
+      "strictMode": false,
+      "scanContent": false,
+      "wrapContent": false,
+      "customPatterns": [],
+      "scanTimeoutSec": 5,
+      "shieldThreshold": 5
+    }
+  },
+  "profiles": {
+    "baseDir": "/home/youruser/pinchtab-webgraph/.instance-audit/profiles",
+    "defaultProfile": "crawler"
+  },
+  "multiInstance": {
+    "strategy": "always-on",
+    "instancePortStart": 9873,
+    "instancePortEnd": 9899
+  }
+}

@@ -67,3 +67,7 @@ dist/
 /CLAUDE.md
 .claude/skills/
 .gitnexus/
+.audit/
+crawl-config.audit.json
+.instance-audit/
+.audit-graphs/

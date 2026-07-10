@@ -16,6 +16,8 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 
 - **Graph from anything** — one crawl records each state's full control inventory (links / buttons / tabs / menus) **and** its data collections (tables, grids, trees, lists, feeds, virtualized/scroll-loaded content). A complete nav + content graph of any site, all from structural signals.
 - **Offline "how-to" in milliseconds** — BFS over the crawled graph returns the shortest click-path to any action *plus* the fields of the form it opens, in ~60–130 ms with zero browser calls.
+- **Runnable answers, not just directions** — every how-to also compiles the click-path + terminal action into a copy-pasteable **PinchTab command block** (`pinchtab nav … → click … → download/upload/fill …`). So "how do I download the Q3 report" returns both the route *and* a `pinchtab download <url> -o q3.pdf` you can run. Form answers become a `fill`/`select`/`check` script with the submit line left **commented out** (safety). See [Runnable command blocks](#-runnable-command-blocks).
+- **Download / export discovery** — download and export affordances become read-only `download` nodes: a link that resolves to a file (a `download` attribute, a file-extension path, or a `blob:`/`data:` URL → tagged with the file URL) or a button whose label is a download/export verb (JS-triggered). Like uploads, they are **never clicked** during the crawl — detected, recorded, and turned into a `pinchtab download`/`click` command on demand.
 - **File-upload discovery** — the crawl also finds where you can upload a document. File inputs (including ones hidden behind a styled `<label>`/button) and `ondrop` dropzones become read-only `upload` nodes tagged with the file types they accept (e.g. `.pdf,.docx`, `image/*`), so "how do I upload a … ?" is answerable — and the crawler never clicks them (that would pop a native OS file dialog).
 - **Safe by construction** — discovery opens and reads forms, then presses Escape. It never submits, saves, or deletes anything. Destructive-looking controls are skipped and recorded, not clicked.
 - **Never loses progress** — atomic checkpoints every N states plus a SIGINT/SIGTERM handler; a crash, OOM, or Ctrl-C keeps the partial graph. `meta.stopped` always says *why* a crawl ended (complete vs. truncated) — no silent truncation.
@@ -30,6 +32,7 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - [Requirements](#-requirements)
 - [Quickstart](#-quickstart)
 - [The tools](#️-the-tools)
+- [Runnable command blocks](#-runnable-command-blocks)
 - [Self-test & report](#-self-test--report)
 - [Regression audit (10 public sites)](#-regression-audit-10-public-sites)
 - [Three ways to call it](#-three-ways-to-call-it)
@@ -108,6 +111,7 @@ The `scripts/run-*.sh` wrappers forward the bridge auth token automatically and 
 | `howto.py <graph.json>` | **Offline** BFS over a crawled graph → shortest click-path + form spec in ms, no browser. `--goal "…"` for actions; `--find TEXT` searches captured data → what matched, which view, and the path to it; `--list-content` = per-view data inventory. |
 | `ask.py` / `scripts/run-ask.sh` | **Cache-first** entry point. Routes by host to a per-host cache, answers offline via `howto.py`; on a miss runs a live discovery, then writes the result back so the next ask is an offline hit. `--verify` re-checks live. |
 | `recipe.py` / `scripts/run-recipe.sh` | **Live** how-to finder: priority-BFS over the running UI to a goal's trigger, opens the form, reads the fields, never submits. The live fallback for cache misses. |
+| `perform.py` (`pinchtab-webgraph perform`) | **PERFORM** a how-to: resolve it OFFLINE (from a crawled cache/graph), then RUN the compiled block live through the bridge — navigate the path, then download / upload / fill. Safe by default: navigation + downloads run; a form field with no supplied value is skipped (`--set 'Label=value'`, `--file <path>`); the submit runs only with `--allow-submit`; `--dry-run` previews. See [Runnable command blocks](#-runnable-command-blocks). |
 | `crawl.py` / `scripts/run-crawl.sh <url>` | Page→page **link graph** → `<out>.json` + a self-contained Cytoscape.js `<out>.html` viewer. |
 | `paths.py` | Offline shortest / all click-paths over a crawled link graph (`--from`, `--to`, `--structural`, `--all`). |
 | `login.py` (`pinchtab-webgraph login`) | Open a persistent browser session and sign in to a host (credentials from the OS keyring) so subsequent crawls run authenticated. Needs the optional `login` extra (`keyring`). |
@@ -115,6 +119,70 @@ The `scripts/run-*.sh` wrappers forward the bridge auth token automatically and 
 | `query_cmd.py` (`pinchtab-webgraph query`) | **Machine-readable** twin of `howto.py` / `paths.py`: runs the offline `api.*` queries (`graph_summary`, `howto`, `find_content`, `list_content`, `list_forms`, `link_paths`) and prints the result as JSON on stdout. Takes `--host` (cache) or `--graph` (path). The substrate the UTCP manual shells out to. |
 | `utcp_manual.py` (`pinchtab-webgraph manual`) | Build / print / serve the [UTCP](https://www.utcp.io) tool-calling manual so external tool-callers can invoke the `query` (and live `crawl`/`ask`) surface by running the CLI directly — no wrapper server. `manual --out FILE` / `manual --serve`. |
 | `selftest.py` (`pinchtab-webgraph test`) | **Self-improvement loop.** Interactively throw your hardest "how do I do X?" goals at a crawled graph — each is answered **offline** via `api.howto`, you judge whether it's right, and every miss/wrong answer becomes a captured gap. Writes a self-contained HTML report; with `--repo OWNER/NAME` it can (after you confirm) file the report as a GitHub issue. See [Self-test & report](#-self-test--report). |
+| `commands.py` | The deterministic **path → executable** compiler shared by every how-to surface. Turns a click-path + terminal action into a runnable `pinchtab` command block (`nav`/`click`/`download`/`upload`/`fill`/`select`/`check`). Pure, stdlib-only, no browser. See [Runnable command blocks](#-runnable-command-blocks). |
+
+## ▶️ Runnable command blocks
+
+Every how-to answer — from `howto.py`, `recipe.py`, `ask.py`, and the `api`/MCP/UTCP surfaces — now carries a `commands` block: the shortest click-path **and** its terminal action, compiled into a copy-pasteable sequence of [PinchTab](#-requirements) CLI commands that reproduces it. The route tells a human what to click; the command block lets an agent (or you) *run* it.
+
+The terminal action is chosen structurally from the graph — no LLM, no app-specific vocabulary:
+
+| Action kind | How it's recognized | Emitted command |
+| --- | --- | --- |
+| **download** (direct) | a link/anchor that resolves to a file (`download` attr, file-extension path, or `blob:`/`data:` URL) | `pinchtab download '<url>' -o '<file>'` |
+| **download** (JS) | a control whose label is a download/export verb | `pinchtab click --css '<selector>'` — the browser session captures the file |
+| **upload** | a file input / styled `<label>` / `ondrop` dropzone | `pinchtab upload '<FILE>' -s '<selector>'` (accepted types annotated) |
+| **form** | a create-style trigger that opens a form | one `fill`/`select`/`check` per field (placeholder values); the **submit line is commented out** |
+
+```console
+$ pinchtab-webgraph query --host app.example.com howto --goal "download the q3 report"   # (or howto.py / ask.py)
+
+=== HOW TO: DOWNLOAD THE Q3 REPORT ===
+Shortest route — 2 clicks:
+  1. Go to https://app.example.com/home
+  2. Click "Reports"
+  3. Download via "Download report"
+This downloads a file: https://app.example.com/files/q3-report.pdf
+
+Run it with PinchTab:
+  pinchtab nav 'https://app.example.com/home'
+  pinchtab nav 'https://app.example.com/reports'   # Reports
+
+  # --- download ---
+  pinchtab download 'https://app.example.com/files/q3-report.pdf' -o 'q3-report.pdf'
+```
+
+**Safe by construction.** The click-path only ever navigates — it never traverses a write/destructive control (those are `skipped` nodes with no selector recorded). Download and upload affordances are detected but **never clicked during the crawl** (a JS download can pop a native OS save dialog; a file input opens a native picker). And the form terminal fills fields but leaves the submit **commented out** unless you deliberately uncomment it. Nothing a compiled block does mutates data on its own.
+
+The structured surfaces (`api.howto`, MCP, UTCP) return the same thing under `commands`, plus `action_kind` (`form` / `download`) and, for a direct download, `download_url`.
+
+### …and run it — `perform` (the opt-in)
+
+The block above is copy-pasteable, but you don't have to copy-paste it. `pinchtab-webgraph perform` **resolves the how-to offline and then runs the compiled block through the bridge** — so "download the Q3 report" is one command end-to-end:
+
+```console
+$ pinchtab-webgraph perform --host app.example.com --goal "download the q3 report"
+=== PERFORM: DOWNLOAD THE Q3 REPORT ===  (download, ran)
+  ✓ pinchtab nav 'https://app.example.com/home'
+  ✓ pinchtab nav 'https://app.example.com/reports'   # Reports
+  ✓ pinchtab download 'https://app.example.com/files/q3-report.pdf' -o 'q3-report.pdf'
+```
+
+The **same safety rules are enforced at execution**, not just in the printed text:
+
+- **navigation + downloads run** (downloading is the point); `--out-dir <dir>` chooses where the file lands.
+- a **form field with no value is skipped**, never filled with placeholder junk — pass real values with `--set "Name=Acme" --set "Plan=Pro"`, and a file with `--file ./doc.pdf`.
+- a form's **submit never runs** unless you add `--allow-submit`.
+- `--dry-run` prints exactly what *would* run and touches nothing; `--json` emits a structured per-step result (run / skipped / error).
+
+Resolution is offline, so `perform` needs a crawled cache/graph (`--host <h>` or `--graph <file>`) — crawl or `ask` the site first. Only execution needs the bridge. The same capability is exposed as the MCP `perform` tool and the UTCP `perform` manual entry.
+
+**Bridge requirements for the two download kinds:**
+
+- **JS-triggered downloads** (a `click` on an export button) work whenever the bridge config has `security.allowDownload = true`; the file lands in the browser profile's download directory.
+- **Direct downloads** (`pinchtab download <url>`) also need `allowDownload = true`, but note PinchTab's `download` performs a **server-side fetch guarded against SSRF** — it refuses `internal or blocked host` URLs (e.g. `localhost`/`127.0.0.1`/link-local). That only affects fetching *internal* hosts; a normal `https://app.example.com/…/file.pdf` is fine. (The crawl bridge ships `allowDownload = false` on purpose — that config is for read-only discovery — so point `perform` at a bridge that enables it.) A rejected download surfaces the bridge's error verbatim.
+
+> **Verified end-to-end** against a real site crawled through the live browser: `crawl → howto → perform` navigates the path and the browser actually writes the file to disk (JS-export path), and the form path fills + submits with real values. See the walkthrough in [`docs/perform-live-test.md`](docs/perform-live-test.md).
 
 ## 🧪 Self-test & report
 
@@ -286,15 +354,15 @@ Everything runs locally against your own isolated browser bridge. The pipeline i
 
 The JSON graph is `{ nodes, edges, meta }`:
 
-- **Nodes** — **pages** (by normalized URL) and **SPA/modal states** (same URL, changed DOM). Cross-host mode adds `external` / `iframe` nodes. File-upload affordances become a distinct `upload` node carrying an `accept` field (the accepted file types). Each node can carry its **control inventory** and its **content collections**.
-- **Edges** — **links** (navigation) and **actions/clicks**. Destructive-looking actions that were deliberately skipped — and upload affordances, which are recorded but never clicked — are stored as dashed (skipped) edges so you can see what was avoided.
-- **meta** — crawl parameters plus `meta.stopped`: `frontier-exhausted` (complete) vs. `hit-max-*` / `wedge` (truncated). Truncation is always explicit. An additive `meta.uploads` counts the upload affordances found.
-- **Viewer** — the Cytoscape HTML viewer renders `upload` nodes distinctly (cyan, "tag" shape, a "file upload" legend entry) alongside the "SPA / modal state" and "skipped" legends; the `Uploads` stat is guarded, so older graphs without it still render. The viewer is **truly self-contained and offline** — its six Cytoscape/layout libraries are vendored inline (no CDN, no network), so it opens and lays out with nothing but a browser. It uses a fast `fcose` layout by default (a big graph of ~2,500 edges lays out in well under a second) with a **High quality** button for an on-demand higher-fidelity relayout, and shows a "Laying out graph…" indicator while a layout runs.
+- **Nodes** — **pages** (by normalized URL) and **SPA/modal states** (same URL, changed DOM). Cross-host mode adds `external` / `iframe` nodes. File-upload affordances become a distinct `upload` node carrying an `accept` field (the accepted file types); download/export affordances become a distinct `download` node carrying `dlKind` (`direct`/`js`) and, for a direct download, `dlHref` (the file URL). Each node can carry its **control inventory** and its **content collections**.
+- **Edges** — **links** (navigation) and **actions/clicks**. Destructive-looking actions that were deliberately skipped — and upload/download affordances, which are recorded but never clicked — are stored as dashed (skipped) edges so you can see what was avoided.
+- **meta** — crawl parameters plus `meta.stopped`: `frontier-exhausted` (complete) vs. `hit-max-*` / `wedge` (truncated). Truncation is always explicit. Additive `meta.uploads` / `meta.downloads` count the upload / download affordances found.
+- **Viewer** — the Cytoscape HTML viewer renders `upload` nodes distinctly (cyan, "tag" shape) and `download` nodes distinctly (violet, "vee" shape, a "download / export" legend entry) alongside the "SPA / modal state" and "skipped" legends; the `Uploads` / `Downloads` stats are guarded, so older graphs without them still render. The viewer is **truly self-contained and offline** — its six Cytoscape/layout libraries are vendored inline (no CDN, no network), so it opens and lays out with nothing but a browser. It uses a fast `fcose` layout by default (a big graph of ~2,500 edges lays out in well under a second) with a **High quality** button for an on-demand higher-fidelity relayout, and shows a "Laying out graph…" indicator while a layout runs.
 
 ## 🛡️ Safety model
 
 - **Same-origin by default** — the crawler won't wander off the target site unless you pass `--cross-host`.
-- **Never mutates data** — discovery opens and reads forms, then Escapes. Create / save / delete / submit controls are skipped by default and recorded, not clicked. **File-upload affordances are recorded but never clicked** (clicking a file input opens a native OS file dialog the crawler can't dismiss), so the read-only contract holds. **Never run a "click everything" crawl in an authenticated session you care about** — that's exactly why the isolated bridge exists.
+- **Never mutates data** — discovery opens and reads forms, then Escapes. Create / save / delete / submit controls are skipped by default and recorded, not clicked. **File-upload and download/export affordances are recorded but never clicked** (a file input opens a native OS picker; a JS download can pop a native save dialog the crawler can't dismiss), so the read-only contract holds. The runnable [command blocks](#-runnable-command-blocks) inherit this: their path only navigates, downloads/uploads are separate explicit commands, and a form's submit line ships commented out. **Never run a "click everything" crawl in an authenticated session you care about** — that's exactly why the isolated bridge exists.
 - **Hard caps** on states, actions-per-state, interaction depth, and a global action budget prevent the classic SPA state explosion.
 - **Secrets stay out of git** — `crawl-config.json` (bridge token) and `.instance/` (live browser profile/session) are gitignored. Commit explicit source files only.
 - **OS-level sandbox (opt-in)** — run under [Claude Code's built-in sandbox](#-run-it-under-a-sandbox-recommended) to confine the crawler at the OS level: no keyring/SSH/cloud-cred reads, localhost-only egress, and no `sudo` escape. A ready posture ships in [`.claude/settings.json`](.claude/settings.json).

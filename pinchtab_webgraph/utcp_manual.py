@@ -177,6 +177,27 @@ _LIVE_TOOLS = [
 ]
 
 
+# --- the action tool (needs a bridge; returns structured JSON via --json) ----
+
+_ACTION_TOOLS = [
+    dict(
+        name="perform",
+        description="PERFORM a how-to LIVE: resolve the shortest path to a download / "
+        "create trigger OFFLINE, then RUN the compiled PinchTab block through the browser "
+        "(navigate the path → download, or open a form). Needs a running PinchTab bridge. "
+        "Safe by default: navigation + downloads run, but a form field with no supplied "
+        "value is SKIPPED and the SUBMIT is NOT run (use the CLI's --set / --allow-submit "
+        "for those). Returns JSON with a `status` in {ok, no_match, unreachable, invalid_args}.",
+        tags=["live", "perform", "action", "browser"],
+        args=[_HOST_ARG, ("goal", "natural-language goal, e.g. \"download the q3 report\"")],
+        command="pwg perform --host UTCP_ARG_host_UTCP_END --goal UTCP_ARG_goal_UTCP_END --json",
+        status_enum=["ok", "no_match", "unreachable", "invalid_args"],
+        extra_out={"action_kind": {"type": "string", "enum": ["form", "download"]},
+                   "download_url": {"type": "string"}, "steps": {"type": "array"}},
+    ),
+]
+
+
 def build_manual():
     """Return the UTCP manual as a plain dict.
 
@@ -184,10 +205,11 @@ def build_manual():
     `manual_version` is the single-source-of-truth package `__version__`.
     """
     tools = []
-    for d in _QUERY_TOOLS + _LIVE_TOOLS:
+    for d in _QUERY_TOOLS + _LIVE_TOOLS + _ACTION_TOOLS:
         out = _tool(d["name"], d["description"], d["tags"], d["args"], d["command"],
                     status_enum=d["status_enum"], extra_out=d["extra_out"])
-        # live tools emit narrated text today, not a structured object.
+        # live crawl/ask emit narrated text today, not a structured object; `perform`
+        # returns structured JSON (via --json), so it keeps its `_tool` output schema.
         if d in _LIVE_TOOLS:
             out["outputs"] = dict(_LIVE_NARRATED)
         tools.append(out)

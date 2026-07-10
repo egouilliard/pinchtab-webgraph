@@ -539,6 +539,59 @@ async def ask_howto(start: str, goal: str, verify: bool = False,
                                  timeout_seconds=timeout_seconds, on_line=on_line)
 
 
+@mcp.tool()
+async def perform(goal: str | None = None, host: str | None = None,
+                  graph: str | None = None, start: str | None = None,
+                  match: str | None = None, index: int = 0,
+                  values: dict | None = None, upload_file: str | None = None,
+                  out_dir: str | None = None, allow_submit: bool = False,
+                  dry_run: bool = False, server: str = DEFAULT_SERVER,
+                  ctx: Context = None) -> dict:
+    """PERFORM a how-to: resolve it offline, then RUN the compiled PinchTab block live.
+
+    Pass EXACTLY ONE of `host`/`graph` (the crawled graph to resolve against) plus a
+    `goal` or `match`. Resolution is offline; execution drives the bridge. Safe by
+    default: navigation + downloads run; a form field with no supplied value is SKIPPED
+    (`values` maps field-label → value, `upload_file` feeds a file input); the SUBMIT
+    runs only with `allow_submit=True`. `dry_run=True` returns exactly what WOULD run
+    and never touches the bridge. `status`:
+      ok            — `steps` holds each step's run/skipped/error result,
+      no_match / unreachable / invalid_args — resolution failed (no execution),
+      bridge_* / cache_state=live_failed — the bridge was down (non-dry-run only).
+    """
+    from . import perform as perform_mod
+
+    path, err = _resolve_graph(host, graph)
+    if err is not None:
+        return err
+    if not (goal or match):
+        return {"status": "invalid_args", "detail": "pass a goal or a match"}
+    try:
+        plan = api.resolve_action(path, goal=goal, start=start, match=match, index=index)
+    except (OSError, ValueError, json.JSONDecodeError, KeyError) as e:
+        return {"status": "invalid_graph", "path": path, "error": str(e)}
+    if plan.get("status") != "ok":
+        return plan
+
+    # dry-run needs no bridge — compile + report without executing.
+    if not dry_run:
+        berr = await asyncio.to_thread(_bridge_health, server)
+        if berr is not None:
+            out = dict(berr)
+            out["cache_state"] = "live_failed"
+            return out
+
+    token = perform_mod.load_token()
+    tab = None if dry_run else await asyncio.to_thread(perform_mod.resolve_tab, server, token)
+    steps = await asyncio.to_thread(
+        perform_mod.execute_plan, plan["trigger"], plan["path_steps"], plan["start_url"],
+        allow_submit=allow_submit, server=server, token=token, tab=tab, values=values,
+        upload_file=upload_file, out_dir=out_dir, dry_run=dry_run)
+    return {"status": "ok", "goal": goal, "trigger": plan["trigger_label"],
+            "action_kind": plan["action_kind"], "download_url": plan.get("download_url"),
+            "dry_run": dry_run, "steps": steps}
+
+
 def main():
     mcp.run()
 

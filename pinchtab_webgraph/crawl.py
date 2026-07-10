@@ -60,6 +60,16 @@ WRITE_ACTIONS = re.compile(
     re.I,
 )
 
+# Text on a control that means "clicking this downloads / exports a file". A control
+# matching this (or a link that resolves to a file) becomes a read-only `download` node
+# and is NEVER clicked — a JS-triggered download can pop a native OS save dialog the
+# crawler can't dismiss, so we mirror the upload safety rule: detect, record, don't click.
+# Structural verb list (same precedent as WRITE_ACTIONS); no per-app vocabulary.
+DOWNLOAD_ACTIONS = re.compile(
+    r"\b(download|export|télécharger|telecharger|descargar|exportar)\b|下载|導出|导出",
+    re.I,
+)
+
 # Schemes / hrefs that are never pages to crawl.
 SKIP_HREF = re.compile(r"^(mailto:|tel:|javascript:|data:|blob:|#|sms:|ftp:)", re.I)
 
@@ -68,16 +78,28 @@ TRACKING = re.compile(r"^(utm_|gclid$|fbclid$|mc_|ref$|ref_src$|_ga$)", re.I)
 
 
 # --- JavaScript injected to read a page's interactive surface ----------------
-# Returns {url, title, links:[{href,text}],
-#          actions:[{selector,text,tag,nav,bulk,upload,accept}]}.
+# Returns {url, title, links:[{href,text,download,dlKind}],
+#          actions:[{selector,text,tag,nav,bulk,upload,accept,download,dlKind,dlHref}]}.
 # `selector` is a stable CSS path so we can re-find the element after a reload.
 # `upload` (bool) flags a file-upload affordance — a bare `input[type="file"]`, a
 # file input hidden behind a styled <label>/button, or an inline-`ondrop` dropzone;
 # `accept` carries that control's accepted file types (e.g. ".pdf,.docx", "image/*")
 # or null. Upload affordances become a read-only "upload" graph node and are NEVER
 # clicked (clicking a file input opens a native OS dialog the crawler can't dismiss).
+# `download` (bool) flags a download/export affordance — a link that resolves to a file
+# (a `download` attribute, a file-extension path, or a blob:/data: href → `dlKind:direct`,
+# `dlHref` = the file URL) or a button whose text is a download/export verb (`dlKind:js`).
+# Download affordances become a read-only "download" node and, like uploads, are NEVER
+# clicked (a JS download can pop a native OS save dialog the crawler can't dismiss).
 EXTRACT_JS = r"""
 (() => {
+  const DL_EXT=/\.(pdf|csv|tsv|xlsx?|docx?|pptx?|zip|gz|tar|rar|7z|json|xml|txt|rtf|ods|odt|odp|png|jpe?g|svg|ics|vcf|epub|mp3|mp4|wav|mov|bin|dmg|exe|apk|parquet|sql)(\?|#|$)/i;
+  const DL_VERB=/\b(download|export|télécharger|telecharger|descargar|exportar)\b|下载|導出|导出/i;
+  function dlDirect(a){ if(!a||!a.getAttribute) return false;
+    if(a.hasAttribute('download')) return true;
+    const h=a.getAttribute('href')||'';
+    if(/^(blob|data):/i.test(h)) return true;
+    try{ return DL_EXT.test(new URL(a.href,location.href).pathname); }catch(e){ return DL_EXT.test(h); } }
   function cssEsc(s){ return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/[^a-zA-Z0-9_-]/g,'\\$&'); }
   function sel(el){
     if (el.id) return '#' + cssEsc(el.id);
@@ -107,7 +129,8 @@ EXTRACT_JS = r"""
     const h = a.href;
     if (!h || seenL.has(h)) return;
     seenL.add(h);
-    out.links.push({ href: h, text: txt(a) });
+    const _dl = dlDirect(a);
+    out.links.push({ href: h, text: txt(a), download: _dl, dlKind: _dl ? 'direct' : null });
   });
   const seenA = new Set();
   const sels = 'button,[role="button"],[role="tab"],[role="menuitem"],summary,' +
@@ -138,9 +161,18 @@ EXTRACT_JS = r"""
     const _upload = _isFile || b.hasAttribute('ondrop') || !!_nested;
     const _accept = _isFile ? (b.getAttribute('accept') || null)
                   : (_nested ? (_nested.getAttribute('accept') || null) : null);
+    // download/export affordance: a wrapped/own anchor that resolves to a file
+    // (direct, with its URL), or a control whose text is a download/export verb (JS).
+    const _anchor = _tag === 'a' ? b : (b.querySelector ? b.querySelector('a[href]') : null);
+    const _dlDirect = dlDirect(_anchor);
+    const _dlVerb = !_upload && DL_VERB.test(txt(b) || '');
+    const _download = _dlDirect || _dlVerb;
+    const _dlHref = _dlDirect && _anchor ? (_anchor.href || null) : null;
     out.actions.push({ selector: s, text: txt(b) || (_upload ? 'Upload file' : ''),
                        tag: _tag, nav: isNav, bulk: bulk,
-                       upload: _upload, accept: _accept });
+                       upload: _upload, accept: _accept,
+                       download: _download, dlKind: _dlDirect ? 'direct' : (_dlVerb ? 'js' : null),
+                       dlHref: _dlHref });
   });
   // file inputs are commonly hidden behind a styled <label>/button/dropzone the
   // scan above can't see — walk each up to its nearest clickable affordance so the
@@ -437,6 +469,16 @@ class Crawler:
         # 1) Link edges (page -> page). Cheap and safe.
         for link in info["links"]:
             href = link["href"]
+            # A link that resolves to a file is a read-only `download` node, not a page:
+            # record it (with its URL) and never navigate to it (that would download it).
+            if link.get("download"):
+                label = link.get("text") or "Download"
+                dl_id = node_id + "##download:" + hashlib.sha1(
+                    (href + label).encode()).hexdigest()[:6]
+                self.add_node(dl_id, url="", title="⬇ " + label, type="download",
+                              reason="download", dlHref=href, dlKind=link.get("dlKind") or "direct")
+                self.add_edge(node_id, dl_id, label, "link", skipped=True)
+                continue
             if not self.is_crawlable_link(href):
                 continue
             tgt = self.page_id(href)
@@ -472,6 +514,17 @@ class Crawler:
                 self.add_node(up_id, url="", title=title, type="upload",
                               reason="upload", accept=accept or "")
                 self.add_edge(node_id, up_id, label, "action", skipped=True)
+                continue
+            if act.get("download"):
+                dlkind = act.get("dlKind") or ("direct" if act.get("dlHref") else "js")
+                dlhref = act.get("dlHref") or ""
+                dl_id = node_id + "##download:" + hashlib.sha1(
+                    (act["selector"] + label).encode()).hexdigest()[:6]
+                title = "⬇ " + label + (" [" + dlkind + "]")
+                self.add_node(dl_id, url="", title=title, type="download",
+                              reason="download", dlHref=dlhref, dlKind=dlkind,
+                              selector=act["selector"])
+                self.add_edge(node_id, dl_id, label, "action", skipped=True)
                 continue
             is_destructive = DESTRUCTIVE.search(txt) and not self.a.allow_destructive
             is_write = self.a.skip_writes and WRITE_ACTIONS.search(txt)
@@ -538,6 +591,7 @@ class Crawler:
             "states": sum(1 for n in self.nodes.values() if n["type"] == "state"),
             "skipped": sum(1 for n in self.nodes.values() if n["type"] == "skipped"),
             "uploads": sum(1 for n in self.nodes.values() if n["type"] == "upload"),
+            "downloads": sum(1 for n in self.nodes.values() if n["type"] == "download"),
             "edges": len(self.edges),
             "interaction_depth": self.a.interaction_depth,
             "allow_destructive": self.a.allow_destructive,
@@ -678,6 +732,7 @@ const sections=[...new Set(GRAPH.nodes.filter(n=>n.url).map(n=>sectionOf(n.url))
 const sectionColor={};sections.forEach((s,i)=>sectionColor[s]=PALETTE[i%PALETTE.length]);
 function nodeColor(n){if(n.type==='state')return '#9333ea';if(n.type==='skipped')return '#f59e0b';
   if(n.type==='upload')return '#0891b2';
+  if(n.type==='download')return '#7c3aed';
   return sectionColor[sectionOf(n.url||'')]||'#64748b';}
 const deg={};GRAPH.nodes.forEach(n=>deg[n.id]=0);
 GRAPH.edges.forEach(e=>{deg[e.source]=(deg[e.source]||0)+1;deg[e.target]=(deg[e.target]||0)+1;});
@@ -687,10 +742,10 @@ const inDeg={};GRAPH.nodes.forEach(n=>inDeg[n.id]=0);
 GRAPH.edges.forEach(e=>inDeg[e.target]=(inDeg[e.target]||0)+1);
 const HUB=Math.max(8,(GRAPH.meta.pages||GRAPH.nodes.length)*0.4);
 const els=[];const parents={};
-GRAPH.nodes.forEach(n=>{const cl=n.url?clusterOf(n.url):(n.type==='state'?'states':(n.type==='upload'?'uploads':'skipped'));
+GRAPH.nodes.forEach(n=>{const cl=n.url?clusterOf(n.url):(n.type==='state'?'states':(n.type==='upload'?'uploads':(n.type==='download'?'downloads':'skipped')));
   if(!parents['grp:'+cl])parents['grp:'+cl]={id:'grp:'+cl,label:cl,section:n.url?sectionOf(n.url):cl};});
 Object.values(parents).forEach(p=>els.push({data:{id:p.id,label:p.label,isGroup:1,gcolor:sectionColor[p.section]||'#94a3b8'}}));
-GRAPH.nodes.forEach(n=>{const cl=n.url?clusterOf(n.url):(n.type==='state'?'states':(n.type==='upload'?'uploads':'skipped'));
+GRAPH.nodes.forEach(n=>{const cl=n.url?clusterOf(n.url):(n.type==='state'?'states':(n.type==='upload'?'uploads':(n.type==='download'?'downloads':'skipped')));
   els.push({data:{id:n.id,parent:'grp:'+cl,label:(n.title||n.url||n.id),short:shortLabel(n),
     url:n.url,type:n.type,color:nodeColor(n),deg:deg[n.id]||0,size:16+Math.min(34,Math.sqrt(deg[n.id]||1)*5)}});});
 GRAPH.edges.forEach((e,i)=>els.push({data:{id:'e'+i,source:e.source,target:e.target,label:e.label,kind:e.kind,skipped:!!e.skipped,glob:((inDeg[e.target]||0)>=HUB)?1:0}}));
@@ -702,6 +757,7 @@ const cy=cytoscape({container:document.getElementById('cy'),elements:els,wheelSe
     {selector:'node[type="state"]',style:{'shape':'round-diamond'}},
     {selector:'node[type="skipped"]',style:{'shape':'triangle'}},
     {selector:'node[type="upload"]',style:{'shape':'tag'}},
+    {selector:'node[type="download"]',style:{'shape':'vee'}},
     {selector:'edge',style:{'width':1,'line-color':'#94a3b8','line-opacity':0.12,'curve-style':'bezier','target-arrow-shape':'triangle','target-arrow-color':'#cbd5e1','arrow-scale':0.6}},
     {selector:'edge[kind="action"]',style:{'line-style':'dashed'}},
     {selector:'.dim',style:{'opacity':0.06}},
@@ -739,13 +795,14 @@ relayout('fcose');
 const m=GRAPH.meta;
 document.getElementById('host').textContent=m.host+'  ·  '+(m.start||'').replace(/^https?:\/\//,'');
 function st(k,v){return '<div class="stat"><span>'+k+'</span><b>'+v+'</b></div>';}
-document.getElementById('stats').innerHTML=st('Pages',m.pages)+st('States',m.states)+st('Skipped',m.skipped)+(m.uploads?st('Uploads',m.uploads):'')+st('Edges',m.edges)+st('Depth',m.interaction_depth)+st('Elapsed',m.elapsed_sec+'s');
+document.getElementById('stats').innerHTML=st('Pages',m.pages)+st('States',m.states)+st('Skipped',m.skipped)+(m.uploads?st('Uploads',m.uploads):'')+(m.downloads?st('Downloads',m.downloads):'')+st('Edges',m.edges)+st('Depth',m.interaction_depth)+st('Elapsed',m.elapsed_sec+'s');
 document.getElementById('foot').textContent=GRAPH.nodes.length+' nodes · '+GRAPH.edges.length+' edges · drag to pan · scroll to zoom';
 const legendEl=document.getElementById('legend');const hiddenKeys=new Set();
 const legendItems=sections.map(s=>({key:s,color:sectionColor[s],label:s}));
 legendItems.push({key:'__state',color:'#9333ea',label:'SPA / modal state'});
 legendItems.push({key:'__skip',color:'#f59e0b',label:'skipped (write / destructive)'});
 legendItems.push({key:'__upload',color:'#0891b2',label:'file upload'});
+legendItems.push({key:'__download',color:'#7c3aed',label:'download / export'});
 legendItems.forEach(it=>{const d=document.createElement('div');d.className='lg';
   d.innerHTML='<span class="sw" style="background:'+it.color+'"></span>'+it.label;
   d.onclick=()=>{if(hiddenKeys.has(it.key))hiddenKeys.delete(it.key);else hiddenKeys.add(it.key);
@@ -754,6 +811,7 @@ function nodeMatchesLegend(n){const t=n.data('type');
   if(t==='state')return !hiddenKeys.has('__state');
   if(t==='skipped')return !hiddenKeys.has('__skip');
   if(t==='upload')return !hiddenKeys.has('__upload');
+  if(t==='download')return !hiddenKeys.has('__download');
   return !hiddenKeys.has(sectionOf(n.data('url')||''));}
 function applyFilter(){const q=document.getElementById('q').value.toLowerCase().trim();
   cy.batch(()=>{cy.nodes('[!isGroup]').forEach(n=>{const d=n.data();

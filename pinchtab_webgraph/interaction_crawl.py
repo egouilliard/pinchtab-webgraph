@@ -47,6 +47,8 @@ from collections import deque
 from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl, urlencode
 
 from . import recipe  # proven primitives — see module docstring
+from .commands import is_direct_download
+from .crawl import DOWNLOAD_ACTIONS
 
 CONTROLS_JS = recipe.CONTROLS_JS
 CONTENT_JS = recipe.CONTENT_JS
@@ -63,6 +65,17 @@ same_host = recipe.same_host
 # generic signal recipe.py uses to find a goal's button; here we capture ALL of
 # them. NOT destructive (no delete/remove) — we only ever open CREATE forms.
 TRIGGER_RE = re.compile(r"\b(%s)\b" % VERBS, re.I)
+
+
+def serialize_trigger(t, state_id):
+    """The trigger record written to the output graph. Carries the terminal-action
+    descriptor (`kind`/`selector`/`href`/`accept`) the command compiler + `perform` read —
+    a download trigger is useless downstream without it. Additive: defaults keep old
+    create-form triggers valid (`kind`='form')."""
+    return {"label": t["label"], "state": state_id,
+            "path": t["path"], "form": t["form"], "opensAt": t["opensAt"],
+            "kind": t.get("kind", "form"), "selector": t.get("selector"),
+            "href": t.get("href"), "accept": t.get("accept")}
 
 # STRUCTURAL form-bearing detection (Finding 2 of issue #11). A create-VERB in a
 # control label is only ONE kind of trigger; many important forms — sign-in, sign-up,
@@ -513,7 +526,8 @@ def main():
             rec = {"label": lab, "state": sig,
                    "path": [{"label": x["label"], "selector": x["selector"],
                              "href": x.get("href")} for x in path],
-                   "form": None, "opensAt": None}
+                   "form": None, "opensAt": None,
+                   "kind": "form", "selector": c["selector"], "href": None, "accept": None}
             cached = forms_by_label.get(key)
             if cached is not None:                           # same trigger label seen before:
                 rec["form"], rec["opensAt"] = cached         # reuse its form, don't re-open
@@ -543,6 +557,29 @@ def main():
             triggers.append(rec)
             print("    ✓ trigger %r%s" % (lab, " + form" if rec["form"] else ""),
                   file=sys.stderr)
+
+        # download/export controls are a distinct terminal action, recorded but NEVER
+        # clicked (a JS download can pop a native save dialog; a direct link would fetch
+        # the file). We keep the selector + (for a direct link) the file URL, no form —
+        # the command compiler turns these into a `pinchtab download`/`click`.
+        for c in controls:
+            t = (c.get("text") or "").strip()
+            if not t or c.get("bulk"):
+                continue
+            direct = is_direct_download(c.get("href"))
+            if not (direct or DOWNLOAD_ACTIONS.search(t)):
+                continue
+            key = t.lower()
+            if key in seen_labels:
+                continue
+            seen_labels.add(key)
+            triggers.append({"label": t, "state": sig,
+                             "path": [{"label": x["label"], "selector": x["selector"],
+                                       "href": x.get("href")} for x in path],
+                             "form": None, "opensAt": None, "kind": "download",
+                             "selector": c["selector"],
+                             "href": c.get("href") if direct else None, "accept": None})
+            print("    ✓ download %r%s" % (t, " (direct)" if direct else ""), file=sys.stderr)
 
     # ---- Finding 2: register a state that structurally IS a form (fields + submit)
     #      as a trigger target, even with no create-VERB anywhere. The "trigger" is the
@@ -590,7 +627,9 @@ def main():
         triggers.append({"label": label, "state": psig,        # trigger lives on the parent
                          "path": [{"label": x["label"], "selector": x["selector"],
                                    "href": x.get("href")} for x in path[:-1]],
-                         "form": form, "opensAt": cur})
+                         "form": form, "opensAt": cur,
+                         "kind": "form", "selector": pact.get("selector"),
+                         "href": None, "accept": None})
         print("    ✓ form-state trigger %r @ %s (%d fields)"
               % (label, nurl, (form or {}).get("fieldCount", fields)), file=sys.stderr)
 
@@ -690,10 +729,9 @@ def main():
                        "to": states[e["to"]]["id"] if e["to"] in states else None,
                        "label": e["label"], "selector": e["selector"], "kind": e["kind"]}
                       for e in edges if e["from"] in states],
-            "triggers": [{"label": t["label"],
-                          "state": states[t["state"]]["id"] if t["state"] in states else None,
-                          "path": t["path"], "form": t["form"], "opensAt": t["opensAt"]}
-                         for t in triggers],
+            "triggers": [serialize_trigger(
+                t, states[t["state"]]["id"] if t["state"] in states else None)
+                for t in triggers],
         }
         tmp = path_out + ".tmp"
         with open(tmp, "w") as fh:

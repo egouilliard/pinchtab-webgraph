@@ -24,6 +24,7 @@ import sys
 from collections import deque
 from urllib.parse import urlparse
 
+from . import commands  # path -> runnable pinchtab command block
 from . import recipe  # VERBS, for the same generic goal→trigger matching recipe.py uses
 
 
@@ -78,7 +79,12 @@ def form_field_count(trigger):
 def form_confidence(trigger):
     """`high` when the trigger opens a real (non-empty) form, else `low`. A zero-field
     match is typically a nav control that merely shares a create-VERB with the goal
-    ("Find a NEW job"), not a form the user wants — we de-prioritize those."""
+    ("Find a NEW job"), not a form the user wants — we de-prioritize those.
+
+    A `download` trigger is a terminal action in its own right (it opens no form), so it
+    is ALWAYS high confidence — the zero-field rule must not suppress it."""
+    if (trigger.get("kind") or "").lower() == "download":
+        return "high"
     return "high" if form_field_count(trigger) > 0 else "low"
 
 
@@ -98,6 +104,14 @@ def find_start_state(graph, start_url):
     if pref:
         return pref[0]["id"]
     return None
+
+
+def print_download(trigger):
+    href = trigger.get("href")
+    if href:
+        print("\nThis downloads a file: %s" % href)
+    else:
+        print("\nThis triggers a download (the browser session captures the file).")
 
 
 def print_form(form):
@@ -278,16 +292,25 @@ def main():
     show = routed if a.all else routed[:1]
     start_url = states[start_id]["url"]
     for dist, epath, t, _conf in show:
+        is_dl = (t.get("kind") or "").lower() == "download"
         steps = ["Go to %s" % start_url]
         steps += ["Click “%s”" % e["label"] for e in epath]
-        steps.append("Click the “%s” button" % t["label"])
+        steps.append(("Download via “%s”" if is_dl else "Click the “%s” button") % t["label"])
         print("\n=== HOW TO: %s ===\n" % (a.goal or t["label"]).upper())
         print("Shortest route — %d click%s:" % (len(steps) - 1, "" if len(steps) - 1 == 1 else "s"))
         for i, s in enumerate(steps, 1):
             print("  %d. %s" % (i, s))
         if t.get("opensAt"):
             print("     → opens %s" % t["opensAt"])
-        print_form(t.get("form"))
+        if is_dl:
+            print_download(t)
+        else:
+            print_form(t.get("form"))
+        # the reproducible command block — copy-paste to drive it via the PinchTab CLI
+        psteps = commands.path_from_edges(epath, states)
+        cmds = commands.for_trigger(t, psteps, start_url)
+        print("\nRun it with PinchTab:")
+        print("\n".join("  " + l for l in cmds))
         print("\n(answered offline from cache — 0 browser calls)")
 
 

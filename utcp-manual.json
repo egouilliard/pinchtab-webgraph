@@ -384,6 +384,70 @@
           }
         ]
       }
+    },
+    {
+      "name": "perform",
+      "description": "PERFORM a how-to LIVE: resolve the shortest path to a download / create trigger OFFLINE, then RUN the compiled PinchTab block through the browser (navigate the path → download, or open a form). Needs a running PinchTab bridge. Safe by default: navigation + downloads run, but a form field with no supplied value is SKIPPED and the SUBMIT is NOT run (use the CLI's --set / --allow-submit for those). Returns JSON with a `status` in {ok, no_match, unreachable, invalid_args}.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "hostname to route through the per-host cache (e.g. app.example.com)"
+          },
+          "goal": {
+            "type": "string",
+            "description": "natural-language goal, e.g. \"download the q3 report\""
+          }
+        },
+        "required": [
+          "host",
+          "goal"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "no_match",
+              "unreachable",
+              "invalid_args"
+            ]
+          },
+          "action_kind": {
+            "type": "string",
+            "enum": [
+              "form",
+              "download"
+            ]
+          },
+          "download_url": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array"
+          }
+        }
+      },
+      "tags": [
+        "live",
+        "perform",
+        "action",
+        "browser"
+      ],
+      "tool_call_template": {
+        "name": "perform",
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "pwg perform --host UTCP_ARG_host_UTCP_END --goal UTCP_ARG_goal_UTCP_END --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
     }
   ]
 }

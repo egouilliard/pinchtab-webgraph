@@ -550,3 +550,45 @@ def test_ask_howto_live_failed(isolated_cache_home, monkeypatch):
     assert result["cache_state"] == "live_failed"
     assert result["returncode"] == 1
     assert result["status"] == "no_cache_for_host"
+
+
+# --- perform tool (resolve offline + dry-run: no bridge, no subprocess) -------
+
+_PERFORM_GRAPH = {
+    "meta": {"host": "app.test"},
+    "states": [
+        {"id": "s0", "url": "https://app.test/home", "depth": 0},
+        {"id": "s1", "url": "https://app.test/reports", "depth": 1},
+    ],
+    "state_index": {},
+    "edges": [{"from": "s0", "to": "s1", "label": "Reports", "selector": "#nav",
+               "kind": "link"}],
+    "triggers": [
+        {"label": "Download report", "state": "s1", "path": [], "kind": "download",
+         "selector": None, "href": "https://app.test/files/q3.pdf", "form": None},
+    ],
+}
+
+
+def test_perform_dry_run_needs_no_bridge(tmp_path, monkeypatch):
+    p = tmp_path / "g.json"
+    p.write_text(json.dumps(_PERFORM_GRAPH))
+    # If the tool wrongly reached the bridge, this would flip the result to live_failed.
+    monkeypatch.setattr(mcp_server, "_bridge_health",
+                        lambda server: {"status": "bridge_unavailable"})
+
+    result = asyncio.run(mcp_server.perform(
+        goal="download report", graph=str(p), start="https://app.test/home", dry_run=True))
+
+    assert result["status"] == "ok"
+    assert result["action_kind"] == "download"
+    assert result["download_url"] == "https://app.test/files/q3.pdf"
+    assert all(s["status"] == "dry-run" for s in result["steps"])
+    assert any(s["line"].startswith("pinchtab download ") for s in result["steps"])
+
+
+def test_perform_no_match_returns_before_bridge(tmp_path):
+    p = tmp_path / "g.json"
+    p.write_text(json.dumps(_PERFORM_GRAPH))
+    result = asyncio.run(mcp_server.perform(goal="frobnicate", graph=str(p)))
+    assert result["status"] == "no_match"

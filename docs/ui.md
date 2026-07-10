@@ -450,7 +450,7 @@ filesystem-path parameter over HTTP.
 | `GET /api/hosts/{host}/summary` | `api.graph_summary` | graph kind + meta + element counts |
 | `GET /api/hosts/{host}/graph` | `cache_store.load` | the full raw interaction graph (the large payload, on demand) — also what the in-UI [Graph view](#graph-view) renders |
 | `GET /api/hosts/{host}/forms` | `api.list_forms` | every create-form: label, host, depth, field count. Also drives the [Explore](#explore-view) Forms sub-tab |
-| `GET /api/hosts/{host}/howto?goal=&start=&match=&all=` | `api.howto` | shortest click-path(s) to a create-trigger + its form; each result also carries an additive `tour` field (the [Show Me How](#show-me-how-guided-tour) highlight steps). Backs the chat agent, the [Explore](#explore-view) path-finder, and each form's "Show me how" |
+| `GET /api/hosts/{host}/howto?goal=&start=&match=&all=` | `api.howto` | shortest click-path(s) to a create-trigger or download + its form; each result also carries additive `tour` (the [Show Me How](#show-me-how-guided-tour) highlight steps), `commands` (a runnable PinchTab command block reproducing the path + terminal action), `action_kind` (`form`/`download`), and `download_url` (for a direct download). Backs the chat agent, the [Explore](#explore-view) path-finder, and each form's "Show me how" |
 | `GET /api/hosts/{host}/content` | `api.list_content` | per-view inventory of captured collections. Backs the [Explore](#explore-view) Content sub-tab |
 | `GET /api/hosts/{host}/content/search?text=&start=&limit=` | `api.find_content` | search captured collections for text; `text` required, `limit` default 40. Backs the [Explore](#explore-view) Search sub-tab |
 

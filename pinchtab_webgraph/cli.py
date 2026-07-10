@@ -24,6 +24,8 @@ SUBS = {
                   "cache-first how-to: answer offline, else run live and write back"),
     "recipe":    ("pinchtab_webgraph.recipe",
                   "LIVE how-to finder — drive the running UI to a goal's trigger and read its form"),
+    "perform":   ("pinchtab_webgraph.perform",
+                  "PERFORM a how-to live — run the compiled pinchtab block (download/upload/fill); safe by default"),
     "linkcrawl": ("pinchtab_webgraph.crawl",
                   "page->page LINK graph + a self-contained Cytoscape HTML viewer"),
     "paths":     ("pinchtab_webgraph.paths",

@@ -29,7 +29,7 @@ def test_build_manual_shape():
     assert set(m.keys()) == {"utcp_version", "manual_version", "tools"}
     assert m["utcp_version"] == "1.1"
     assert m["manual_version"] == __version__
-    assert len(m["tools"]) == 8
+    assert len(m["tools"]) == 9
 
     for t in m["tools"]:
         assert set(t.keys()) == {"name", "description", "inputs", "outputs",
@@ -55,7 +55,7 @@ def test_build_manual_shape():
 def test_tool_names_are_clean_and_expected():
     names = [t["name"] for t in utcp_manual.build_manual()["tools"]]
     assert names == ["graph_summary", "howto", "find_content", "list_content",
-                     "list_forms", "link_paths", "crawl", "ask"]
+                     "list_forms", "link_paths", "crawl", "ask", "perform"]
     # clean, unprefixed tool names (namespaced by the manual, not the tool name).
     assert all("pwg" not in n and "query" not in n for n in names)
 

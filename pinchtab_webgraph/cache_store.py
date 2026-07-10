@@ -217,6 +217,13 @@ def stitch(live_rec, graph):
     new_trigger = {"label": live_rec["trigger"], "state": prev["id"],
                    "path": live_rec.get("pathStructured") or [],
                    "form": live_rec.get("form"), "opensAt": live_rec.get("opensAt"),
+                   # the terminal-action descriptor the command compiler reads: what kind
+                   # of action this is (form vs download), the trigger's own selector, and
+                   # (for a direct download) the file URL. Additive — absent on old caches.
+                   "kind": live_rec.get("triggerKind") or "form",
+                   "selector": live_rec.get("triggerSelector"),
+                   "href": live_rec.get("triggerHref"),
+                   "accept": live_rec.get("triggerAccept"),
                    "cachedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                    "cacheSource": "live"}
     return new_states, new_edges, new_trigger
@@ -263,6 +270,10 @@ def merge(host, live_rec, now_iso):
             t["path"] = live_rec.get("pathStructured") or []
             t["form"] = live_rec.get("form")
             t["opensAt"] = live_rec.get("opensAt")
+            t["kind"] = live_rec.get("triggerKind") or "form"
+            t["selector"] = live_rec.get("triggerSelector")
+            t["href"] = live_rec.get("triggerHref")
+            t["accept"] = live_rec.get("triggerAccept")
             t["cachedAt"] = now_iso
             t["cacheSource"] = "live"
             t.pop("staleWarning", None)

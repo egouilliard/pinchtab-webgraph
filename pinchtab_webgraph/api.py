@@ -23,7 +23,7 @@ import os
 # access QUALIFIED — `howto_graph.build_adj` / `paths.build_adj` — which is the point:
 # both modules export `build_adj` with INCOMPATIBLE signatures, so a flat
 # `from .howto import build_adj` would silently shadow one.
-from . import howto as howto_graph, paths
+from . import commands, howto as howto_graph, paths
 
 
 def _load_interaction_graph(graph_path: str | os.PathLike) -> dict:
@@ -106,13 +106,20 @@ def howto(
     # whose form has NO fields is LOW confidence (a nav control that merely shares a
     # create-VERB, not a real form); route by trigger so confidence is per-trigger.
     def _result(epath, t):
+        is_dl = (t.get("kind") or "").lower() == "download"
         steps = (["Go to %s" % start_url]
                  + ["Click “%s”" % e["label"] for e in epath]
-                 + ["Click the “%s” button" % t["label"]])
+                 + [("Download via “%s”" if is_dl else "Click the “%s” button") % t["label"]])
         st = states.get(t["state"], {})
+        # the reproducible PinchTab command block (path + terminal action), so an MCP/UTCP
+        # caller gets a runnable answer, not just narration.
+        cmd_block = commands.for_trigger(t, commands.path_from_edges(epath, states), start_url)
         return {"trigger_label": t["label"], "state_id": t["state"],
                 "state_url": st.get("url"), "clicks": len(steps) - 1, "steps": steps,
                 "opens_at": t.get("opensAt"), "form": t.get("form"),
+                "action_kind": (t.get("kind") or "form"),
+                "download_url": t.get("href") if is_dl else None,
+                "commands": cmd_block,
                 "confidence": howto_graph.form_confidence(t),
                 "tour": _tour_steps(epath, t)}
 
@@ -149,6 +156,75 @@ def howto(
     return {"status": "ok", "goal": goal, "match_pattern": pattern,
             "start_url": start_url, "results": results, "candidates": [],
             "low_confidence": low}
+
+
+def resolve_action(
+    graph_path: str | os.PathLike,
+    goal: str | None = None,
+    start: str | None = None,
+    match: str | None = None,
+    index: int = 0,
+) -> dict:
+    """Resolve a goal to an EXECUTABLE plan: the raw trigger record + the normalized path
+    steps + the start URL — the input `perform.perform()` runs. Offline (no browser).
+
+    This is the resolver half of `perform`: it reuses the exact matching / routing /
+    confidence logic of `howto()` (keep in sync), then — instead of narrating — returns
+    the ingredients the command compiler and executor need. `index` picks among the routed
+    high-confidence matches (0 = the shortest)."""
+    import re
+
+    if not goal and not match:
+        return {"status": "invalid_args", "goal": goal}
+    graph = _load_interaction_graph(graph_path)
+    states = {s["id"]: s for s in graph["states"]}
+    triggers = graph.get("triggers", [])
+
+    rx = re.compile(match, re.I) if match else howto_graph.goal_regex(goal or "")
+    matches = [t for t in triggers if rx.search(t["label"])]
+    if goal:
+        from . import recipe
+        nouns = recipe.goal_nouns(goal)
+        if nouns:
+            nrx = re.compile(recipe.noun_alt(nouns), re.I)
+            have = {id(t) for t in matches}
+            matches += [t for t in triggers if id(t) not in have and nrx.search(t["label"])]
+    if not matches:
+        return {"status": "no_match", "goal": goal, "match_pattern": match or goal}
+
+    adj = howto_graph.build_adj(graph)
+    start_id = howto_graph.find_start_state(graph, start) or howto_graph.find_start_state(graph, None)
+    dist_cache: dict = {}
+    routed = []
+    for t in matches:
+        sid = t.get("state")
+        if sid is None:
+            continue
+        if sid not in dist_cache:
+            dist_cache[sid] = howto_graph.bfs(adj, start_id, {sid})
+        gid, epath = dist_cache[sid]
+        if gid is None:
+            continue
+        routed.append((len(epath), epath, t, howto_graph.form_confidence(t)))
+    if not routed:
+        return {"status": "unreachable", "goal": goal,
+                "candidates": [t["label"] for t in matches]}
+    routed.sort(key=lambda x: x[0])
+    # prefer confident (form-bearing or download) matches, exactly like howto()
+    pool = [r for r in routed if r[3] == "high"] or routed
+    if index < 0 or index >= len(pool):
+        return {"status": "no_match", "goal": goal,
+                "detail": "index %d out of range (%d match(es))" % (index, len(pool))}
+    _d, epath, t, _c = pool[index]
+    start_url = states[start_id]["url"] if start_id in states else None
+    path_steps = commands.path_from_edges(epath, states)
+    return {"status": "ok", "goal": goal, "start_url": start_url,
+            "trigger": t, "path_steps": path_steps,
+            "action_kind": (t.get("kind") or "form"),
+            "trigger_label": t["label"],
+            "download_url": t.get("href") if (t.get("kind") or "").lower() == "download" else None,
+            "commands": commands.for_trigger(t, path_steps, start_url),
+            "match_count": len(pool)}
 
 
 def _tour_steps(epath, trigger) -> list[dict]:

@@ -28,6 +28,9 @@ import time
 from collections import deque
 from urllib.parse import urlparse
 
+from . import commands
+from .crawl import DOWNLOAD_ACTIONS
+
 
 def same_host(u, ref):
     def h(x):
@@ -113,6 +116,16 @@ FORM_JS = r"""
   const NOISE=/ask me anything|search\.\.\.|^search$|type a message|chat/i;
   const SAVE=/save|create|add|submit|confirm|next|finish|crear|guardar|a[nñ]adir|agregar|siguiente|continuar/i;
   function vis(el){const r=el.getBoundingClientRect();return r.width>0&&r.height>0;}
+  function cssEsc(s){return (window.CSS&&CSS.escape)?CSS.escape(s):s.replace(/[^a-zA-Z0-9_-]/g,'\\$&');}
+  function sel(el){ if(!el||el.nodeType!==1) return null;
+    if(el.id) return '#'+cssEsc(el.id);
+    const parts=[]; let e=el;
+    while(e&&e.nodeType===1&&e!==document.body&&e!==document.documentElement){
+      let p=e.tagName.toLowerCase(); const par=e.parentElement;
+      if(par){const sibs=[...par.children].filter(c=>c.tagName===e.tagName);
+        if(sibs.length>1)p+=':nth-of-type('+(sibs.indexOf(e)+1)+')';}
+      parts.unshift(p); e=par; if(parts.length>8)break;}
+    return parts.join('>'); }
   function label(el){
     let l=el.getAttribute('aria-label'); if(l) return l;
     if(el.id){const lf=document.querySelector('label[for="'+(window.CSS?CSS.escape(el.id):el.id)+'"]'); if(lf) return lf.innerText;}
@@ -167,15 +180,20 @@ FORM_JS = r"""
     if(el.tagName.toLowerCase()==='select') options=[...el.options].map(o=>o.text.trim()).filter(Boolean).slice(0,25);
     if(type==='dropdown'||type==='toggle'||type==='radiogroup') value=(el.innerText||'').replace(/\s+/g,' ').trim().slice(0,40);
     const accept=(el.tagName.toLowerCase()==='input' && (el.getAttribute('type')||'').toLowerCase()==='file') ? (el.getAttribute('accept')||null) : null;
-    fields.push({label:lab, type, required:!!required, options, value, accept, placeholder:(el.getAttribute('placeholder')||'').slice(0,60)});
+    fields.push({label:lab, type, required:!!required, options, value, accept, selector:sel(el), placeholder:(el.getAttribute('placeholder')||'').slice(0,60)});
   });
   const h=(root.querySelector&&root.querySelector('h1,h2,h3,[role="heading"]'));
-  let submit=[...(root.querySelectorAll?root.querySelectorAll('button,[type="submit"],[role="button"]'):[])]
-    .map(b=>(b.innerText||b.value||'').replace(/\s+/g,' ').trim()).filter(Boolean).filter(t=>!NOISE.test(t));
-  const saves=submit.filter(t=>SAVE.test(t)); if(saves.length) submit=saves;
+  // keep the submit ELEMENTS (not just their text) so we can hand back a stable selector
+  // for the chosen submit control — the command compiler emits it as a COMMENTED click.
+  let submitEls=[...(root.querySelectorAll?root.querySelectorAll('button,[type="submit"],[role="button"]'):[])]
+    .filter(b=>{const t=(b.innerText||b.value||'').replace(/\s+/g,' ').trim(); return t && !NOISE.test(t);});
+  const saveEls=submitEls.filter(b=>SAVE.test((b.innerText||b.value||'')));
+  if(saveEls.length) submitEls=saveEls;
+  const submit=[...new Set(submitEls.map(b=>(b.innerText||b.value||'').replace(/\s+/g,' ').trim()))].slice(0,6);
   return {title:((h&&h.innerText)||document.title||'').replace(/\s+/g,' ').trim().slice(0,120),
           isDialog: !!dialog,
-          fields, submitButtons:[...new Set(submit)].slice(0,6), fieldCount:fields.length};
+          fields, submitButtons:submit,
+          submitSelector: submitEls.length?sel(submitEls[0]):null, fieldCount:fields.length};
 })()
 """
 
@@ -575,8 +593,16 @@ def main():
         print("· [%d/%d] depth %d · %s (%d controls)"
               % (a.max_discover - budget, a.max_discover, len(path), cur, len(controls)),
               file=sys.stderr)
+        # A download/export control also counts as a goal trigger: its label carries a
+        # download verb sharing a goal noun, or it is an anchor resolving to a file. The
+        # create-VERB needle never matches these, so we OR them in (still goal-gated).
+        def _is_dl_cand(c):
+            t = c.get("text") or ""
+            return (bool(goal_re.search(t)) and bool(DOWNLOAD_ACTIONS.search(t))) or \
+                   (commands.is_direct_download(c.get("href")) and bool(goal_re.search(t)))
         cands = [c for c in controls
-                 if c.get("text") and needle_re.search(c["text"]) and not c.get("bulk")]
+                 if c.get("text") and not c.get("bulk")
+                 and (needle_re.search(c["text"]) or _is_dl_cand(c))]
         if cands:                           # trigger is here — shortest path found
             cands.sort(key=score, reverse=True)
             trigger, page, path_actions = cands[0], cur, path
@@ -673,33 +699,59 @@ def main():
           file=sys.stderr)
     # we are already materialized at the trigger's state (we broke right after finding it)
 
-    # 3) open the form (DO NOT submit). The trigger may open a modal OR navigate
-    #    to a form page — handle both.
-    before = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
-    pt(["click", trigger["selector"]], a.server, timeout=30)  # 409 = navigation, fine
-    settle(a.server)
-    after = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
-    navigated = after.rstrip("/") != before.rstrip("/")
-    form = pt_json(FORM_JS, a.server)
-    if a.screenshot:                        # optional — off by default (saves a round-trip)
-        pt(["screenshot", "-o", os.path.abspath("%s.png" % a.out)], a.server)
+    # 3) classify the trigger. A download/export control opens NO form and clicking it
+    #    would FETCH a file — so, like the crawler with uploads, we NEVER click it: we
+    #    record it and emit a `pinchtab download`/`click` command. A create-style trigger
+    #    is safe to click: open its form, read the fields, then cancel without saving.
+    tdl_href = trigger.get("href")
+    is_direct = commands.is_direct_download(tdl_href)
+    is_download = is_direct or bool(DOWNLOAD_ACTIONS.search(trigger.get("text") or ""))
 
-    # 4) cancel without saving (Escape closes a modal; on a form page it's a no-op)
-    pt(["press", "Escape"], a.server)
-    form["opensAt"] = after if navigated else None
+    if is_download:
+        trigger_kind = "download"
+        trigger_href = tdl_href if is_direct else None
+        form = {"title": "", "isDialog": False, "fields": [], "submitButtons": [],
+                "submitSelector": None, "fieldCount": 0}
+        opens_at = None
+        print("· download trigger — recorded WITHOUT clicking (safe)", file=sys.stderr)
+    else:
+        trigger_kind, trigger_href = "form", None
+        # open the form (DO NOT submit). The trigger may open a modal OR navigate to a
+        # form page — handle both.
+        before = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
+        pt(["click", trigger["selector"]], a.server, timeout=30)  # 409 = navigation, fine
+        settle(a.server)
+        after = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
+        navigated = after.rstrip("/") != before.rstrip("/")
+        form = pt_json(FORM_JS, a.server)
+        if a.screenshot:                    # optional — off by default (saves a round-trip)
+            pt(["screenshot", "-o", os.path.abspath("%s.png" % a.out)], a.server)
+        # cancel without saving (Escape closes a modal; on a form page it's a no-op)
+        pt(["press", "Escape"], a.server)
+        opens_at = after if navigated else None
+    form["opensAt"] = opens_at
 
-    # 5) emit how-to — the recorded click-path is exactly what a chatbot narrates
+    # 4) emit how-to — the recorded click-path is exactly what a chatbot narrates
     steps = ["Go to %s" % start_url]
     steps += ["Click “%s”" % act["label"] for act in path_actions]
-    steps.append("Click the “%s” button" % trigger["text"])
+    steps.append(("Download via “%s”" if is_download else "Click the “%s” button")
+                 % trigger["text"])
+    # structured path (additive) so the cache write-back can stitch states+edges from a
+    # live result — one entry per click; href is null for tab/menu clicks.
+    path_structured = [{"label": act["label"], "selector": act["selector"],
+                        "href": act.get("href")} for act in path_actions]
+    # 5) compile a runnable pinchtab command block from the path + the terminal action.
+    trig_rec = {"kind": trigger_kind, "label": trigger["text"], "selector": trigger["selector"],
+                "href": trigger_href, "accept": trigger.get("accept"),
+                "form": form, "opensAt": opens_at}
+    command_lines = commands.for_trigger(trig_rec, path_structured, start_url)
     rec = {"goal": a.goal, "start": start_url, "triggerPage": page, "trigger": trigger["text"],
+           "triggerKind": trigger_kind, "triggerHref": trigger_href,
+           "triggerAccept": trigger.get("accept"),
            "shortestClicks": len(path_actions) + 1, "steps": steps,
-           "opensAt": form.get("opensAt"), "form": form,
-           # structured path (additive) so the cache write-back can stitch states+edges
-           # from a live result — one entry per click; href is null for tab/menu clicks.
-           "pathStructured": [{"label": act["label"], "selector": act["selector"],
-                               "href": act.get("href")} for act in path_actions],
-           "triggerSelector": trigger["selector"]}
+           "opensAt": opens_at, "form": form,
+           "pathStructured": path_structured,
+           "triggerSelector": trigger["selector"], "commands": command_lines}
     json.dump(rec, open(os.path.abspath("%s.json" % a.out), "w"), indent=2)
 
     print("\n=== HOW TO: %s ===\n" % a.goal.upper())
@@ -708,17 +760,26 @@ def main():
         print("  %d. %s" % (i, s))
     if form.get("opensAt"):
         print("     → opens %s" % form["opensAt"])
-    print("\nThis opens%s: “%s”" % (" a dialog" if form.get("isDialog") else " a form", form["title"]))
-    print("Fill in %d field(s):" % form["fieldCount"])
-    for f in form["fields"]:
-        req = "  (required)" if f["required"] else ""
-        opt = ("  options: " + ", ".join(f["options"])) if f.get("options") else ""
-        val = ("  default: " + f["value"]) if f.get("value") else ""
-        acc = ("  accepts: " + f["accept"]) if f.get("accept") else ""
-        ph = ("  e.g. " + f["placeholder"]) if f["placeholder"] and not opt and not val else ""
-        print("  • %-30s [%s]%s%s%s%s%s" % (f["label"] or "(unlabeled)", f["type"], acc, req, ph, val, opt))
-    if form.get("submitButtons"):
-        print("\nThen click to confirm: %s" % "  /  ".join("“%s”" % b for b in form["submitButtons"]))
+    if is_download:
+        if trigger_href:
+            print("\nThis downloads a file: %s" % trigger_href)
+        else:
+            print("\nThis triggers a download (the browser session captures the file).")
+    else:
+        print("\nThis opens%s: “%s”" % (" a dialog" if form.get("isDialog") else " a form", form["title"]))
+        print("Fill in %d field(s):" % form["fieldCount"])
+        for f in form["fields"]:
+            req = "  (required)" if f["required"] else ""
+            opt = ("  options: " + ", ".join(f["options"])) if f.get("options") else ""
+            val = ("  default: " + f["value"]) if f.get("value") else ""
+            acc = ("  accepts: " + f["accept"]) if f.get("accept") else ""
+            ph = ("  e.g. " + f["placeholder"]) if f["placeholder"] and not opt and not val else ""
+            print("  • %-30s [%s]%s%s%s%s%s" % (f["label"] or "(unlabeled)", f["type"], acc, req, ph, val, opt))
+        if form.get("submitButtons"):
+            print("\nThen click to confirm: %s" % "  /  ".join("“%s”" % b for b in form["submitButtons"]))
+    # the reproducible command block — copy-paste to drive it via the PinchTab CLI
+    print("\nRun it with PinchTab:")
+    print(commands.block("  " + l for l in command_lines))
     if a.screenshot:
         print("\nScreenshot: %s.png" % a.out, end="")
     print("\nspec: %s.json" % a.out)

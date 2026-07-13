@@ -26,6 +26,9 @@ SUBS = {
                   "LIVE how-to finder — drive the running UI to a goal's trigger and read its form"),
     "perform":   ("pinchtab_webgraph.perform",
                   "PERFORM a how-to live — run the compiled pinchtab block (download/upload/fill); safe by default"),
+    "flow":      ("pinchtab_webgraph.flow_cmd",
+                  "run/validate a declarative automation FLOW — for_each/paginate over a crawled "
+                  "graph, content-hash download dedupe; safe by default"),
     "linkcrawl": ("pinchtab_webgraph.crawl",
                   "page->page LINK graph + a self-contained Cytoscape HTML viewer"),
     "paths":     ("pinchtab_webgraph.paths",

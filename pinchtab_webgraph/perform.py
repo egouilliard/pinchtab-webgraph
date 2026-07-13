@@ -134,7 +134,16 @@ def execute_steps(steps, *, server=DEFAULT_SERVER, token=None, tab=None,
                                 "reason": "needs a value — pass --set %r"
                                           % ("%s=<value>" % (s.get("label") or "field"))})
                     continue
-                argv[s["value_index"]] = val
+                if s["value_index"] is None:
+                    # a checkbox: `check <sel>` has no value slot. The value is a BOOLEAN —
+                    # run the command when truthy, skip it when falsy. (Substituting here
+                    # would be argv[None] → TypeError.)
+                    if not commands.is_truthy(val):
+                        out.append({"line": rendered, "role": role, "status": "skipped",
+                                    "reason": "value %r is falsy — leaving it unchecked" % val})
+                        continue
+                else:
+                    argv[s["value_index"]] = val
         if role == "download":
             argv = _apply_out_dir(argv, out_dir)
         shown = commands.render_step({**s, "argv": argv})

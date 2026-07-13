@@ -62,7 +62,7 @@ def test_form_skips_fields_without_values_and_gates_submit():
     assert {r["role"] for r in skipped} == {"fill", "select", "submit"}
     # crucially: no fill/select/submit was ever sent to the browser
     assert not any(c[0] in ("fill", "select") for c in run.calls)
-    assert not any(c == ["click", "--css", "#save"] for c in run.calls)
+    assert not any(c[:2] == ["click", "--css"] and c[2] == "#save" for c in run.calls)
 
 
 def test_form_runs_fields_with_values_and_submit_when_allowed():
@@ -71,7 +71,50 @@ def test_form_runs_fields_with_values_and_submit_when_allowed():
                          values={"Name": "Acme", "Plan": "Pro"}, _run=run)
     assert ["fill", "#n", "Acme"] in run.calls
     assert ["select", "#p", "Pro"] in run.calls
-    assert ["click", "--css", "#save"] in run.calls   # submit ran (allow_submit)
+    # submit ran (allow_submit) — and carries --wait-nav (see below)
+    assert ["click", "--css", "#save", "--wait-nav"] in run.calls
+
+
+# --- regression: a click that NAVIGATES must not abort the run ------------------
+# PinchTab's action guard 409s ("unexpected page navigation") on a click that moves the
+# page — AFTER the click already succeeded. execute_steps aborts on rc != 0 for role
+# nav/click, so a successful form submit that server-side-redirects used to be reported as
+# a FAILED, aborted run. commands.py now emits every click with --wait-nav, which makes
+# PinchTab wait for the navigation and return rc 0. Two things are asserted:
+#   1. every click argv carries the flag (so the guard never fires), and
+#   2. with the flag present the run completes — the submit is `ok`, nothing is `aborted`.
+
+def test_every_click_step_carries_wait_nav():
+    steps = commands.steps_for_trigger(_FORM, _PATH, "https://app.test/home",
+                                       allow_submit=True)
+    clicks = [s for s in steps if s["argv"] and s["argv"][0] == "click"]
+    assert clicks                                     # trigger click + submit click
+    for s in clicks:
+        assert s["argv"][-1] == "--wait-nav"
+        assert s["argv"].count("--wait-nav") == 1     # no double-flag
+        # appending a trailing flag is index-safe: a click never substitutes into its argv
+        assert s["value_index"] is None and not s["needs_input"]
+
+
+class NavGuardRunner(FakeRunner):
+    """A bridge whose action guard 409s on a click that navigates — UNLESS --wait-nav is
+    passed (the real PinchTab behaviour). Any navigating click here is `#save`."""
+
+    def __call__(self, argv, server, token, tab, timeout=90):
+        self.calls.append(argv)
+        if argv[0] == "click" and "#save" in argv and "--wait-nav" not in argv:
+            return 1, "", "409: unexpected page navigation: /teams/new -> /teams/42"
+        return 0, "ok", ""
+
+
+def test_navigating_click_does_not_abort_the_run():
+    run = NavGuardRunner()
+    res = perform.execute_plan(_FORM, _PATH, "https://app.test/home", allow_submit=True,
+                               values={"Name": "Acme", "Plan": "Pro"}, _run=run)
+    assert not any(r["status"] == "aborted" for r in res)
+    assert not any(r["status"] == "error" for r in res)
+    submit = [r for r in res if r["role"] == "submit"][0]
+    assert submit["status"] == "ok"
 
 
 def test_upload_field_needs_file():
@@ -162,3 +205,40 @@ def test_interaction_crawl_serializes_download_trigger_fields():
     form = {"label": "Create team", "state": "sig2", "path": [], "form": {"fieldCount": 1},
             "opensAt": None}
     assert interaction_crawl.serialize_trigger(form, "s2")["kind"] == "form"
+
+
+# --- checkbox: a `check` step has no value slot (regression) --------------------
+# `--set 'Active=true'` used to crash with TypeError (argv[None]) the moment a form had a
+# checkbox. A checkbox value is a BOOLEAN: truthy -> check it, falsy/absent -> leave it.
+
+_CHECKBOX_FORM = {
+    "kind": "form", "label": "Settings", "selector": "#open", "opensAt": None,
+    "form": {"fieldCount": 1, "submitButtons": [], "submitSelector": None,
+             "fields": [{"label": "Active", "type": "checkbox", "selector": "#active"}]}}
+
+
+def test_checkbox_without_a_value_is_skipped():
+    run = FakeRunner()
+    res = perform.execute_plan(_CHECKBOX_FORM, [], "https://app.test/x", _run=run)
+    check = [r for r in res if r["role"] == "check"][0]
+    assert check["status"] == "skipped"
+    assert not any(c[0] == "check" for c in run.calls)
+
+
+def test_checkbox_with_a_truthy_value_is_checked():
+    run = FakeRunner()
+    res = perform.execute_plan(_CHECKBOX_FORM, [], "https://app.test/x",
+                               values={"Active": "true"}, _run=run)
+    check = [r for r in res if r["role"] == "check"][0]
+    assert check["status"] == "ok"
+    assert ["check", "#active"] in run.calls        # argv is UNCHANGED — no substitution
+
+
+def test_checkbox_with_a_falsy_value_is_skipped_not_crashed():
+    run = FakeRunner()
+    res = perform.execute_plan(_CHECKBOX_FORM, [], "https://app.test/x",
+                               values={"Active": "false"}, _run=run)
+    check = [r for r in res if r["role"] == "check"][0]
+    assert check["status"] == "skipped"
+    assert "falsy" in check["reason"]
+    assert not any(c[0] == "check" for c in run.calls)

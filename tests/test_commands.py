@@ -4,6 +4,8 @@ Pure/stdlib and browser-free: every function is deterministic and derives its ou
 from graph data, so these assert the exact emitted `pinchtab` lines. That is the
 correctness contract — the whole point of the module is that the commands are right.
 """
+import pytest
+
 from pinchtab_webgraph import commands as cm
 
 
@@ -41,7 +43,10 @@ def test_nav_prefix_link_vs_click():
     lines = cm.nav_prefix("https://x.test/home", steps)
     assert lines[0] == "pinchtab nav 'https://x.test/home'"
     assert lines[1] == "pinchtab nav 'https://x.test/reports'   # Reports"
-    assert lines[2] == "pinchtab click --css 'div>button:nth-of-type(2)'   # Exports tab"
+    # --wait-nav on EVERY click (a tab click that navigates otherwise 409s AFTER it worked);
+    # note the flag renders BARE — render_step only quotes non-flag args.
+    assert lines[2] == ("pinchtab click --css 'div>button:nth-of-type(2)' --wait-nav"
+                        "   # Exports tab")
 
 
 def test_path_from_edges_resolves_link_dest_url():
@@ -91,19 +96,20 @@ def _form():
 
 def test_form_terminal_fills_by_type_and_comments_submit():
     lines = cm.form_terminal(_form(), trigger_selector="#open")
-    assert lines[0] == "pinchtab click --css '#open'   # opens the form"
+    assert lines[0] == "pinchtab click --css '#open' --wait-nav   # opens the form"
     assert "pinchtab fill '#name' '<name>'   # Name (required)" in lines
     assert "pinchtab select '#type' 'A'   # Type" in lines
     assert "pinchtab check '#active'   # Active" in lines
     assert any(l.startswith("pinchtab upload '<FILE>' -s '#doc'") for l in lines)
-    # submit is COMMENTED OUT by default (safety)
-    assert any(l.startswith("# pinchtab click --css '#save'") for l in lines)
+    # submit is COMMENTED OUT by default (safety) — and still carries --wait-nav, since a
+    # human who uncomments it hits the same redirect-after-submit 409 otherwise.
+    assert "# pinchtab click --css '#save' --wait-nav   # submit (uncomment to save)" in lines
     assert not any(l.startswith("pinchtab click --css '#save'") for l in lines)
 
 
 def test_form_terminal_allow_submit_uncomments():
     lines = cm.form_terminal(_form(), trigger_selector="#open", allow_submit=True)
-    assert "pinchtab click --css '#save'   # submit: Save" in lines
+    assert "pinchtab click --css '#save' --wait-nav   # submit: Save" in lines
 
 
 def test_field_without_selector_degrades_to_comment():
@@ -205,3 +211,25 @@ def test_cache_store_stitch_records_download_kind():
     assert trig["selector"] == "#export"
     assert trig["href"] is None
     assert trig["label"] == "Export CSV"
+
+
+# --- the checkbox step shape (a `check` argv has NO value slot) -----------------
+# regression: `_field_step` emits a checkbox as needs_input=True with value_index=None, and
+# BOTH executors used to do `argv[step["value_index"]] = val` -> argv[None] -> TypeError the
+# moment anyone passed `--set 'Active=true'`. The step shape here is the source of truth.
+
+def test_checkbox_step_needs_input_but_has_no_value_index():
+    step = cm._field_step({"label": "Active", "type": "checkbox", "selector": "#active"})
+    assert step["argv"] == ["check", "#active"]
+    assert step["needs_input"] is True
+    assert step["value_index"] is None            # nothing to substitute into
+    assert step["label"] == "Active"
+
+
+@pytest.mark.parametrize("value, expect", [
+    (True, True), ("true", True), ("yes", True), ("1", True), ("on", True), ("x", True),
+    (False, False), ("false", False), ("no", False), ("0", False), ("off", False),
+    ("", False), ("  ", False), (None, False),
+])
+def test_is_truthy_reads_a_checkbox_value_as_a_boolean(value, expect):
+    assert cm.is_truthy(value) is expect

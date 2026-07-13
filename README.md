@@ -130,7 +130,7 @@ The terminal action is chosen structurally from the graph — no LLM, no app-spe
 | Action kind | How it's recognized | Emitted command |
 | --- | --- | --- |
 | **download** (direct) | a link/anchor that resolves to a file (`download` attr, file-extension path, or `blob:`/`data:` URL) | `pinchtab download '<url>' -o '<file>'` |
-| **download** (JS) | a control whose label is a download/export verb | `pinchtab click --css '<selector>'` — the browser session captures the file |
+| **download** (JS) | a control whose label is a download/export verb | `pinchtab click --css '<selector>' --wait-nav` — the browser session captures the file |
 | **upload** | a file input / styled `<label>` / `ondrop` dropzone | `pinchtab upload '<FILE>' -s '<selector>'` (accepted types annotated) |
 | **form** | a create-style trigger that opens a form | one `fill`/`select`/`check` per field (placeholder values); the **submit line is commented out** |
 

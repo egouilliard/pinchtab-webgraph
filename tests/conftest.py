@@ -27,6 +27,14 @@ def sample_link_graph_path():
 
 
 @pytest.fixture
+def two_downloads_graph_path():
+    # Models a crawl of a site with TWO download links on the SAME state: the case where
+    # only the goal's NOUN can pick the right one (both labels share "download", both are
+    # one click from the root). See test_download_goal_routing.py.
+    return FIXTURES_DIR / "two_downloads_graph.json"
+
+
+@pytest.fixture
 def linkedin_guest_graph_path():
     # Models the FIXED interaction crawl of linkedin.com's guest surface (issue #11):
     # a low-confidence create-VERB nav ("Find a NEW job", 0-field) plus two structurally

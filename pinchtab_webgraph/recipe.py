@@ -38,19 +38,34 @@ def same_host(u, ref):
         return n[4:] if n.startswith("www.") else n
     return h(u) == h(ref)
 
-# create-style verbs (EN + ES — covers bilingual apps; extend for other locales)
+# create-style verbs (EN + ES — covers bilingual apps; extend for other locales).
+# DISCOVERY vocabulary: interaction_crawl's TRIGGER_RE keys on this to decide which
+# controls to CLICK, so it must stay create-only — a download verb here would make the
+# crawler click download buttons, which it deliberately never does.
 VERBS = r"create|add|new|start|crear|nuevo|nueva|añadir|anadir|agregar|generar"
 
+# Terminal-action verbs — a download control is a goal in its own right ("download the
+# Q3 report"), but it is NOT something to click during discovery. So they live apart
+# from VERBS, and are only ever used to match a GOAL against an already-recorded label.
+ACTION_VERBS = r"download|export|descargar|exportar"
+
+# The verb vocabulary a GOAL is matched with: create + terminal-action. Goal-matching
+# only (goal_needle) — never TRIGGER_RE.
+GOAL_VERBS = "%s|%s" % (VERBS, ACTION_VERBS)
+
 # Tokens dropped from a goal before we match it against trigger labels: articles /
-# prepositions, the create-VERBS themselves (they are matched via VERBS, not as a
-# noun), and their ES equivalents. Short (≤2-char) tokens are ALSO dropped in
-# goal_nouns() — they cause spurious substring hits ("in" inside "Find", "a"/"to"
-# everywhere). Generic, no app/section vocabulary.
+# prepositions, the GOAL_VERBS themselves (they are matched as verbs, not as a noun),
+# and their ES equivalents. Short (≤2-char) tokens are ALSO dropped in goal_nouns() —
+# they cause spurious substring hits ("in" inside "Find", "a"/"to" everywhere). Leaving
+# a verb in as a noun is what made "download the logo" match EVERY download control:
+# the noun fallback ORs the nouns, so the shared word "download" hit them all.
+# Generic, no app/section vocabulary.
 GOAL_STOPWORDS = {
     "a", "an", "the", "to", "of", "for", "in", "on", "at", "by", "with", "and",
     "or", "my", "me", "i", "do", "how", "some", "this", "that",
     "create", "add", "new", "make", "start", "generate",
     "crear", "nuevo", "nueva", "añadir", "anadir", "agregar", "generar",
+    "download", "export", "descargar", "exportar",
     "un", "una", "el", "la", "los", "las", "de", "para",
 }
 
@@ -75,17 +90,21 @@ def noun_alt(nouns):
 
 
 def goal_needle(goal, match=None):
-    """The trigger-label regex for a live search: a create-VERB adjacent (≤30 chars)
-    to a goal noun, in either order, with noun_alt()'s word-boundary/plural handling so
-    a short noun can't match inside an unrelated word. Falls back to bare VERBS when the
-    goal has no content nouns. `match` (an explicit user regex) overrides."""
+    """The trigger-label regex for a live search: a GOAL_VERB (create OR terminal-action)
+    adjacent (≤30 chars) to a goal noun, in either order, with noun_alt()'s word-boundary/
+    plural handling so a short noun can't match inside an unrelated word. Falls back to
+    bare GOAL_VERBS when the goal has no content nouns. `match` (a user regex) overrides.
+
+    The verb alternation must span BOTH families: keying it on create-verbs alone made
+    every download goal miss this regex and fall through to the noun-only fallback, which
+    then matched every download control on the site indiscriminately."""
     if match:
         return match
     nouns = goal_nouns(goal)
     if not nouns:
-        return r"\b(?:%s)\b" % VERBS
+        return r"\b(?:%s)\b" % GOAL_VERBS
     np = noun_alt(nouns)
-    return r"(?:%s)\b.{0,30}%s|%s.{0,30}\b(?:%s)" % (VERBS, np, np, VERBS)
+    return r"(?:%s)\b.{0,30}%s|%s.{0,30}\b(?:%s)" % (GOAL_VERBS, np, np, GOAL_VERBS)
 
 # --- stable CSS selector + form introspection, injected into the page ---------
 TRIGGER_JS = r"""

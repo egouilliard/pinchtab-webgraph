@@ -1,0 +1,89 @@
+{
+  "meta": {
+    "root": "http://acme.test/index.html",
+    "note": "Models a real crawl of a site with TWO download links on the SAME page plus two create-forms. Two downloads is the case that exposes goal->trigger misrouting: both labels share the word 'download', both sit on the same state (identical path length), so nothing but the NOUN can tell them apart."
+  },
+  "states": [
+    {"id": "s0", "url": "http://acme.test/index.html", "label": "/index.html", "depth": 0},
+    {"id": "s1", "url": "http://acme.test/reports.html", "label": "Reports", "depth": 1},
+    {"id": "s2", "url": "http://acme.test/documents.html", "label": "Documents", "depth": 1},
+    {"id": "s3", "url": "http://acme.test/teams.html", "label": "Teams", "depth": 1}
+  ],
+  "state_index": {
+    "http://acme.test/index.html": "s0",
+    "http://acme.test/reports.html": "s1",
+    "http://acme.test/documents.html": "s2",
+    "http://acme.test/teams.html": "s3"
+  },
+  "edges": [
+    {"from": "s0", "to": "s1", "label": "Reports", "selector": "nav>a:nth-of-type(1)", "kind": "link"},
+    {"from": "s0", "to": "s2", "label": "Documents", "selector": "nav>a:nth-of-type(2)", "kind": "link"},
+    {"from": "s0", "to": "s3", "label": "Teams", "selector": "nav>a:nth-of-type(3)", "kind": "link"}
+  ],
+  "triggers": [
+    {
+      "label": "Download the Q3 report",
+      "state": "s1",
+      "path": [{"label": "Reports", "selector": "nav>a:nth-of-type(1)", "href": "http://acme.test/reports.html"}],
+      "form": null,
+      "opensAt": null,
+      "kind": "download",
+      "selector": "#q3",
+      "href": "http://acme.test/files/q3-report.pdf",
+      "accept": null
+    },
+    {
+      "label": "Download the logo",
+      "state": "s1",
+      "path": [{"label": "Reports", "selector": "nav>a:nth-of-type(1)", "href": "http://acme.test/reports.html"}],
+      "form": null,
+      "opensAt": null,
+      "kind": "download",
+      "selector": "#logo",
+      "href": "http://acme.test/files/logo.png",
+      "accept": null
+    },
+    {
+      "label": "Add document",
+      "state": "s2",
+      "path": [{"label": "Documents", "selector": "nav>a:nth-of-type(2)", "href": "http://acme.test/documents.html"}],
+      "form": {
+        "title": "Documents",
+        "isDialog": false,
+        "fields": [
+          {"label": "Document file", "type": "file", "required": true, "options": null, "value": null, "accept": ".pdf,.txt", "selector": "#doc", "placeholder": ""},
+          {"label": "Title", "type": "text", "required": false, "options": null, "value": null, "accept": null, "selector": "#title", "placeholder": ""}
+        ],
+        "submitButtons": ["Upload file"],
+        "submitSelector": "#doc-save",
+        "fieldCount": 2
+      },
+      "opensAt": null,
+      "kind": "form",
+      "selector": "#new-doc",
+      "href": null,
+      "accept": null
+    },
+    {
+      "label": "Create team",
+      "state": "s3",
+      "path": [{"label": "Teams", "selector": "nav>a:nth-of-type(3)", "href": "http://acme.test/teams.html"}],
+      "form": {
+        "title": "Teams",
+        "isDialog": false,
+        "fields": [
+          {"label": "Team name", "type": "text", "required": true, "options": null, "value": null, "accept": null, "selector": "#name", "placeholder": ""},
+          {"label": "Plan", "type": "select", "required": false, "options": ["Free", "Pro", "Enterprise"], "value": null, "accept": null, "selector": "#plan", "placeholder": ""}
+        ],
+        "submitButtons": ["Save team"],
+        "submitSelector": "#save",
+        "fieldCount": 2
+      },
+      "opensAt": null,
+      "kind": "form",
+      "selector": "#new-team",
+      "href": null,
+      "accept": null
+    }
+  ]
+}

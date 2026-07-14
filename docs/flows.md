@@ -24,7 +24,8 @@ load-bearing:
 | Step VM | [`pinchtab_webgraph/runner.py`](../pinchtab_webgraph/runner.py) — the interpreter. Browser, artifact store and sleep are **injectable ports**. |
 | Browser port | [`pinchtab_webgraph/browser.py`](../pinchtab_webgraph/browser.py) — `PinchTabBrowser` + the live-DOM primitives (`query`, `next_page`, `page_signature`, `fetch_bytes`/`save_bytes`). |
 | Artifact store | [`pinchtab_webgraph/artifacts.py`](../pinchtab_webgraph/artifacts.py) — content-addressed store + the persistent dedupe ledger. |
-| CLI | [`pinchtab_webgraph/flow_cmd.py`](../pinchtab_webgraph/flow_cmd.py) — `pwg flow run \| validate \| schema`. |
+| CLI | [`pinchtab_webgraph/flow_cmd.py`](../pinchtab_webgraph/flow_cmd.py) — `pwg flow run \| validate \| schema` (`--jsonl` streams the run as JSON Lines). |
+| Web UI | The **[Flows tab](#running-flows-from-the-web-ui)** — [`ui/flow_store.py`](../pinchtab_webgraph/ui/flow_store.py) (saved flows + run history on disk) and [`ui/flow_runner.py`](../pinchtab_webgraph/ui/flow_runner.py) (runs `flow_cmd --jsonl` as a subprocess and relays its frames). Opt-in: `PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1`. |
 
 ## Contents
 
@@ -40,6 +41,14 @@ load-bearing:
 - [The dedupe ledger](#the-dedupe-ledger)
 - [Authoring a flow — a walkthrough](#authoring-a-flow--a-walkthrough)
 - [Run records and events](#run-records-and-events)
+- [Running flows from the web UI](#running-flows-from-the-web-ui)
+  - [The tab](#the-tab)
+  - [The safety model, made visible](#the-safety-model-made-visible)
+  - [Storage layout and caps](#storage-layout-and-caps)
+  - [Why a run is a subprocess](#why-a-run-is-a-subprocess)
+  - [REST surface](#rest-surface)
+  - [`GET /ws/flows/run` — the frame protocol](#get-wsflowsrun--the-frame-protocol)
+  - [Caveat: the artifact scope diverges between CLI and UI](#caveat-the-artifact-scope-diverges-between-cli-and-ui)
 - [Gotchas](#gotchas)
 
 ## A flow in 20 lines
@@ -313,7 +322,10 @@ is one the resolver actually matches:
 pwg howto out/app.json --goal "invoices"      # the click-path + what it lands on
 ```
 
-**3. Write the document.** Start from the [example above](#a-flow-in-20-lines). Rules of thumb:
+**3. Write the document.** Start from the [example above](#a-flow-in-20-lines), or from the
+committed, runnable one at
+[`examples/flows/download-all-reports.json`](../examples/flows/download-all-reports.json) (the
+same document the UI's **`+ New flow`** button seeds the editor with). Rules of thumb:
 
 - Prefer `goal` / `match` over a hard-coded `selector` — that is what survives a redesign.
 - `goto` to position, `for_each` to fan out over what's on the page, `paginate` to fan out over
@@ -366,6 +378,209 @@ record:
 A `skipped` step always carries a `reason` (usually a withheld capability or a form field with no
 supplied value). Nothing is ever silently dropped.
 
+## Running flows from the web UI
+
+The flow layer shipped CLI-only, which meant an automation platform you could not *see* your
+automations in. The optional **[web UI](ui.md)** now carries a fourth tab — **Flows** — where a
+host's saved automations are listed, written, validated, run, re-run, and audited.
+
+```bash
+PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1 pinchtab-webgraph-ui        # 1 / true / yes / on
+```
+
+**Off by default**, exactly like [`PINCHTAB_WEBGRAPH_ENABLE_CRAWL`](ui.md#new-crawl-get-wscrawl-opt-in)
+— and more warranted: a crawl *structurally never submits*, where a flow's `do{submit: true}` or
+`upload` step **can write to the real site**. With the gate unset, `/ws/flows/run` refuses with a
+`flow_unavailable` / `disabled` frame; the CRUD routes and the editor keep working, so you can
+still author and validate a flow on a server that is not allowed to run one.
+
+### The tab
+
+```
+┌───────────────┬──────────────────────────────────────────────────────────┐
+│ Crawled       │ app.example.com   [Workspace][Graph][Explore][Flows]      │
+│ graphs        ├──────────────────┬───────────────────────────────────────┤
+│ ───────────   │  Flows           │  { "name": "download-all-reports",     │
+│ app.example   │  ─────────────   │    "steps": [ … ] }        ← editor    │
+│ …             │  ▸ download-all  │  ✓ ok · 4 steps · download             │
+│               │    reports  ·3   │  ┌──────────────────────────────────┐  │
+│               │  ▸ export-users  │  │ Run: [x] Dry run  [ ] Allow submit│  │
+│               │                  │  │      [Run flow] [Cancel]  5 new · │  │
+│               │  [+ New flow]    │  │                          0 dupe   │  │
+│               │                  │  │  ✓ download  report-a.pdf  new    │  │
+│               │                  │  └──────────────────────────────────┘  │
+│               │                  │  Runs (history)   │  Artifacts (all-time)│
+└───────────────┴──────────────────┴───────────────────────────────────────┘
+```
+
+- **Flow list** (left) — every flow saved under the selected host, with its step count and how
+  many times it has run. **`+ New flow`** seeds the editor with a runnable starter document (a
+  paginate + for_each + download flow, so the dedupe story is there from the first keystroke).
+- **Editor** — a plain JSON textarea with a **live validator**: every keystroke (debounced) is
+  `POST`ed to `/api/flows/validate`, which is [`flow.validate()`](#the-document-format) — pure, no
+  browser, no graph. A typo'd `${itm.href}` turns the bar red and names both the variable *and its
+  path in the document* (`steps[1].body[0].body[0].href`) before a browser is ever leased. **Save
+  is disabled while the document is invalid.**
+- **Run panel** — built from the flow's own declared `inputs` (one field per input, typed and
+  marked required) and its declared `capabilities`. See below.
+- **Run log** — the streaming step feed, plus a live **`N new · M dupe`** counter fed by the
+  `download` step frames. That counter *is* the product: re-running a flow and watching it report
+  **0 new · 5 dupe** is what makes this a change detector rather than a dumb poller.
+- **Runs (history)** — the flow's past runs, newest first. Clicking one replays its persisted step
+  log into the same panel, so a finished run reads exactly like a live one.
+- **Artifacts (all-time)** — the flow's cumulative [dedupe ledger](#the-dedupe-ledger)
+  (`artifacts.list_artifacts()`): every distinct file it has *ever* fetched, with name, size, when,
+  and sha256. A run record only knows what *it* fetched; the ledger is what "what does this
+  automation have?" is actually asking.
+
+### The safety model, made visible
+
+The [capability model](#the-capability--safety-model) is not just enforced in the UI, it is
+**rendered**:
+
+| Control | Behaviour |
+| --- | --- |
+| **Dry run** | **Checked by default.** A dry run touches nothing — no browser command, no artifact directory — so it also neither leases the bridge nor vetoes a crawl. |
+| **Allow download** | Checked by default (the one read-only capability), and **disabled unless the flow declares `allow_download`**. |
+| **Allow submit** / **Allow upload** | **Unchecked**, and **disabled unless the flow's own `capabilities` block declares them.** |
+
+So *"a write happens only if the flow **declares** it **and** the caller **grants** it"* is
+something you can **see** rather than something you have to read. The server re-derives the
+effective grant the same way (`declared AND granted`) before it builds the subprocess argv, and the
+runner ANDs it again per step — a checkbox in a browser is a convenience, never the enforcement.
+
+### Storage layout and caps
+
+Saved flows and their run history live under the [cache/config home](ui.md#environment-variables)
+(`$PINCHTAB_WEBGRAPH_HOME`, default `~/.pinchtab-webgraph`):
+
+```
+<home>/flows/<host>/<flow_id>.json                  the flow record  {id, host, created_at, updated_at, doc}
+<home>/flows/<host>/<flow_id>/runs/<run_id>.json    one execution    {status, dry_run, cancelled, capabilities,
+                                                                      inputs, stats, steps, artifacts, collected, …}
+```
+
+[`ui/flow_store.py`](../pinchtab_webgraph/ui/flow_store.py) mirrors
+[`chat_store.py`](ui.md#on-disk-layout) exactly: stdlib-only, a per-host directory, **atomic
+writes** (tmp + `os.replace`), and one validation choke-point. `<flow_id>` / `<run_id>` are uuid4
+hex (`^[0-9a-f]{32}$`), so a raw id can never resolve outside its host's directory.
+
+> **Two different "host"s — do not conflate them.** The **`<host>` path segment is a STORAGE
+> PARTITION KEY** (which drawer the flow is filed in; validated by `cache_store.validate_host`; it
+> has no runtime meaning). A flow document's own optional **`host` field is a RUNTIME NAVIGATION
+> GUARD** — the runner refuses a `goto{url}` that leaves it. They may legitimately differ. Nothing
+> in the store reads `doc["host"]`; nothing in the runner reads the partition key.
+
+| Cap | Value | At the cap |
+| --- | --- | --- |
+| `MAX_FLOWS_PER_HOST` | **200** | **Hard reject** — `429 too_many_flows`. No silent eviction: a flow is *authored content*, and deleting one behind your back to make room would destroy work you wrote. |
+| `MAX_RUNS_PER_FLOW` | **50** | **FIFO-evict** the oldest run. A run history is an *audit trail of a reusable automation*, not authored content — hard-rejecting run #51 would mean "this saved automation can never be run again", which is the wrong failure mode for the thing the feature exists to do. Losing the oldest audit line is the cheap failure. |
+| `MAX_RUN_LOG_ENTRIES` | **2 000** | A run's step log is trimmed to its trailing 2 000 entries on save (a `for_each` inside a `paginate` can emit a lot). |
+| `MAX_LIVE_FLOW_RUNS` | **1** | A second live run gets `too_many_sessions`. |
+
+**A flow run and a live crawl refuse each other** (a cross-veto, in both directions): they drive the
+same single-tenant PinchTab bridge — one bridge, one tab. A **dry** run is exempt: it opens no
+browser, so it neither consumes the bridge nor blocks a crawl.
+
+Deleting a flow **cascades**: its whole run history goes with it.
+
+### Why a run is a subprocess
+
+A run is executed by spawning `python -m pinchtab_webgraph.flow_cmd run <doc> --jsonl` and relaying
+its JSONL frames — not by calling `runner.execute()` in-process. That is deliberate:
+
+- **Cancel only works this way.** A flow can run for a long time (a `paginate` over 50 pages, each a
+  real browser round-trip) and the user must be able to stop it. `runner.execute()` has **no
+  cooperative-cancellation hook** — no callback, no flag it re-checks between steps — so an
+  in-process design could never honour that click. The only cancellation primitive that actually
+  works is **SIGTERM→SIGKILL on the process's own group** (`start_new_session=True`).
+- **Crash isolation** on the thing holding a real, logged-in browser tab, for free.
+
+This mirrors [`live_crawl.py`](ui.md#new-crawl-get-wscrawl-opt-in) exactly — same structure, same
+`FlowRunUnavailable(reason, detail)` degradation instead of a crash, same process-group teardown.
+User values never become a shell string: `build_run_argv` emits an argv **list** and the session
+uses `create_subprocess_exec` (no shell), so a hostile input is an inert argv token.
+
+The run's placeholder record is written to disk **before** anything is spawned, so a run that is
+SIGKILLed — or that dies with the server — still leaves a discoverable record stuck at `"running"`
+("we started this and never heard back") rather than vanishing.
+
+### REST surface
+
+CRUD + audit. All of it works with the env gate **off**; only `/ws/flows/run` is gated.
+
+| Method · Path | Does |
+| --- | --- |
+| `POST /api/flows/validate` | Stateless `flow.validate()` on a posted document → `{"status":"ok", name, host, steps, capabilities, inputs}` or `{"status":"invalid", path, error}`. The editor's live check. |
+| `POST /api/flows/schema` | Stateless — the document's `inputs` as a JSON Schema (what the run form is built from). |
+| `GET /api/hosts/{host}/flows` | `{"flows":[…]}` — the host's flow **summaries** (id, name, steps, capabilities, inputs, `run_count`, timestamps; **no** doc). |
+| `POST /api/hosts/{host}/flows` | Create. Validates first. `429 too_many_flows` at the cap. |
+| `GET /api/hosts/{host}/flows/{flow_id}` | The **full** record, `doc` included (the editor needs it). |
+| `PUT /api/hosts/{host}/flows/{flow_id}` | Replace the document (re-validated). |
+| `DELETE /api/hosts/{host}/flows/{flow_id}` | **Idempotent** — deleting an absent flow is a green `{"deleted": false}`, never a 404. Cascades to the run history. |
+| `GET /api/hosts/{host}/flows/{flow_id}/schema` | The saved flow's `inputs` as a JSON Schema. |
+| `GET /api/hosts/{host}/flows/{flow_id}/runs` | `{"runs":[…]}` — run summaries, newest `started_at` first. |
+| `GET /api/hosts/{host}/flows/{flow_id}/runs/{run_id}` | The **full** run record: steps, artifacts, collected, stats. |
+| `GET /api/hosts/{host}/flows/{flow_id}/artifacts` | `{"artifacts":[…], "stats":{scope, root, count, bytes}}` — the flow's **cumulative** ledger (scope = the flow id). |
+
+**Status conventions.** A document that fails validation is a structured **miss**, not an HTTP
+error: `200 + {"status":"invalid", path, error}` — the same shape `pwg flow validate` prints. A bad
+**id token** is a different thing: a malformed *request*, rejected before any filesystem access
+(`invalid_flow` / `invalid_run` → **400**, the twin of `invalid_session` on a chat id).
+
+| Status | HTTP code |
+| --- | --- |
+| `invalid_flow` · `invalid_run` (bad id token) | `400` |
+| `flow_not_found` · `run_not_found` | `404` |
+| `too_many_flows` | `429` |
+| `invalid` (the *document* was rejected) | **`200`** |
+
+### `GET /ws/flows/run` — the frame protocol
+
+`GET /ws/flows/run?host=<host>&flow_id=<id>` — the one route the env gate protects.
+
+**Server → client**, in order: one **`flow`** bootstrap → per run: **`status`** → *N* × **`step`**
+→ **`log`** (interleaved) → exactly one terminal **`result`**.
+
+| Frame | Meaning |
+| --- | --- |
+| `{"type":"flow", …summary}` | The **leading** bootstrap frame, sent once on connect: the flow's `summary` (name, steps, `capabilities`, `inputs`, `run_count`, …). The client renders the run form from **this** — no second fetch. |
+| `{"type":"status","state":"starting","host","flow_id","run_id","dry_run"}` | The subprocess launched. |
+| `{"type":"step", …event}` | One [runner event](#run-records-and-events) — `{op, status, …}`, status ∈ `ok`/`new`/`dupe`/`triggered`/`skipped`/`dry-run`/`page`/`error`. `new`/`dupe` on a `download` step is what feeds the live counter. |
+| `{"type":"log","line":<str>}` | Anything the subprocess printed that was **not** a JSON frame — a stray print, a warning, a traceback (stderr is prefixed `[stderr] `). Truncated to 500 chars. A line the UI never sees is a line nobody can debug. |
+| `{"type":"result","run_id", …run record}` | **Exactly one** terminal frame per run: the full record (`status`, `steps`, `artifacts`, `collected`, `stats`, …). Sent **after** the run is persisted, so a client can immediately `GET` the run it was just told about. If the process died without printing one, the server synthesizes an honest `status:"error"` result carrying the steps it *did* relay. |
+| `{"type":"error","status":"flow_unavailable","reason","detail"}` | The run can't start — `reason` ∈ `disabled` (the env gate is off) / `no_config` (`$PINCHTAB_CONFIG` unset or missing) / `bridge_unreachable`. The socket then closes. |
+| `{"type":"error","status":"too_many_sessions","max":1}` | A crawl or another flow run already holds the bridge. The socket closes. |
+| `{"type":"error","status":"invalid_input","detail","path"}` | A bad value for a declared input. **The socket stays open** — a bad input is one keystroke away from a good one, so fix the form and press Run again. |
+| `{"type":"error","status":"invalid_flow"\|"flow_not_found"}` | Bad id token / no such flow; the socket closes. |
+
+**Client → server:**
+
+| Frame | Meaning |
+| --- | --- |
+| `{"type":"run","inputs":{…},"grant":{"allow_submit":…,"allow_upload":…,"allow_download":…},"dry_run":<bool>}` | Kick off a run. **Repeatable** — the socket survives a completed run, so Run-again is one click (the live-run counter is released in a `finally`, so back-to-back runs are accepted and a failed start can never wedge the bridge). |
+| `{"type":"cancel"}` | SIGTERM→SIGKILL the run's process group. A **client disconnect is an implicit cancel** — and the partial run is still persisted. |
+
+### Caveat: the artifact scope diverges between CLI and UI
+
+The [dedupe ledger](#the-dedupe-ledger)'s scope is chosen differently by the two front ends:
+
+| Front end | Default `--scope` |
+| --- | --- |
+| **CLI** (`pwg flow run`) | the flow's **sanitized `name`** (e.g. `download-all-invoices`) |
+| **Web UI** (`/ws/flows/run`) | the flow's **stable id** (the uuid4 hex) |
+
+The UI uses the id because a name can be renamed and two flows can share one — an id cannot, so two
+saved flows can never poison each other's ledger. The consequence, stated plainly: **a flow authored
+in the UI and then run from the CLI will not share a dedupe ledger** (the CLI would start a fresh
+one under the flow's name and report every file as `new`). To make them share one, pass the flow id
+explicitly:
+
+```bash
+pwg flow run ./my-flow.json --host app.example.com --scope <flow_id>
+#   the flow id is the filename under ~/.pinchtab-webgraph/flows/<host>/<flow_id>.json
+```
+
 ## Gotchas
 
 Every one of these cost real debugging time. These are the ones that bite in the flow layer:
@@ -386,6 +601,24 @@ Every one of these cost real debugging time. These are the ones that bite in the
    emitted click carries `--wait-nav` — without it, link-based paginators and path clicks abort a
    flow that in fact worked.
 
+And these bite when you run flows from the **[web UI](#running-flows-from-the-web-ui)** (fuller
+notes in [ui.md → Operational notes](ui.md#operational-notes-developing--e2e-testing-the-ui)):
+
+8. **The UI can't run a flow at all unless `PINCHTAB_WEBGRAPH_ENABLE_FLOWS` is truthy** — the
+   editor and every CRUD route work regardless, so "I saved it but Run does nothing" is almost
+   always the missing gate. Launch with
+   `PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1 PINCHTAB_WEBGRAPH_ENABLE_CRAWL=1 portless run --name webgraph -- python3 -m pinchtab_webgraph.ui.server`
+   (portless needs node 24; **in a git worktree only `portless run` is correct** — the flat
+   `portless <name> <cmd>` form skips the worktree prefix and collides with the main checkout).
+9. **To drive the UI itself with PinchTab (e2e), use the RAW `http://127.0.0.1:<port>/`.** The
+   bridge's IDPI allowlist admits `127.0.0.1` / `localhost` but **not a `*.localhost`
+   subdomain**, so the portless HTTPS URL is refused. That URL is for the human's browser.
+10. **`pinchtab press Enter` does NOT activate a focused `<button>`** (verified: 0 click hits) —
+    use `pinchtab type <sel> $'\n'`. It will silently no-op a UI e2e test otherwise.
+11. **A flow authored in the UI and re-run from the CLI does not share its dedupe ledger** unless
+    you pass `--scope <flow_id>` — see [the caveat
+    above](#caveat-the-artifact-scope-diverges-between-cli-and-ui).
+
 ## Verified end-to-end
 
 `tests/e2e/test_flow_paginate_download_e2e.py` runs the whole layer with **nothing mocked** — a
@@ -395,13 +628,20 @@ downloads **5 real files** (`via="fetch"`) with **5 distinct sha256s**, and a se
 fresh `ArtifactStore` on the same ledger reports **0 new, 5 dupes**. It skips cleanly when no
 bridge is reachable.
 
-The document model, the VM, the browser primitives, the store and the CLI also have **171
+The document model, the VM, the browser primitives, the store and the CLI also have **175
 browser-free unit tests** (`tests/test_flow.py`, `test_runner.py`, `test_browser.py`,
 `test_artifacts.py`, `test_flow_cmd.py`) — the VM is exercised end-to-end against a `FakeBrowser`,
 which is exactly what the port split buys.
 
+The **UI** layer adds **63** more (`tests/test_flow_store.py`, `tests/test_ui_flow_runner.py`) plus
+**16** flow-route tests in `tests/test_ui_server.py`. The Flows tab itself was also driven in a real
+browser against a real bridge: author a flow → watch validation go red on a typo'd `${itm.href}` →
+save → run live (3 pages paginated, **5 files downloaded, 5 new · 0 dupe**) → run again on the same
+ledger (**0 new · 5 dupe**), with the crawl left un-wedged afterwards.
+
 ---
 
 ← Back to the **[documentation index](README.md)** · the **[main README](../README.md)** ·
-related: **[`perform` live test](perform-live-test.md)**, **[MCP server](mcp-server.md)**,
-**[authenticated login](authenticated-login.md)**
+related: **[Web UI](ui.md)** (the [Flows tab](ui.md#flows-view-opt-in)), **[`perform` live
+test](perform-live-test.md)**, **[MCP server](mcp-server.md)**, **[authenticated
+login](authenticated-login.md)**

@@ -235,7 +235,13 @@ Nothing in the document is app-specific. `goal: "invoices"` resolves **offline**
 
 > **Verified end-to-end** with nothing mocked (real bridge, real headless Chrome): crawl a 3-page fixture site → `paginate` all 3 pages → download **5 real files** (`via="fetch"`, 5 distinct sha256s) → re-run on the same ledger → **0 new, 5 dupes**.
 
-Full format (every op and its args), the capability model, the download constraints, the ledger, and an authoring walkthrough: **[`docs/flows.md`](docs/flows.md)**.
+**…and from the browser.** The optional [web UI](#-three-ways-to-call-it) carries a **Flows tab**: the host's saved automations, a JSON editor that validates as you type (a typo'd `${var}` is caught, with its path in the document, before a browser is ever leased), a run panel where the **safety model is visible** — the Allow-submit / Allow-upload toggles are *disabled unless the flow itself declares that capability*, and dry-run is checked by default — a streaming run log with a live **`N new · M dupe`** counter, run history, and the flow's all-time artifact ledger. Running a flow is **opt-in**, because unlike a crawl a flow *can* write to the site:
+
+```bash
+PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1 pinchtab-webgraph-ui        # then open the Flows tab
+```
+
+Full format (every op and its args), the capability model, the download constraints, the ledger, an authoring walkthrough, and the [web-UI surface](docs/flows.md#running-flows-from-the-web-ui) (storage layout, caps, REST + WS frames, the subprocess/cancel design): **[`docs/flows.md`](docs/flows.md)**.
 
 ## 🧪 Self-test & report
 
@@ -290,7 +296,7 @@ The same crawl-once-query-offline capability is reachable through three interfac
 | **MCP server** | LLM agents / MCP hosts (Claude, IDEs) | `pinchtab-webgraph-mcp` over stdio — 6 offline query tools, 2 live tools (`crawl`, `ask_howto`) with streamed progress, and `graph://…` resources. See [MCP server](#-mcp-server). | `pip install 'pinchtab-webgraph[mcp]'` |
 | **UTCP manual** | any UTCP-aware tool-caller | a static [UTCP](https://www.utcp.io) manual (`pwg manual`, `--out`, or `--serve`) whose `cli` call templates invoke `pwg` directly — no wrapper server in the call path. See [UTCP interface](#-utcp-interface). | none to use (`[utcp]` only validates it) |
 
-For a point-and-click front end there's also an **optional local web UI** — a browser app with a **Workspace | Graph | Explore** view switcher: a Workspace of a "how do I…" chat agent + a live headless-browser pane, an interactive **Graph view** that renders the crawled interaction graph (states as blue circles, form-triggers as green diamonds) right in the browser, and an **Explore view** to search / browse everything the crawl captured — plus a read-only REST API over the same queries, behind the `pinchtab-webgraph-ui` script and the `[ui]` extra:
+For a point-and-click front end there's also an **optional local web UI** — a browser app with a **Workspace | Graph | Explore | Flows** view switcher: a Workspace of a "how do I…" chat agent + a live headless-browser pane, an interactive **Graph view** that renders the crawled interaction graph (states as blue circles, form-triggers as green diamonds) right in the browser, and an **Explore view** to search / browse everything the crawl captured — plus a read-only REST API over the same queries, behind the `pinchtab-webgraph-ui` script and the `[ui]` extra:
 
 | Interface | For | How | Extra dep |
 | --- | --- | --- | --- |
@@ -307,6 +313,8 @@ The **Graph view** renders the host's cached interaction graph entirely offline 
 The UI can also **crawl a new URL and store it**: a sidebar **"New crawl"** form spawns the interaction crawler over a WebSocket, streams live progress, and atomically promotes the resulting graph into the cache so the new host appears in the sidebar and is instantly usable by the Graph view + chat. It is **opt-in** (off unless `PINCHTAB_WEBGRAPH_ENABLE_CRAWL` is set) because a crawl drives a real browser through the whole target app and opens every Create form (it never submits). See [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in).
 
 The **Explore view** is a read-only browser over everything the crawl captured, in three sub-tabs: **Search** (full-text search of captured page data, each hit showing reachable/click-count badges, the click-path, and the matched items), **Forms** (the create-form inventory + a free-text goal path-finder — each form has a **"Show me how"** button that reuses the live guided tour), and **Content** (the per-view inventory of captured collections). A **Ctrl/Cmd-K command palette** launches over the whole UI — switch host, jump view, new chat / new crawl, manage credentials, and a free-text "search content for …" hand-off into Explore. See [Explore view](docs/ui.md#explore-view).
+
+The **Flows view** is the UI for the [automation flow layer](#-automation-flows): the host's saved flows, a JSON editor that validates as you type, a run panel where the **safety model is visible** (Allow-submit / Allow-upload are *disabled unless the flow declares that capability*; dry-run is on by default), a streaming run log with a live **`N new · M dupe`** dedupe counter, run history, and the flow's all-time artifact ledger. Each run is a **subprocess**, which is what makes **Cancel** work at all. **Opt-in** (`PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1`) because — unlike a crawl, which never submits — a flow *can* write to the site. See [Flows view](docs/ui.md#flows-view-opt-in).
 
 Only the **base install** (`pip install pinchtab-webgraph`, pure stdlib) is needed for the CLI and the UTCP manual; the MCP server and the web UI each live behind an optional extra (`[mcp]` / `[ui]`) so the base package stays dependency-free.
 
@@ -365,11 +373,11 @@ Deep-dive guides live in **[`docs/`](docs/README.md)** — start at the **[docum
 
 | Guide | What it covers |
 | --- | --- |
-| **[Automation flows](docs/flows.md)** | The flow document format (every op + its args), the [capability / safety model](docs/flows.md#the-capability--safety-model), the [download strategy](docs/flows.md#downloads-in-session-fetch-first-cli-fallback) (in-session fetch first, CLI fallback) and its constraints, the [dedupe ledger](docs/flows.md#the-dedupe-ledger), an [authoring walkthrough](docs/flows.md#authoring-a-flow--a-walkthrough), and the [gotchas](docs/flows.md#gotchas). |
+| **[Automation flows](docs/flows.md)** | The flow document format (every op + its args), the [capability / safety model](docs/flows.md#the-capability--safety-model), the [download strategy](docs/flows.md#downloads-in-session-fetch-first-cli-fallback) (in-session fetch first, CLI fallback) and its constraints, the [dedupe ledger](docs/flows.md#the-dedupe-ledger), an [authoring walkthrough](docs/flows.md#authoring-a-flow--a-walkthrough), [running flows from the web UI](docs/flows.md#running-flows-from-the-web-ui) (storage, caps, REST + WS frames, the subprocess/cancel design, the artifact-scope caveat), and the [gotchas](docs/flows.md#gotchas). |
 | **[`perform` live test](docs/perform-live-test.md)** | The real-browser proof of `crawl → howto → perform`: a local test site, a downloads-enabled bridge, and the two bugs the live run caught. |
 | **[MCP server](docs/mcp-server.md)** | Run `pinchtab-webgraph-mcp`: the `[mcp]` extra, `.mcp.json` registration, the tool + resource inventory, env vars, and the live-tool safety model. |
 | **[UTCP interface](docs/utcp.md)** | The `pwg query` JSON surface + the `pwg manual` / `--serve` UTCP manual, the 8 tools, the scope subset, and the exit-code convention. |
-| **[Web UI](docs/ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the Workspace/[Graph](docs/ui.md#graph-view)/[Explore](docs/ui.md#explore-view) view switcher + [command palette](docs/ui.md#command-palette), the REST API + vault endpoints, the chat + screencast WebSockets, [persistent named chats](docs/ui.md#chat-sessions), the opt-in [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in) endpoint, env vars, and the loopback-only security model. |
+| **[Web UI](docs/ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the Workspace/[Graph](docs/ui.md#graph-view)/[Explore](docs/ui.md#explore-view)/[Flows](docs/ui.md#flows-view-opt-in) view switcher + [command palette](docs/ui.md#command-palette), the REST API + vault endpoints, the chat + screencast WebSockets, [persistent named chats](docs/ui.md#chat-sessions), the opt-in [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in) + [flow-run](docs/ui.md#flows-view-opt-in) endpoints, env vars, the loopback-only security model, and the [operational notes](docs/ui.md#operational-notes-developing--e2e-testing-the-ui) for driving the UI itself. |
 | **[Authenticated login](docs/authenticated-login.md)** | Crawl behind a login safely: hand-login vs. keyring automation, the threat model, sandbox/bot-account isolation, and how to test it. |
 | **[Contributing](CONTRIBUTING.md)** | Branch model, Conventional Commits, the stay-generic rule, safety, security, and PRs. |
 

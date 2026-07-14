@@ -221,6 +221,35 @@ def test_run_unknown_input_is_exit_1(monkeypatch, capsys, tmp_path, fake_browser
     assert "unknown input" in out["error"]
 
 
+def test_run_file_input_binds_an_existing_path(monkeypatch, capsys, tmp_path, fake_browser):
+    # `--input file=/abs/path` keeps working exactly as it did — a file input is still a
+    # NAME=VALUE string on the CLI; only its validation is new.
+    doc = {"name": "f", "inputs": {"file": {"type": "file", "required": True}},
+           "steps": [{"op": "log", "message": "f=${file}"}]}
+    path = _write(tmp_path, doc)
+    real = tmp_path / "invoice.pdf"
+    real.write_bytes(b"%PDF-1.4")
+    code, out, _, _ = _cli(monkeypatch, capsys,
+                           ["run", path, "--json", "--input", "file=%s" % real,
+                            "--artifacts-root", str(tmp_path / "art")])
+    assert code == 0
+    assert [e for e in out["steps"] if e["op"] == "log"][0]["message"] == "f=%s" % real
+
+
+def test_run_missing_file_input_is_a_clean_exit_1(monkeypatch, capsys, tmp_path, fake_browser):
+    # A clean rejection — the printed JSON, exit 1 — NOT a traceback out of the runner.
+    doc = {"name": "f", "inputs": {"file": {"type": "file", "required": True}},
+           "steps": [{"op": "log", "message": "x"}]}
+    path = _write(tmp_path, doc)
+    missing = str(tmp_path / "gone.pdf")
+    code, out, _, err = _cli(monkeypatch, capsys,
+                             ["run", path, "--input", "file=%s" % missing])
+    assert code == 1
+    assert out["status"] == "invalid"
+    assert "no such file" in out["error"] and missing in out["error"]
+    assert "Traceback" not in err
+
+
 def test_run_capability_flags_are_wired_into_the_grant(monkeypatch, capsys, tmp_path,
                                                        fake_browser):
     doc = {"name": "f", "capabilities": {"allow_upload": True},

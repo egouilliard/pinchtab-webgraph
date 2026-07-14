@@ -298,6 +298,9 @@ def test_vault_unavailable_503(isolated_cache_home):
 
 import asyncio  # noqa: E402
 import json  # noqa: E402
+import os  # noqa: E402
+import pathlib  # noqa: E402
+import time  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
 
 from pinchtab_webgraph.ui import server as ui_server  # noqa: E402
@@ -1106,3 +1109,194 @@ def test_live_flow_run_counter_survives_a_start_run_failure(isolated_cache_home,
         assert f["type"] == "status", f              # NOT {"status": "too_many_sessions"}
         assert ws.receive_json()["type"] == "result"
     assert ui_server.app.state.live_flow_runs == 0
+
+
+# --- POST /api/flows/uploads — staging a file for a `file` input ---------------
+#
+# The browser cannot hand the server a local path, so it POSTs the RAW BYTES here and the
+# server stages them; the returned absolute path is what the run frame's `inputs` map carries.
+# This endpoint writes attacker-supplied bytes to disk from an unauthenticated local UI, so
+# the traversal guard and the size cap are the load-bearing tests.
+
+def _uploads_root(home):
+    return home / "uploads"
+
+
+def test_upload_stages_the_bytes_and_returns_the_path(isolated_cache_home):
+    r = client.post("/api/flows/uploads?name=invoice.pdf", content=b"%PDF-1.4 hello")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok" and body["name"] == "invoice.pdf"
+    assert body["size"] == len(b"%PDF-1.4 hello")
+
+    staged = pathlib.Path(body["path"])
+    assert staged.is_absolute() and staged.read_bytes() == b"%PDF-1.4 hello"
+    # …under <HOME>/uploads/<uuid4hex>/<name>, never anywhere else.
+    assert staged.parent.parent == _uploads_root(isolated_cache_home)
+    assert len(staged.parent.name) == 32 and staged.name == "invoice.pdf"
+
+
+def test_two_uploads_of_the_same_name_do_not_collide(isolated_cache_home):
+    a = client.post("/api/flows/uploads?name=doc.pdf", content=b"AAA").json()
+    b = client.post("/api/flows/uploads?name=doc.pdf", content=b"BBBB").json()
+    assert a["path"] != b["path"]                     # a fresh uuid dir per upload
+    assert pathlib.Path(a["path"]).read_bytes() == b"AAA"     # …so neither overwrote the other
+    assert pathlib.Path(b["path"]).read_bytes() == b"BBBB"
+
+
+# The name has TWO separate jobs, and the endpoint treats them separately: a path is REJECTED
+# (that is the traversal guard), while an ordinary filename that merely contains characters we
+# would rather not put on disk is SANITISED. `Invoice Jan 2026.pdf` is a real file, not an
+# attack — the owner would hit it on their first upload — so a space must not be a 400.
+
+@pytest.mark.parametrize("name", ["../../x.pdf", "/etc/passwd", "a/b.pdf", "..\\..\\x.pdf",
+                                  "..", ".", "", "   "])
+def test_upload_rejects_a_traversing_or_illegal_name(isolated_cache_home, name):
+    r = client.post("/api/flows/uploads", params={"name": name}, content=b"pwned")
+    assert r.status_code == 400
+    assert r.json()["status"] == "invalid_name"
+    # NOTHING was written — not inside the staging dir, and not outside it either.
+    assert not _uploads_root(isolated_cache_home).exists()
+    assert not (isolated_cache_home / "x").exists()
+    assert not (isolated_cache_home / "x.pdf").exists()
+
+
+@pytest.mark.parametrize("name,stored", [
+    ("Invoice Jan 2026.pdf", "Invoice_Jan_2026.pdf"),   # a space is not an attack
+    ("report (final).pdf", "report_final.pdf"),         # …nor are parentheses
+    ("rapport-été.pdf", "rapport-_t.pdf"),              # …nor an accent
+    ("rm -rf; ls & echo.txt", "rm_-rf_ls_echo.txt"),    # shell metacharacters: inert on disk
+])
+def test_upload_sanitises_an_ordinary_name_instead_of_rejecting_it(isolated_cache_home,
+                                                                   name, stored):
+    r = client.post("/api/flows/uploads", params={"name": name}, content=b"%PDF-1.4 hi")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["name"] == name                  # the ORIGINAL, for the UI to show
+    assert body["stored_name"] == stored         # …and the sanitised one that is on disk
+
+    staged = pathlib.Path(body["path"])
+    assert staged.name == stored and staged.read_bytes() == b"%PDF-1.4 hi"
+    # …and it really is INSIDE the staging root: no escape, whatever the name contained.
+    root = str(_uploads_root(isolated_cache_home).resolve()) + os.sep
+    assert os.path.realpath(str(staged)).startswith(root)
+
+
+def test_upload_caps_a_pathological_name_but_keeps_the_extension(isolated_cache_home):
+    body = client.post("/api/flows/uploads", params={"name": "A" * 500 + ".pdf"},
+                       content=b"x").json()
+    stored = body["stored_name"]
+    assert len(stored) <= ui_server.MAX_STORED_NAME     # the filesystem limit is never hit
+    assert stored.endswith(".pdf") and stored.startswith("AAAA")
+    assert body["name"] == "A" * 500 + ".pdf"          # the original is still echoed in full
+    assert pathlib.Path(body["path"]).name == stored
+
+
+def test_two_originals_that_sanitise_alike_still_do_not_collide(isolated_cache_home):
+    a = client.post("/api/flows/uploads", params={"name": "my report.pdf"},
+                    content=b"AAA").json()
+    b = client.post("/api/flows/uploads", params={"name": "my;report.pdf"},
+                    content=b"BBBB").json()
+    assert a["stored_name"] == b["stored_name"] == "my_report.pdf"   # same name on disk…
+    assert a["path"] != b["path"]                                    # …different uuid4 dirs
+    assert pathlib.Path(a["path"]).read_bytes() == b"AAA"            # …so neither overwrote
+    assert pathlib.Path(b["path"]).read_bytes() == b"BBBB"
+
+
+def test_upload_over_the_cap_is_413_and_deletes_the_partial(isolated_cache_home, monkeypatch):
+    monkeypatch.setattr(ui_server, "MAX_UPLOAD_BYTES", 16)
+    r = client.post("/api/flows/uploads?name=big.bin", content=b"x" * 64)
+    assert r.status_code == 413
+    body = r.json()
+    assert body["status"] == "too_large" and body["max_bytes"] == 16
+    # the partial file (and its whole staging dir) is gone — no half-written turd on disk.
+    assert list(_uploads_root(isolated_cache_home).glob("*/*")) == []
+
+
+def test_upload_prunes_stale_staging_dirs(isolated_cache_home, monkeypatch):
+    stale = _uploads_root(isolated_cache_home) / ("0" * 32)
+    stale.mkdir(parents=True)
+    (stale / "old.pdf").write_bytes(b"old")
+    old = time.time() - (ui_server.UPLOAD_TTL_S + 60)
+    os.utime(stale, (old, old))
+
+    fresh = client.post("/api/flows/uploads?name=new.pdf", content=b"new").json()
+    assert not stale.exists()                          # pruned on the way past…
+    assert pathlib.Path(fresh["path"]).exists()        # …and the new upload is untouched
+
+
+def test_upload_prune_failure_never_fails_the_request(isolated_cache_home):
+    # Pruning is housekeeping, not the caller's problem: make listdir(uploads) itself raise
+    # (uploads exists but is a FILE, so the makedirs below fails too) and assert the request
+    # still gets a clean, structured answer instead of a 500 stack trace.
+    _uploads_root(isolated_cache_home).write_bytes(b"not a directory")
+    r = client.post("/api/flows/uploads?name=ok.pdf", content=b"z")
+    assert r.status_code == 500 and r.json()["status"] == "error"   # not an unhandled crash
+
+    _uploads_root(isolated_cache_home).unlink()
+    assert client.post("/api/flows/uploads?name=ok.pdf",
+                       content=b"z").json()["status"] == "ok"
+
+
+# --- a `file` input end-to-end: schema, then the run WS ------------------------
+
+def _file_flow_doc():
+    return _flow_doc(inputs={"file": {"type": "file", "required": True}},
+                     capabilities={"allow_upload": True},
+                     steps=[{"op": "upload", "selector": "#f", "file": "${file}"}])
+
+
+def test_flow_schema_route_publishes_a_file_input_as_a_path_string(isolated_cache_home):
+    fid = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_file_flow_doc()).json()["id"]
+    r = client.get("/api/hosts/%s/flows/%s/schema" % (FLOW_HOST, fid))
+    assert r.status_code == 200
+    assert r.json()["properties"]["file"] == {"type": "string", "format": "path"}
+
+
+def test_ws_run_with_a_missing_file_is_invalid_input_and_keeps_the_socket_open(
+        isolated_cache_home, monkeypatch):
+    # The whole point of validating the path at bind time: the user sees a readable error
+    # INLINE and can just pick another file — the socket stays open for the next Run.
+    monkeypatch.setenv("PINCHTAB_WEBGRAPH_ENABLE_FLOWS", "1")
+    fid = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_file_flow_doc()).json()["id"]
+    with client.websocket_connect(
+            "/ws/flows/run?host=%s&flow_id=%s" % (FLOW_HOST, fid)) as ws:
+        assert ws.receive_json()["type"] == "flow"
+        ws.send_json({"type": "run", "inputs": {"file": "/no/such/file.pdf"},
+                      "dry_run": True})
+        f = ws.receive_json()
+        assert f["type"] == "error" and f["status"] == "invalid_input"
+        assert "no such file" in f["detail"] and "/no/such/file.pdf" in f["detail"]
+        # STILL OPEN — the missing input is not a fatal protocol error.
+        ws.send_json({"type": "run", "inputs": {}, "dry_run": True})
+        assert ws.receive_json()["status"] == "invalid_input"
+
+
+def test_ws_run_accepts_a_staged_upload_path(isolated_cache_home, monkeypatch):
+    # The contract joined up: POST the bytes -> get a staged path -> pass it as the file input.
+    monkeypatch.setenv("PINCHTAB_WEBGRAPH_ENABLE_FLOWS", "1")
+    staged = client.post("/api/flows/uploads?name=invoice.pdf", content=b"%PDF").json()["path"]
+    fid = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_file_flow_doc()).json()["id"]
+
+    from contextlib import asynccontextmanager as _acm
+    from tests.test_ui_flow_runner import FakeProcess
+
+    proc = FakeProcess(stdout_lines=[b'{"type":"result","status":"ok","steps":[]}\n'],
+                       exits_on_its_own=True)
+    seen = {}
+
+    @_acm
+    async def fake(*, flow_path, host, flow_id, run_id, inputs=None, **_kw):
+        seen["inputs"] = inputs
+        yield ui_server.flow_runner.FlowRunSession(process=proc, host=host, flow_id=flow_id,
+                                                   run_id=run_id)
+
+    monkeypatch.setattr(ui_server.flow_runner, "open_flow_run_session", fake)
+    with client.websocket_connect(
+            "/ws/flows/run?host=%s&flow_id=%s" % (FLOW_HOST, fid)) as ws:
+        assert ws.receive_json()["type"] == "flow"
+        ws.send_json({"type": "run", "inputs": {"file": staged}, "dry_run": True})
+        assert ws.receive_json()["type"] == "status"
+        assert ws.receive_json()["type"] == "result"
+    assert seen["inputs"] == {"file": staged}       # the staged path reached the runner

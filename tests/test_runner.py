@@ -22,9 +22,11 @@ class FakeBrowser:
     """Records every call; returns canned/scripted results. Implements the WHOLE port."""
 
     def __init__(self, *, query_results=None, next_pages=None, signatures=None,
-                 content=None, fail=None, fetch_fails=False, download_fails=False):
+                 content=None, fail=None, fetch_fails=False, download_fails=False,
+                 evaluate_results=None):
         self.calls = []
         self.query_results = list(query_results or [])     # popped per query() call
+        self.evaluate_results = list(evaluate_results or [])   # popped per evaluate() call
         self.next_pages = list(next_pages or [])           # popped per next_page() call
         self.signatures = list(signatures or [])           # popped per page_signature() call
         self._content = content or []
@@ -81,6 +83,15 @@ class FakeBrowser:
         return out_path
 
     # reads
+    def evaluate(self, js, await_promise=False, timeout=None):
+        # `upload` polls for its input to EXIST (an SPA has not rendered it when `goto`
+        # returns) via a `document.querySelector(...)` probe. Default: the element is there.
+        # Script `evaluate_results` to make it absent and exercise the timeout.
+        self.calls.append(("evaluate", js))
+        if self.evaluate_results:
+            return self.evaluate_results.pop(0)
+        return True
+
     def query(self, spec):
         self.calls.append(("query", spec))
         return self.query_results.pop(0) if self.query_results else []
@@ -220,6 +231,68 @@ def test_submit_is_gated_both_ways(two_downloads_graph_path):
                flow_kw={"capabilities": {"allow_submit": True}}, grant={"allow_submit": False})
     assert _events(res, "do", "skipped")
     assert fb.calls == []
+
+
+# --- upload: waiting for the file input to mount -------------------------------------
+
+_UPLOAD = {"op": "upload", "selector": "#drop input[type=file]", "file": "/x.pdf"}
+_UPLOAD_KW = dict(flow_kw={"capabilities": {"allow_upload": True}},
+                  grant={"allow_upload": True})
+
+
+def _evaluated(fb):
+    return [c[1] for c in fb.calls if c[0] == "evaluate"]
+
+
+def _fake_clock(monkeypatch, start=1000.0):
+    """Freeze runner's clock and let the INJECTED sleep advance it: the poll loop's deadline
+    is then exercised for real, deterministically, without a test that waits 10 seconds."""
+    now = [start]
+    monkeypatch.setattr(runner.time, "time", lambda: now[0])
+    return now
+
+
+def test_upload_polls_until_the_spa_mounts_its_input_then_uploads():
+    # the dropzone is mounted AFTER the load event: the first two probes miss, the third hits.
+    fb, slept = FakeBrowser(evaluate_results=[False, False, True]), []
+    res = _run(fb, [_UPLOAD], sleep=slept.append, **_UPLOAD_KW)
+    assert res["status"] == "ok"
+    assert len(_evaluated(fb)) == 3                    # it POLLED — one probe is not enough
+    assert slept == [0.2, 0.2]                         # …and paused between probes
+    assert ("upload", "#drop input[type=file]", "/x.pdf") in fb.calls
+    assert _events(res, "upload", "ok")[0]["file"] == "/x.pdf"
+
+
+def test_upload_aborts_when_the_input_never_appears_and_never_uploads(monkeypatch):
+    # the deadline is real (the injected sleep drives the clock), so this proves the timeout
+    # branch rather than just an exhausted script — and it costs no wall-clock time.
+    now = _fake_clock(monkeypatch)
+    fb = FakeBrowser(evaluate_results=[False] * 500)
+    res = _run(fb, [_UPLOAD], sleep=lambda s: now.__setitem__(0, now[0] + s), **_UPLOAD_KW)
+
+    assert res["status"] == "aborted"
+    assert "#drop input[type=file]" in res["aborted"]        # the message NAMES the selector
+    assert "10000ms" in res["aborted"]
+    assert not any(c[0] == "upload" for c in fb.calls)       # the upload never raced the DOM
+    # bounded: ~10s of VIRTUAL time at 0.2s a poll, not 500 probes and not 10s of real waiting
+    assert 45 <= len(_evaluated(fb)) <= 55
+    assert fb.evaluate_results                               # it stopped on the deadline
+
+
+@pytest.mark.parametrize("selector", [
+    """input[name="a'b\\"c"]""",          # both quote flavours: naive concatenation breaks out
+    r"input[data-p=\"x\"]",              # a backslash: naive escaping mangles it
+])
+def test_the_selector_crosses_into_js_as_a_json_string_not_concatenated(selector):
+    # a selector can come from an AI-authored flow, so the probe must not be assembled by
+    # gluing it into the JS source. json.dumps is the guard; this is its regression lock.
+    fb = FakeBrowser()
+    res = _run(fb, [dict(_UPLOAD, selector=selector)], **_UPLOAD_KW)
+    assert res["status"] == "ok"
+    js = _evaluated(fb)[0]
+    assert json.dumps(selector) in js            # embedded ENCODED…
+    assert selector not in js                    # …and never spliced in raw
+    assert js.count("document.querySelector") == 1   # no injected second statement/call
 
 
 # --- for_each --------------------------------------------------------------------

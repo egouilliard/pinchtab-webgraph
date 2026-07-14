@@ -23,6 +23,7 @@ Design constraints, in priority order:
 Returns a run record; raises only on a malformed flow (that is `flow.validate`'s job).
 """
 import fnmatch
+import json
 import time
 from urllib.parse import urlparse
 
@@ -253,8 +254,35 @@ class Runner:
                               reason="upload not permitted (capabilities.allow_upload)")
         if run.dry_run:
             return run.record("upload", "dry-run", selector=r["selector"], file=r["file"])
+        # A file input on a client-rendered page does not exist when `goto` returns: the bridge
+        # navigates on the load event, and the SPA mounts its dropzone AFTER that. Uploading
+        # straight away therefore lost the race and died on `no element matches selector`, so
+        # the natural `goto -> upload` flow could never work. Settle for the input to appear
+        # first — this returns at once when it is already there, so a server-rendered page pays
+        # nothing, and only a genuinely absent input reaches the timeout.
+        self._await_selector(r["selector"], run)
         self.browser.upload(r["selector"], r["file"])
         run.record("upload", "ok", selector=r["selector"], file=r["file"])
+
+    def _await_selector(self, selector, run, timeout_ms=None):
+        """Block until `selector` EXISTS IN THE DOM, or _Abort.
+
+        Deliberately NOT `browser.query`: that takes `selector` as a ROOT to search actionable
+        controls within (`a[href]`, `button`, `[role=button]`, …) and drops zero-size nodes — so
+        it can never see a file input, which is neither actionable nor visible. A file input is
+        almost always `display:none` behind a styled "Browse" button, so PRESENCE is the only
+        thing worth waiting on here: the bridge sets a hidden input's files perfectly well."""
+        timeout_ms = int(timeout_ms or DEFAULT_WAIT_TIMEOUT_MS)
+        deadline = time.time() + timeout_ms / 1000.0
+        # The selector crosses into JS as a JSON string — never concatenated into the source.
+        js = "(!!document.querySelector(%s))" % json.dumps(selector)
+        while True:
+            if self.browser.evaluate(js):
+                return
+            if time.time() >= deadline:
+                raise _Abort("no element matches selector %r after %dms — the page may not "
+                             "have rendered it" % (selector, timeout_ms))
+            self.sleep(0.2)
 
     def _field_selector(self, r, run):
         if r.get("selector"):

@@ -476,17 +476,21 @@
   gap: 0.55rem;
 }
 .flow-run[hidden] { display: none; }
-.flow-inputs { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+.flow-inputs { display: flex; flex-wrap: wrap; gap: 0.6rem 0.9rem; align-items: flex-start; }
 .flow-input {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
   font-size: 0.78rem;
   color: var(--muted);
+  min-width: 12rem;
+  max-width: 22rem;
 }
 .flow-input-name { color: var(--text); }
+.flow-input-req { color: var(--err-fg); font-weight: 600; }
 .flow-input input[type="text"],
 .flow-input input[type="number"],
+.flow-input input[type="file"],
 .flow-input select {
   padding: 0.35rem 0.55rem;
   border: 1px solid var(--border-strong);
@@ -495,6 +499,61 @@
   color: var(--text);
   font: inherit;
   font-size: 0.8rem;
+  max-width: 100%;
+}
+.flow-input input[type="file"] { cursor: pointer; }
+.flow-input input[type="file"]::file-selector-button {
+  margin-right: 0.55rem;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.flow-input input[type="file"]::file-selector-button:hover { background: var(--accent-soft); }
+.flow-input input[type="checkbox"] { align-self: flex-start; }
+
+/* the flow's own words about the input — the upload flow names its extensions here */
+.flow-input-help {
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+/* the staging line under a file picker: staging… -> invoice.pdf · 12.3 KB (or the error) */
+.flow-input-file-status {
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.flow-input-file-status:empty { display: none; }
+.flow-file-pending { color: var(--warn-fg); }
+.flow-file-ok { color: var(--ok-fg); }
+.flow-file-error { color: var(--err-fg); }
+
+/* an unsatisfied REQUIRED input — the reason the Run button is disabled, made visible */
+.flow-input.invalid .flow-input-name { color: var(--err-fg); }
+.flow-input.invalid input[type="text"],
+.flow-input.invalid input[type="number"],
+.flow-input.invalid input[type="file"],
+.flow-input.invalid select {
+  border-color: var(--err-fg);
+}
+
+/* the server's own invalid_input verdict, shown where the inputs are */
+.flow-inputs-error {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 0.35rem 0.55rem;
+  border-radius: 8px;
+  background: var(--err-bg);
+  color: var(--err-fg);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
 }
 
 .flow-grants { display: flex; gap: 0.9rem; flex-wrap: wrap; }

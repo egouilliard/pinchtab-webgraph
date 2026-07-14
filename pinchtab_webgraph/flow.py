@@ -14,8 +14,11 @@ browser. That choice is load-bearing:
   - **Introspectable.** `inputs` is a JSON-Schema-shaped declaration, so a saved flow can be
     exposed as a typed HTTP endpoint / MCP tool without anyone writing a wrapper.
 
-Everything here is pure: parse, validate, substitute. No I/O, no browser, stdlib only — so
-the model can be validated in an API handler before a browser is ever leased.
+Everything here is pure: parse, validate, substitute. No browser, stdlib only — so the model
+can be validated in an API handler before a browser is ever leased. The ONE exception is
+`bind_inputs`, which stats a `file` input's path: that check has to live at the same boundary
+that coerces the value, or a missing file becomes a confusing bridge error mid-run instead of
+a clear rejection before anything is leased.
 
   {
     "name": "download-all-invoices",
@@ -33,9 +36,21 @@ the model can be validated in an API handler before a browser is ever leased.
   }
 """
 import json
+import os
 import re
 
 SCHEMA_VERSION = 1
+
+# --- the input type system -----------------------------------------------------
+# An input is FIRST-CLASS and TYPED. The type is what the run form renders (a file picker,
+# a number spinner, a checkbox, a <select> for an `enum`), what `bind_inputs` coerces to,
+# and what `json_schema` publishes — one declaration, three consumers, no hand-written glue.
+#
+# `file` is the interesting one: its VALUE is an ABSOLUTE LOCAL PATH, because that is what
+# the `upload` op (and `pinchtab upload`) hands the bridge, which reads the file off the
+# same machine. The browser can't produce such a path, so the UI stages the chosen file
+# server-side first (POST /api/flows/uploads) and passes the staged path here.
+INPUT_TYPES = ("string", "number", "integer", "boolean", "file")
 
 # --- the instruction set -------------------------------------------------------
 # Each op maps to a method on the runner. `body` ops are the control flow — they are the
@@ -188,8 +203,12 @@ def _validate_inputs(inputs):
         if not isinstance(spec, dict):
             raise FlowError("input %r must be an object" % name, "inputs")
         t = spec.get("type", "string")
-        if t not in ("string", "number", "integer", "boolean"):
-            raise FlowError("input %r has unsupported type %r" % (name, t), "inputs")
+        if t not in INPUT_TYPES:
+            raise FlowError("input %r has unsupported type %r (expected one of: %s)"
+                            % (name, t, ", ".join(INPUT_TYPES)), "inputs")
+        if "enum" in spec and (not isinstance(spec["enum"], list) or not spec["enum"]):
+            raise FlowError("input %r has an `enum` that is not a non-empty list" % name,
+                            "inputs")
 
 
 def validate(flow):
@@ -371,13 +390,45 @@ def _check_capabilities(flow):
 # --- input binding -------------------------------------------------------------
 
 _COERCE = {"string": str, "number": float, "integer": int,
-           "boolean": lambda v: v if isinstance(v, bool) else str(v).lower() == "true"}
+           "boolean": lambda v: v if isinstance(v, bool) else str(v).lower() == "true",
+           # a file's VALUE is a path — a string, coerced as one. Its *existence* is checked
+           # separately (_check_file), because "not a valid file" and "no such file" are
+           # different sentences and the user needs the second one.
+           "file": str}
+
+
+def _check_file(name, path):
+    """A `file` input must name a real, regular, local file — checked HERE, at bind time.
+
+    Deferring this is the bug it exists to prevent: an absent path sails through binding,
+    through the runner, and finally blows up INSIDE the browser bridge as an opaque upload
+    failure halfway through a flow that has already clicked things. Fail fast, in words the
+    person who typed the path can act on."""
+    if not path:
+        raise FlowError("input %r: no file given" % name, "inputs")
+    if not os.path.exists(path):
+        raise FlowError("input %r: no such file: %s" % (name, path), "inputs")
+    if not os.path.isfile(path):
+        raise FlowError("input %r: not a regular file: %s" % (name, path), "inputs")
+
+
+def _check_enum(name, decl, value):
+    """An `enum` is a CONSTRAINED CHOICE — enforce it. Unchecked, a typo'd choice reaches
+    the site as a literal and the flow silently does the wrong thing."""
+    choices = decl.get("enum")
+    if choices and value not in choices:
+        raise FlowError("input %r must be one of: %s (got %r)"
+                        % (name, ", ".join(str(c) for c in choices), value), "inputs")
 
 
 def bind_inputs(flow, values):
     """Validate + coerce caller-supplied values against the flow's `inputs` declaration.
     This is the boundary an HTTP request body crosses, so it rejects unknown keys rather
-    than silently ignoring them (a typo'd param must not run the flow with a default)."""
+    than silently ignoring them (a typo'd param must not run the flow with a default).
+
+    Beyond coercion it enforces the two constraints a type alone cannot: an `enum` input's
+    value must BE one of the choices, and a `file` input's value must name a file that
+    actually exists on this machine."""
     spec = flow.get("inputs") or {}
     values = dict(values or {})
     unknown = set(values) - set(spec)
@@ -385,12 +436,15 @@ def bind_inputs(flow, values):
         raise FlowError("unknown input(s): %s" % ", ".join(sorted(unknown)), "inputs")
     bound = {}
     for name, decl in spec.items():
+        typ = decl.get("type", "string")
         if name in values:
             try:
-                bound[name] = _COERCE[decl.get("type", "string")](values[name])
+                bound[name] = _COERCE[typ](values[name])
             except (TypeError, ValueError):
-                raise FlowError("input %r is not a valid %s"
-                                % (name, decl.get("type", "string")), "inputs")
+                raise FlowError("input %r is not a valid %s" % (name, typ), "inputs")
+            _check_enum(name, decl, bound[name])
+            if typ == "file":
+                _check_file(name, bound[name])
         elif "default" in decl:
             bound[name] = decl["default"]
         elif decl.get("required"):
@@ -403,11 +457,18 @@ def bind_inputs(flow, values):
 def json_schema(flow):
     """The flow's `inputs` as a JSON Schema — this is what lets a saved flow become a typed
     HTTP endpoint and an MCP tool with no hand-written wrapper. The crawler already read the
-    form's field specs, so the schema is derived, never authored."""
+    form's field specs, so the schema is derived, never authored.
+
+    `file` is published as `{"type":"string","format":"path"}` — a file input's value IS a
+    string (a local path), and `format` is JSON Schema's own extension point for exactly this.
+    Emitting `{"type":"file"}` would produce a document that is not valid JSON Schema, which
+    would break the one thing this function exists for: exposing a flow as a typed endpoint /
+    MCP tool that a generic client can consume."""
     spec = flow.get("inputs") or {}
     props, required = {}, []
     for name, decl in spec.items():
-        p = {"type": decl.get("type", "string")}
+        typ = decl.get("type", "string")
+        p = ({"type": "string", "format": "path"} if typ == "file" else {"type": typ})
         if decl.get("description"):
             p["description"] = decl["description"]
         if decl.get("enum"):

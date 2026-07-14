@@ -230,6 +230,69 @@ def test_bind_inputs_with_no_declaration_takes_nothing():
     assert flow.bind_inputs(_flow(), None) == {}
 
 
+# --- bind_inputs: the `file` type --------------------------------------------
+# A file input's VALUE is an absolute local path (what the `upload` op hands the bridge).
+# It is checked HERE so a missing file is a clear rejection before anything is leased,
+# rather than an opaque bridge error halfway through a flow that has already clicked things.
+
+_FILE_FLOW = {"inputs": {"file": {"type": "file", "required": True}}}
+
+
+def test_bind_inputs_accepts_an_existing_file(tmp_path):
+    p = tmp_path / "invoice.pdf"
+    p.write_bytes(b"%PDF-1.4")
+    assert flow.bind_inputs(_flow(**_FILE_FLOW), {"file": str(p)}) == {"file": str(p)}
+
+
+def test_bind_inputs_rejects_a_missing_file(tmp_path):
+    missing = str(tmp_path / "nope.pdf")
+    with pytest.raises(flow.FlowError) as exc:
+        flow.bind_inputs(_flow(**_FILE_FLOW), {"file": missing})
+    assert "no such file" in exc.value.message and missing in exc.value.message
+
+
+def test_bind_inputs_rejects_a_directory_as_a_file(tmp_path):
+    with pytest.raises(flow.FlowError, match="not a regular file"):
+        flow.bind_inputs(_flow(**_FILE_FLOW), {"file": str(tmp_path)})
+
+
+def test_bind_inputs_rejects_an_empty_file_value():
+    with pytest.raises(flow.FlowError, match="no file given"):
+        flow.bind_inputs(_flow(**_FILE_FLOW), {"file": ""})
+
+
+def test_bind_inputs_requires_a_required_file():
+    with pytest.raises(flow.FlowError, match="missing required input"):
+        flow.bind_inputs(_flow(**_FILE_FLOW), {})
+
+
+# --- bind_inputs: `enum` ------------------------------------------------------
+
+_ENUM_FLOW = {"inputs": {"mode": {"type": "string", "enum": ["draft", "final"]}}}
+
+
+def test_bind_inputs_accepts_a_value_in_the_enum():
+    assert flow.bind_inputs(_flow(**_ENUM_FLOW), {"mode": "final"}) == {"mode": "final"}
+
+
+def test_bind_inputs_rejects_a_value_not_in_the_enum():
+    # a typo'd choice must NOT silently reach the site as a literal.
+    with pytest.raises(flow.FlowError, match="must be one of"):
+        flow.bind_inputs(_flow(**_ENUM_FLOW), {"mode": "finel"})
+
+
+def test_bind_inputs_checks_the_enum_after_coercion():
+    doc = _flow(inputs={"n": {"type": "integer", "enum": [1, 2, 3]}})
+    assert flow.bind_inputs(doc, {"n": "2"}) == {"n": 2}     # "2" -> 2, and 2 IS in the enum
+    with pytest.raises(flow.FlowError, match="must be one of"):
+        flow.bind_inputs(doc, {"n": "9"})
+
+
+def test_validate_rejects_a_malformed_enum():
+    with pytest.raises(flow.FlowError, match="non-empty list"):
+        flow.validate(_flow(inputs={"mode": {"type": "string", "enum": []}}))
+
+
 # --- json_schema -------------------------------------------------------------
 
 def test_json_schema_is_a_typed_object_schema():
@@ -247,6 +310,22 @@ def test_json_schema_is_a_typed_object_schema():
 
 def test_json_schema_without_inputs_has_no_required():
     assert "required" not in flow.json_schema(_flow())
+
+
+def test_json_schema_maps_file_to_a_string_with_format_path():
+    # {"type":"file"} is NOT valid JSON Schema; a file input's value IS a string (a path),
+    # and `format` is JSON Schema's own extension point for saying which kind.
+    doc = _flow(inputs={"file": {"type": "file", "required": True,
+                                 "description": "the document to upload"}})
+    p = flow.json_schema(doc)["properties"]["file"]
+    assert p["type"] == "string" and p["format"] == "path"
+    assert p["description"] == "the document to upload"
+    assert flow.json_schema(doc)["required"] == ["file"]
+
+
+def test_json_schema_emits_a_declared_enum():
+    doc = _flow(inputs={"mode": {"type": "string", "enum": ["draft", "final"]}})
+    assert flow.json_schema(doc)["properties"]["mode"]["enum"] == ["draft", "final"]
 
 
 # --- load / loads ------------------------------------------------------------

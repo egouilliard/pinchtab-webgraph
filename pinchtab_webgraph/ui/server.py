@@ -19,12 +19,16 @@ import argparse
 import asyncio
 import json
 import os
+import re
+import shutil
 import threading
+import time
+import uuid
 import webbrowser
 
 from contextlib import asynccontextmanager
 
-from fastapi import Body, FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -771,6 +775,149 @@ def flows_schema(doc: dict = Body(...)):
     if err is not None:
         return _respond(err)
     return _respond(flow_mod.json_schema(doc))
+
+
+# --- file staging for `file` inputs -------------------------------------------
+#
+# A flow's `file` input carries an ABSOLUTE LOCAL PATH — that is what the `upload` op hands
+# the bridge, which reads the file off this machine. A browser cannot produce such a path: a
+# file <input> exposes only a name (`C:\fakepath\…`). So the UI UPLOADS the chosen bytes here,
+# we stage them on disk, and the returned path is what the run frame's `inputs` map carries.
+#
+# RAW BODY, NOT MULTIPART — ON PURPOSE. FastAPI's UploadFile/Form require `python-multipart`,
+# a dependency this package does not have and will not take on (the base install is
+# pure-stdlib; even fastapi is an extra). A raw body needs nothing new and the browser can
+# post a File object straight through: fetch(url, {method: "POST", body: fileObject}).
+# Please do not "improve" this into multipart.
+#
+# This endpoint writes ATTACKER-SUPPLIED BYTES TO DISK from an UNAUTHENTICATED local UI, so it
+# is treated accordingly: every upload lands in its OWN uuid4 directory (two uploads cannot
+# collide or overwrite), the body is streamed to disk in chunks and hard-capped, and stale
+# staging dirs are pruned as we go.
+#
+# TWO SEPARATE CONCERNS, DELIBERATELY SPLIT (they used to be one over-strict allowlist):
+#   REJECT (400) — input that is not a filename at all: a path (a separator, or anything that
+#     differs from its own basename), empty/whitespace-only, all-dots (the `.`/`..` subtlety
+#     cache_store.validate_host also guards), or NUL/control bytes. That is the traversal guard,
+#     and it is the ONLY thing that earns a 400.
+#   SANITIZE — everything else. `Invoice Jan 2026.pdf` is an ordinary real file, not an attack;
+#     a space is not a security boundary. Characters outside [A-Za-z0-9._-] become `_` in the
+#     STORED name, while the ORIGINAL is echoed back for display. The stored name is cosmetic
+#     anyway (the bridge renames uploads to `upload-N.<ext>` on the way into the page) — but it
+#     must still be safe, and it is: sanitised, capped, and inside a fresh uuid4 dir.
+
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024      # 100 MB — over it: 413, and the partial is deleted
+UPLOAD_CHUNK = 1024 * 1024                # streamed; the whole body is NEVER held in memory
+UPLOAD_TTL_S = 7 * 24 * 60 * 60           # staged files are transient — prune after ~7 days
+MAX_STORED_NAME = 120                     # so a pathological name cannot hit the FS name limit
+
+# What may survive INTO THE STORED NAME. Anything else is replaced with `_` — never rejected.
+_UPLOAD_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _uploads_dir():
+    return os.path.join(cache_store.home_dir(), "uploads")
+
+
+def _reject_unsafe_upload_name(name):
+    """Raise ValueError if `name` is not a plain filename. Traversal only — NOT character
+    purity: this guards the path, and `_stored_upload_name` handles the rest."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("a `name` is required")
+    if "\x00" in name or any(ord(c) < 32 or ord(c) == 127 for c in name):
+        raise ValueError("name must not contain control characters")
+    if "/" in name or "\\" in name or name != os.path.basename(name.replace("\\", "/")):
+        raise ValueError("name must be a bare filename, not a path: %r" % name)
+    if name.strip(".") == "":            # "." / ".." / "…" are traversal, not names
+        raise ValueError("name must not be all dots: %r" % name)
+
+
+def _stored_upload_name(name):
+    """The on-disk basename for an already-accepted `name`: every character outside
+    [A-Za-z0-9._-] becomes `_`, runs of `_` collapse, leading/trailing `_`/`.` are trimmed, the
+    extension is preserved, and the whole thing is capped. Empty stem -> `upload`."""
+    stem, ext = os.path.splitext(name)
+    ext = _UPLOAD_UNSAFE_RE.sub("_", ext).strip("_")          # ".p df" -> ".p_df"; keep the dot
+    if ext and not ext.startswith("."):
+        ext = "." + ext
+    stem = _UPLOAD_UNSAFE_RE.sub("_", stem)
+    stem = re.sub(r"_+", "_", stem).strip("_.")
+    if not stem:
+        stem = "upload"
+    ext = ext[:MAX_STORED_NAME - 1]                            # a pathological extension, too
+    return stem[:max(1, MAX_STORED_NAME - len(ext))] + ext
+
+
+def _safe_upload_name(name):
+    """(original, stored) for a usable name, or ValueError for a traversing / non-name one."""
+    _reject_unsafe_upload_name(name)
+    return name, _stored_upload_name(name)
+
+
+def _prune_uploads():
+    """Delete staging dirs older than UPLOAD_TTL_S. Cheap housekeeping on each write — and it
+    NEVER fails the request: a pruning error is not the caller's problem."""
+    root = _uploads_dir()
+    cutoff = time.time() - UPLOAD_TTL_S
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return
+    for entry in entries:
+        p = os.path.join(root, entry)
+        try:
+            if os.path.isdir(p) and os.path.getmtime(p) < cutoff:
+                shutil.rmtree(p, ignore_errors=True)
+        except OSError:                  # racing prune / vanished dir — nothing to do
+            continue
+
+
+@app.post("/api/flows/uploads")
+async def flows_upload(request: Request, name: str = Query(...)):
+    """Stage a file for a flow's `file` input; return the absolute path the run frame carries.
+
+    POST /api/flows/uploads?name=<filename>   body = the raw file bytes
+      -> 200 {"status":"ok","path","name","stored_name","size"}
+             `name` is the ORIGINAL the user chose (what the UI shows); `stored_name` is the
+             sanitised basename actually on disk. They differ for e.g. "Invoice Jan 2026.pdf".
+      -> 400 {"status":"invalid_name","name","detail"}   — traversal / non-name input ONLY
+      -> 413 {"status":"too_large","max_bytes"}
+    """
+    try:
+        original, stored = _safe_upload_name(name)
+    except ValueError as e:
+        # NOTHING has been created at this point — the uuid dir is minted only after the
+        # name is known good, so a rejected name writes nowhere at all.
+        return JSONResponse({"status": "invalid_name", "name": name, "detail": str(e)},
+                            status_code=400)
+
+    _prune_uploads()
+    staging = os.path.join(_uploads_dir(), uuid.uuid4().hex)
+    dest = os.path.join(staging, stored)
+
+    size = 0
+    too_large = False
+    try:
+        os.makedirs(staging, exist_ok=True)
+        with open(dest, "wb") as fh:
+            # STREAMED: the cap is enforced against the running total as chunks arrive, so an
+            # oversize body is abandoned mid-flight — it is never fully read into memory, and
+            # never fully written to disk.
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    too_large = True
+                    break
+                fh.write(chunk)
+    except OSError as e:
+        shutil.rmtree(staging, ignore_errors=True)
+        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+
+    if too_large:
+        shutil.rmtree(staging, ignore_errors=True)      # the partial file goes with it
+        return JSONResponse({"status": "too_large", "max_bytes": MAX_UPLOAD_BYTES},
+                            status_code=413)
+    return {"status": "ok", "path": dest, "name": original, "stored_name": stored, "size": size}
 
 
 @app.get("/api/hosts/{host}/flows")

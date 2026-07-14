@@ -5,9 +5,9 @@
 
   "inputs": {
     "file": {
-      "type": "string",
+      "type": "file",
       "required": true,
-      "description": "absolute path of the document to upload (.pdf .png .jpg .tif .csv .xlsx)"
+      "description": "the document to upload (.pdf .png .jpg .jpeg .tif .tiff .csv .xlsx)"
     }
   },
 

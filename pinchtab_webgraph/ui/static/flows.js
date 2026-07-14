@@ -59,6 +59,15 @@ let opSchema = null;             // GET /api/flows/op_schema — the REAL per-op
 let opSchemaPromise = null;      // memoized in-flight fetch
 let flowChat = null;             // the flow-mode chat pane (createChatPane, from app.js)
 
+// A file input's value is NOT what the picker holds. The browser only ever exposes
+// `C:\fakepath\invoice.pdf` for a chosen file, and the flow VM runs SERVER-side, so what the
+// run frame must carry is a path the SERVER can open. The picker therefore STAGES the bytes
+// (POST /api/flows/uploads) and we keep the staged path here, keyed by input name — the
+// field itself stays a picker and never holds a value the server could use.
+let flowFileValues = {};         // input name -> {path, name, size}
+let flowFileSeq = {};            // input name -> upload generation (drops a superseded reply)
+let flowInputsOk = true;         // every REQUIRED input is satisfied (gates the Run button)
+
 const FLOW_CAPS = ["allow_submit", "allow_upload", "allow_download"];
 const FLOW_CAP_IDS = {
   allow_submit: "flow-cap-submit",
@@ -129,6 +138,21 @@ function flCapSet(caps) {
 // `inputs` may arrive as the flow's own declaration ({since: {type, required}}), as a
 // JSON Schema ({type:"object", properties:{…}, required:[…]}), or as a list of names.
 // Normalize all three to [{name, type, required, default, description, enum}].
+//
+// `type` is normalized to ONE of: string | number | integer | boolean | file — the five the
+// run panel knows how to draw a control for. A file is declared as {"type": "file"} by the
+// flow doc, but the JSON Schema projection of the same flow (GET …/schema) has no "file"
+// type and renders it as {"type": "string", "format": "path"} — both must land on "file",
+// or the schema shape would give the user a text box again (the whole bug).
+const FLOW_INPUT_TYPES = ["string", "number", "integer", "boolean", "file"];
+
+function flInputType(d) {
+  const t = typeof d.type === "string" ? d.type.toLowerCase() : "";
+  const fmt = typeof d.format === "string" ? d.format.toLowerCase() : "";
+  if (t === "file" || fmt === "path") return "file";
+  return FLOW_INPUT_TYPES.includes(t) ? t : "string";
+}
+
 function flInputSpecs(inputs) {
   if (!inputs) return [];
   if (Array.isArray(inputs)) {
@@ -147,14 +171,21 @@ function flInputSpecs(inputs) {
     const d = decls[name] && typeof decls[name] === "object" ? decls[name] : {};
     out.push({
       name,
-      type: d.type || "string",
+      type: flInputType(d),
       required: required ? required.includes(name) : !!d.required,
       "default": d["default"],
       description: d.description || "",
-      "enum": Array.isArray(d["enum"]) ? d["enum"] : null,
+      "enum": Array.isArray(d["enum"]) && d["enum"].length ? d["enum"] : null,
     });
   }
   return out;
+}
+
+// A stable, predictable DOM id per input, for the e2e and for the <label for>. Input names
+// come from the flow doc (an agent may have written it), so anything that is not id-safe is
+// folded to "_" — for every ordinary name this is just `flow-input-<name>`.
+function flInputId(name) {
+  return "flow-input-" + String(name).replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
 // --- the op schema: the ONLY description of what a step may contain ----------
@@ -809,6 +840,9 @@ function openRunSocket(host, id) {
         setFlowRunning(false);
         logAddLine("error: " + (data.status || "unknown") +
           (data.detail ? " — " + data.detail : ""), "error");
+        // Belt and braces: the gate should have caught this before the click, but if the
+        // server still rejects the inputs, say so AT the inputs — not only in the log.
+        if (data.status === "invalid_input") showInputError(data.detail);
         break;
       default:
         break;
@@ -824,6 +858,9 @@ function renderRunPanel(summary) {
   const box = flEl("flow-inputs");
   if (box) {
     box.textContent = "";
+    // A staged path belongs to the flow the panel was built for — never carry one across.
+    flowFileValues = {};
+    flowFileSeq = {};
     const specs = flInputSpecs(summary ? summary.inputs : null);
     if (specs.length === 0) {
       box.appendChild(flEmpty("This flow takes no inputs."));
@@ -831,6 +868,8 @@ function renderRunPanel(summary) {
       for (const spec of specs) box.appendChild(buildInputField(spec));
     }
   }
+  clearInputError();
+  updateRunGate();
 
   // A grant checkbox is DISABLED unless the flow DECLARES that capability: a write only
   // happens when the flow declares it AND the caller grants it. Download is granted by
@@ -852,22 +891,43 @@ function renderRunPanel(summary) {
   if (dry) dry.checked = true;                 // safety: re-armed for every opened flow
 }
 
+// ONE control per declared type — a text box for everything was the bug: it asked the user
+// to TYPE an absolute path for a file input, which no browser can even tell them.
+//
+//   string            <input type="text">   (a <select> instead if an enum is declared)
+//   number / integer  <input type="number"> (step=1 for integer)
+//   boolean           <input type="checkbox">
+//   file              <input type="file">   — a real picker; the bytes are staged on choose
+//   anything + enum   <select> of the allowed values
 function buildInputField(spec) {
   const label = document.createElement("label");
   label.className = "flow-input";
+  label.dataset.inputFor = spec.name;
 
   const name = document.createElement("span");
   name.className = "flow-input-name";
-  name.textContent = spec.name + (spec.required ? " *" : "");   // server string
+  name.textContent = spec.name;                // server string — textContent only
+  if (spec.required) {
+    const star = document.createElement("span");
+    star.className = "flow-input-req";
+    star.textContent = " *";
+    star.title = "required";
+    name.appendChild(star);
+  }
   label.appendChild(name);
 
   let field;
-  if (spec.type === "boolean") {
-    field = document.createElement("input");
-    field.type = "checkbox";
-    if (spec["default"] === true) field.checked = true;
-  } else if (spec["enum"] && spec["enum"].length) {
+  let status = null;
+  if (spec["enum"]) {
+    // An enum pins the value whatever the declared type is — a constrained choice is a
+    // <select>, never a free-text box that can only be typed wrong.
     field = document.createElement("select");
+    if (!spec.required && spec["default"] == null) {
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = "—";                 // optional: allow "send nothing"
+      field.appendChild(blank);
+    }
     for (const opt of spec["enum"]) {
       const o = document.createElement("option");
       o.value = String(opt);
@@ -875,17 +935,144 @@ function buildInputField(spec) {
       field.appendChild(o);
     }
     if (spec["default"] != null) field.value = String(spec["default"]);
+  } else if (spec.type === "boolean") {
+    field = document.createElement("input");
+    field.type = "checkbox";
+    if (spec["default"] === true) field.checked = true;
+  } else if (spec.type === "file") {
+    field = document.createElement("input");
+    field.type = "file";
+    const accept = acceptFromDescription(spec.description);
+    if (accept) field.accept = accept;
+    status = document.createElement("span");
+    status.className = "flow-input-file-status";
+    status.id = flInputId(spec.name) + "-status";
+    field.addEventListener("change", () => {
+      stageFile(spec.name, field.files && field.files[0], status);
+    });
+  } else if (spec.type === "number" || spec.type === "integer") {
+    field = document.createElement("input");
+    field.type = "number";
+    if (spec.type === "integer") field.step = "1";
+    if (spec["default"] != null) field.value = String(spec["default"]);
   } else {
     field = document.createElement("input");
-    field.type = (spec.type === "number" || spec.type === "integer") ? "number" : "text";
+    field.type = "text";
     if (spec["default"] != null) field.value = String(spec["default"]);
-    if (spec.description) field.placeholder = spec.description;   // server string, but a
-                                                                  // placeholder is inert text
   }
+
+  field.id = flInputId(spec.name);
   field.dataset.inputName = spec.name;
   field.dataset.inputType = spec.type;
+  if (spec.required) field.dataset.inputRequired = "1";
+  // Any edit can satisfy (or un-satisfy) a required input — re-gate Run on every one of
+  // them. A file re-gates from stageFile instead: choosing it is not yet having staged it.
+  if (spec.type !== "file") {
+    field.addEventListener("input", () => { clearInputError(); updateRunGate(); });
+    field.addEventListener("change", () => { clearInputError(); updateRunGate(); });
+  }
   label.appendChild(field);
+  if (status) label.appendChild(status);
+
+  // The description is the only place the flow says what it wants (the upload flow names
+  // its accepted extensions there) — as HELP TEXT, not a placeholder the value hides.
+  if (spec.description) {
+    const help = document.createElement("span");
+    help.className = "flow-input-help";
+    help.textContent = spec.description;       // flow-doc string — textContent only
+    label.appendChild(help);
+  }
   return label;
+}
+
+// The contract has no `accept` field and we do NOT invent one. But a file input's
+// description routinely NAMES the extensions it takes ("a .pdf, .docx or .txt"), and
+// narrowing the picker to those is a pure convenience — so read them out if they are there,
+// and pass nothing at all if they are not.
+function acceptFromDescription(desc) {
+  if (!desc) return "";
+  const found = String(desc).match(/\.[A-Za-z0-9]{1,8}\b/g);
+  if (!found) return "";
+  const exts = [];
+  for (const raw of found) {
+    const ext = raw.toLowerCase();
+    if (!exts.includes(ext)) exts.push(ext);
+  }
+  return exts.length ? exts.join(",") : "";
+}
+
+// --- file staging ------------------------------------------------------------
+// The browser cannot hand the server a local path (a file input only ever exposes
+// `C:\fakepath\…`), so the bytes go up the moment the file is chosen and what we keep is
+// the STAGED SERVER PATH the endpoint hands back. That path — not the filename — is what
+// the run frame's `inputs` carries. Until it arrives the input is UNSATISFIED, which is
+// what keeps Run disabled while an upload is still in flight.
+function stageFile(name, file, status) {
+  const seq = (flowFileSeq[name] || 0) + 1;
+  flowFileSeq[name] = seq;
+  delete flowFileValues[name];                 // choosing a new file drops the old path
+  clearInputError();
+  setInputInvalid(name, false);
+
+  if (!file) {
+    setFileStatus(status, "", "");
+    updateRunGate();
+    return;
+  }
+  setFileStatus(status, "staging…", "pending");
+  updateRunGate();                             // …and Run stays disabled meanwhile
+
+  // A File IS a valid fetch body — raw bytes, no FormData, matching the endpoint.
+  fetch("/api/flows/uploads?name=" + encodeURIComponent(file.name), {
+    method: "POST",
+    body: file,
+  })
+    .then((res) => res.json().then(
+      (data) => ({ ok: res.ok, data: data && typeof data === "object" ? data : {} }),
+      () => ({ ok: false, data: {} }),         // a non-JSON body (a proxy's 502 page)
+    ))
+    .then(({ ok, data }) => {
+      if (flowFileSeq[name] !== seq) return;   // superseded by a later pick — drop it
+      if (ok && data.status === "ok" && data.path) {
+        flowFileValues[name] = {
+          path: String(data.path),
+          // `data.name` is the ORIGINAL name the user picked — what we show. The server may
+          // have sanitised the on-disk basename (`data.stored_name`, e.g. a space -> `_`);
+          // that is cosmetic and internal, so it never surfaces in the status line.
+          name: String(data.name || file.name),
+          size: typeof data.size === "number" ? data.size : file.size,
+        };
+        const v = flowFileValues[name];
+        const size = flBytes(v.size);
+        setFileStatus(status, v.name + (size ? " · " + size : ""), "ok");
+      } else {
+        setFileStatus(status, uploadErrorText(data), "error");
+        setInputInvalid(name, true);           // unsatisfied — Run stays disabled
+      }
+      updateRunGate();
+    })
+    .catch(() => {
+      if (flowFileSeq[name] !== seq) return;
+      setFileStatus(status, "upload failed — the server could not be reached", "error");
+      setInputInvalid(name, true);
+      updateRunGate();
+    });
+}
+
+function uploadErrorText(data) {
+  const st = String(data.status || "upload_failed");
+  if (st === "too_large") {
+    const max = typeof data.max_bytes === "number" ? flBytes(data.max_bytes) : "";
+    return "too large" + (max ? " — the limit is " + max : "");
+  }
+  if (st === "invalid_name") return "the file name was rejected";
+  return st + (data.detail ? " — " + String(data.detail) : "");
+}
+
+function setFileStatus(status, text, cls) {
+  if (!status) return;
+  status.className = "flow-input-file-status" + (cls ? " flow-file-" + cls : "");
+  status.textContent = text;                   // server string — textContent only
 }
 
 // Collect the run inputs. An untouched optional text field is OMITTED rather than sent as
@@ -901,6 +1088,12 @@ function collectInputs() {
       values[name] = !!field.checked;
       continue;
     }
+    if (type === "file") {
+      // the STAGED SERVER PATH, never field.value (which is `C:\fakepath\…`).
+      const staged = flowFileValues[name];
+      if (staged && staged.path) values[name] = staged.path;
+      continue;
+    }
     const raw = field.value;
     if (raw === "" || raw == null) continue;
     if (type === "number" || type === "integer") {
@@ -913,11 +1106,88 @@ function collectInputs() {
   return values;
 }
 
-function setFlowRunning(on) {
+// --- required-input gating ---------------------------------------------------
+// Failing BEFORE the click is the point: today the user can hit Run with a required input
+// empty and only then learn, from the server, that it was `invalid_input`. A required input
+// is satisfied when it holds a value the run frame can actually carry —
+//   * boolean — ALWAYS (unchecked is a legitimate `false`, not a missing value),
+//   * file    — only once its upload came back with a staged path,
+//   * others  — a non-empty field.
+function inputSatisfied(field) {
+  const type = field.dataset.inputType;
+  if (type === "boolean") return true;
+  if (type === "file") {
+    const staged = flowFileValues[field.dataset.inputName];
+    return !!(staged && staged.path);
+  }
+  return String(field.value != null ? field.value : "").trim() !== "";
+}
+
+function updateRunGate() {
+  const box = flEl("flow-inputs");
+  let ok = true;
+  if (box) {
+    for (const field of box.querySelectorAll("[data-input-required]")) {
+      const good = inputSatisfied(field);
+      if (!good) ok = false;
+      // Mark the offending field — a failed upload lands here too (no staged path is, for
+      // the gate, exactly the same as no file), and its status line carries the reason.
+      const label = field.closest(".flow-input");
+      if (label) label.classList.toggle("invalid", !good);
+    }
+  }
+  flowInputsOk = ok;
+  syncRunButton();
+}
+
+// Run is disabled while a run is in flight OR while a required input is unsatisfied — two
+// independent reasons, one button, so both live here rather than fighting over `disabled`.
+function syncRunButton() {
   const run = flEl("flow-run");
+  if (!run) return;
+  run.disabled = flowRunning || !flowInputsOk;
+  run.title = (!flowRunning && !flowInputsOk)
+    ? "fill in every required input first"
+    : "";
+}
+
+function setInputInvalid(name, bad) {
+  const box = flEl("flow-inputs");
+  if (!box) return;
+  for (const label of box.querySelectorAll(".flow-input")) {
+    if (label.dataset.inputFor === name) label.classList.toggle("invalid", !!bad);
+  }
+}
+
+// Belt and braces: the server may still answer `invalid_input` (a flow reloaded under us, a
+// value it rejects for a reason the client cannot know). Show it WHERE the inputs are, not
+// only as a line buried in the run log — and mark the field it names, if it names one.
+function showInputError(detail) {
+  const box = flEl("flow-inputs");
+  if (!box) return;
+  clearInputError();
+  const p = document.createElement("p");
+  p.id = "flow-inputs-error";
+  p.className = "flow-inputs-error";
+  p.textContent = detail ? String(detail) : "the server rejected these inputs";
+  box.appendChild(p);
+
+  const text = String(detail || "");
+  for (const field of box.querySelectorAll("[data-input-name]")) {
+    const name = field.dataset.inputName;
+    if (name && text.indexOf("'" + name + "'") !== -1) setInputInvalid(name, true);
+  }
+}
+
+function clearInputError() {
+  const p = flEl("flow-inputs-error");
+  if (p && p.parentNode) p.parentNode.removeChild(p);
+}
+
+function setFlowRunning(on) {
   const cancel = flEl("flow-cancel");
-  if (run) run.disabled = on;
   if (cancel) cancel.hidden = !on;
+  syncRunButton();
 }
 
 function runFlow() {
@@ -925,6 +1195,13 @@ function runFlow() {
     logAddLine("run socket is not connected.", "error");
     return;
   }
+  // The button is already disabled in this state; this is the keyboard/programmatic guard.
+  updateRunGate();
+  if (!flowInputsOk) {
+    showInputError("fill in every required input first");
+    return;
+  }
+  clearInputError();
   const grant = {};
   for (const cap of FLOW_CAPS) {
     const cb = flEl(FLOW_CAP_IDS[cap]);

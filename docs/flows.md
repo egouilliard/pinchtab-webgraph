@@ -38,6 +38,7 @@ load-bearing:
   - [The ops](#the-ops)
   - [Variables and `${…}` substitution](#variables-and--substitution)
   - [Inputs → JSON Schema](#inputs--json-schema)
+    - [A `file` input, and where its path comes from](#a-file-input-and-where-its-path-comes-from)
 - [The capability / safety model](#the-capability--safety-model)
 - [Downloads: in-session fetch first, CLI fallback](#downloads-in-session-fetch-first-cli-fallback)
 - [The dedupe ledger](#the-dedupe-ledger)
@@ -221,11 +222,72 @@ with a logged-in browser session, so the document must never be able to *compute
 
 ### Inputs → JSON Schema
 
-`pwg flow schema` (and `flow.json_schema()`) turns the `inputs` block into a JSON Schema with
-`additionalProperties: false`. `flow.bind_inputs()` is the boundary an HTTP request body would
-cross: it coerces by declared type, applies `default`, enforces `required`, and **rejects unknown
-keys**. Together these are what make a saved flow a typed endpoint / MCP tool with nothing
-hand-written in between.
+An input is **first-class and typed**. One declaration drives three consumers: the run form the
+UI renders, the coercion `bind_inputs()` performs, and the JSON Schema `json_schema()` publishes.
+
+```json
+"inputs": {
+  "file":  {"type": "file",    "required": true,  "description": "the document to upload"},
+  "since": {"type": "string",  "required": false, "default": "2026-01-01"},
+  "limit": {"type": "integer", "default": 50},
+  "ratio": {"type": "number"},
+  "deep":  {"type": "boolean", "default": false},
+  "mode":  {"type": "string",  "enum": ["draft", "final"], "default": "draft"}
+}
+```
+
+| Type | Value | Rendered as | JSON Schema |
+| --- | --- | --- | --- |
+| `string` | text | a text box | `{"type":"string"}` |
+| `number` / `integer` | a number | a number spinner | `{"type":"number"\|"integer"}` |
+| `boolean` | `true`/`false` (a string `"true"` coerces) | a checkbox | `{"type":"boolean"}` |
+| `file` | an **absolute local path** | a **file picker** (see below) | `{"type":"string","format":"path"}` |
+| *any + `enum`* | one of the declared choices | a `<select>` | `… , "enum":[…]` |
+
+`pwg flow schema` (and `flow.json_schema()`) turns the block into a JSON Schema with
+`additionalProperties: false`. A `file` input is published as a **string with `format: "path"`** —
+its value *is* a string (a path), and `{"type":"file"}` would not be valid JSON Schema, which
+would break the one thing the schema exists for: exposing a flow as a typed endpoint / MCP tool a
+generic client can consume.
+
+`flow.bind_inputs()` is the boundary an HTTP request body crosses. It coerces by declared type,
+applies `default`, enforces `required`, **rejects unknown keys**, enforces an `enum` (a typo'd
+choice must not reach the site as a literal), and — for a `file` — **checks the path exists and is
+a regular file**, failing fast with `input 'file': no such file: /x/y.pdf` rather than blowing up
+later inside the browser bridge as an opaque upload error.
+
+#### A `file` input, and where its path comes from
+
+A `file` input's value is an absolute path on **this machine** — that is what the `upload` op hands
+the PinchTab bridge, which reads the file off the local filesystem. On the CLI you just pass one:
+
+```bash
+pwg flow run ./upload.json --host app.example.com --allow-upload --input file=/abs/path/invoice.pdf
+```
+
+A **browser** cannot produce such a path (a file `<input>` exposes only a name — `C:\fakepath\…`).
+So the web UI uploads the chosen bytes to the server, which stages them and returns the path:
+
+```
+POST /api/flows/uploads?name=<filename>     body = the RAW file bytes
+  -> 200 {"status":"ok","path":"/abs/staged/path","name":"invoice.pdf","size":12345}
+  -> 400 {"status":"invalid_name","name":…,"detail":…}
+  -> 413 {"status":"too_large","max_bytes":104857600}
+```
+
+The returned `path` is what the run frame's `inputs` map carries for that input.
+
+- **Raw body, not multipart — on purpose.** FastAPI's `UploadFile`/`Form` require
+  `python-multipart`; this package's base install is pure-stdlib (even `fastapi` is an extra). A
+  raw body needs no new dependency and the browser can post the `File` object straight through:
+  `fetch(url, {method: "POST", body: fileObject})`.
+- **It writes attacker-supplied bytes to disk from an unauthenticated local UI**, so: the `name` is
+  reduced to a bare filename on a strict `^[A-Za-z0-9._-]+$` allowlist (the same discipline as
+  `cache_store.validate_host`) and traversal (`..`, `/`, `\`, empty, all-dots) is **rejected with a
+  400**, not silently rewritten; every upload lands in its own `uploads/<uuid4hex>/` directory, so
+  two uploads of the same filename cannot collide or overwrite; the body is **streamed to disk in
+  chunks** against a `MAX_UPLOAD_BYTES` cap (100 MB) — over it, the partial file is deleted and the
+  answer is a `413`; and staging dirs older than ~7 days are pruned on each write.
 
 ## The capability / safety model
 
@@ -766,6 +828,7 @@ CRUD + audit. All of it works with the env gate **off**; only `/ws/flows/run` is
 | --- | --- |
 | `POST /api/flows/validate` | `flow.validate()` on a posted document → `{"status":"ok", name, host, steps, capabilities, inputs, warnings}` or `{"status":"invalid", path, error}`. The editor's live check. `warnings` is the **resolvability** pass (`flow_resolve.py`): `[{"path":"steps[0]", "op":"goto", "goal":"reports", "match":null, "message":"no trigger matches “reports” in the example.test graph", "candidates":["Add Report"]}]` — advisory, still `ok`, still savable, and empty when the host has no cache. `POST`/`PUT` of a flow return it too. |
 | `POST /api/flows/schema` | Stateless — the document's `inputs` as a JSON Schema (what the run form is built from). |
+| `POST /api/flows/uploads?name=<filename>` | **Raw body** (not multipart — see [A `file` input](#a-file-input-and-where-its-path-comes-from)). Stages the posted bytes under `<PINCHTAB_WEBGRAPH_HOME>/uploads/<uuid4hex>/<name>` → `{"status":"ok", path, name, size}`. A traversing / illegal name is `400 invalid_name`; over `MAX_UPLOAD_BYTES` (100 MB) is `413 too_large` and the partial is deleted. The returned `path` is what a `file` input carries. |
 | `GET /api/flows/op_schema` | Stateless — **the op vocabulary itself**, served straight from `flow.py`'s `LEAF_OPS` / `BODY_OPS` (+ `capabilities`, `write_ops`, `body_vars`, `max_depth`, `max_steps`). The canvas derives **every** per-op edit form from it, so the editor cannot fall out of step with the validator. See [the canvas](#the-canvas-and-the-one-source-of-truth-for-the-dsl). |
 | `GET /api/hosts/{host}/flows` | `{"flows":[…]}` — the host's flow **summaries** (id, name, steps, capabilities, inputs, `run_count`, timestamps; **no** doc). |
 | `POST /api/hosts/{host}/flows` | Create. Validates first. `429 too_many_flows` at the cap. |
@@ -787,6 +850,8 @@ error: `200 + {"status":"invalid", path, error}` — the same shape `pwg flow va
 | `invalid_flow` · `invalid_run` (bad id token) | `400` |
 | `flow_not_found` · `run_not_found` | `404` |
 | `too_many_flows` | `429` |
+| `invalid_name` (an upload's filename) | `400` |
+| `too_large` (an upload over the cap) | `413` |
 | `invalid` (the *document* was rejected) | **`200`** |
 
 ### `GET /ws/flows/run` — the frame protocol

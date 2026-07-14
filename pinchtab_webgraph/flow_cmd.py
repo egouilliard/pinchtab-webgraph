@@ -177,6 +177,22 @@ def _reject(a, path, error):
     return 1
 
 
+def _first_goto_url(doc):
+    """The flow's first literal `goto {url}`, if it opens with one — the url a fresh (zero-tab)
+    bridge can open its first tab at, so the run's very first command already targets a live
+    tab instead of paying for browser.nav()'s self-heal round-trip. Generic: no site knowledge,
+    and None whenever the answer isn't cheap or certain — a templated url ({{...}}) is not
+    interpolated yet, and a `goal`/`match` goto needs the graph. None is always safe."""
+    for step in (doc.get("steps") or []):
+        if not isinstance(step, dict):
+            continue
+        url = step.get("url") if step.get("op") == "goto" else None
+        if isinstance(url, str) and url and "{{" not in url:
+            return url
+        return None            # only the FIRST step can position the first tab
+    return None
+
+
 def _op_run(a):
     try:
         doc = flow_mod.load(a.path)
@@ -200,7 +216,7 @@ def _op_run(a):
              "allow_download": not a.no_allow_download}
 
     token = perform.load_token(a.config)
-    tab = None if a.dry_run else browser_mod.resolve_tab(a.server, token)
+    tab = None if a.dry_run else browser_mod.resolve_tab(a.server, token, _first_goto_url(doc))
     live = browser_mod.PinchTabBrowser(a.server, token, tab)
 
     # A dry run touches NOTHING — not even an artifact directory (the store would mkdir).

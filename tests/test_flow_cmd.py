@@ -45,7 +45,11 @@ def fake_browser(monkeypatch):
         return fb
 
     monkeypatch.setattr(flow_cmd.browser_mod, "PinchTabBrowser", make)
-    monkeypatch.setattr(flow_cmd.browser_mod, "resolve_tab", lambda s, t: "tab1")
+    def resolve(server, token, url=None):
+        made["resolve_url"] = url            # the flow's first literal goto url, if any
+        return "tab1"
+
+    monkeypatch.setattr(flow_cmd.browser_mod, "resolve_tab", resolve)
     monkeypatch.setattr(flow_cmd.perform, "load_token", lambda cfg: "TOK")
     return made
 
@@ -130,6 +134,25 @@ def test_run_downloads_and_summarizes(monkeypatch, capsys, tmp_path, fake_browse
     assert "1 new file(s), 0 duplicate(s)" in out
     # the scope defaults to the FLOW NAME — that is where artifacts.py's promise is kept
     assert os.path.isdir(str(tmp_path / "art" / "dl-flow"))
+
+
+def test_run_hands_the_first_goto_url_to_resolve_tab(monkeypatch, capsys, tmp_path,
+                                                     fake_browser):
+    # a fresh bridge has NO tab to adopt, and the only way to make one is to nav a REAL url —
+    # so the flow's first literal goto url is passed along. Generic: no site knowledge.
+    path = _write(tmp_path, _DL_FLOW)
+    _cli(monkeypatch, capsys, ["run", path, "--artifacts-root", str(tmp_path / "art")])
+    assert fake_browser["resolve_url"] == "https://app.test/invoices"
+
+
+def test_run_passes_no_url_when_the_flow_does_not_open_with_a_literal_goto(
+        monkeypatch, capsys, tmp_path, fake_browser):
+    # a goal-based goto needs the graph and a templated url isn't interpolated yet — None is
+    # the honest answer, and it is safe: browser.nav() self-heals a missing tab.
+    path = _write(tmp_path, {"name": "f", "host": "app.test", "steps": [
+        {"op": "goto", "goal": "invoices"}]})
+    _cli(monkeypatch, capsys, ["run", path, "--artifacts-root", str(tmp_path / "art")])
+    assert fake_browser["resolve_url"] is None
 
 
 def test_run_json_prints_the_full_record(monkeypatch, capsys, tmp_path, fake_browser):

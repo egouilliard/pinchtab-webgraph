@@ -139,6 +139,71 @@ def test_aborts_when_a_navigation_step_fails():
     assert not any(c[0] == "download" for c in run.calls)
 
 
+# --- regression: a FRESH (zero-tab) bridge -------------------------------------
+# A bridge with no open tabs has nothing to adopt, and the ONLY way to make a tab is
+# `nav <real url> --new-tab` (it rejects a blank-page url with 400). resolve_tab used to try
+# exactly that blank url, get a 400, and return None — after which every step fell back to
+# the bridge's STALE stored default tab and 404'd, so `perform` aborted on its first step.
+
+class ZeroTabRunner:
+    """No page tabs: any command aimed at a tab 404s until `nav --new-tab` makes one."""
+
+    def __init__(self):
+        self.calls = []
+        self.tabs = set()
+
+    def __call__(self, argv, server, token, tab, timeout=90):
+        self.calls.append((list(argv), tab))
+        if argv[0] == "tab":
+            return 0, "[]", ""
+        if argv[0] == "nav" and "--new-tab" in argv:
+            self.tabs.add("fresh")
+            return 0, "fresh", ""
+        if tab not in self.tabs:
+            return 1, "", "Error 404: tab E3618C01 not found"
+        return 0, "ok", ""
+
+
+def test_resolve_tab_opens_the_first_tab_at_the_start_url():
+    run = ZeroTabRunner()
+    assert perform.resolve_tab("s", None, "https://app.test/home", _run=run) == "fresh"
+    argv = run.calls[-1][0]
+    assert argv[:2] == ["nav", "https://app.test/home"]
+    assert "--new-tab" in argv and "--print-tab-id" in argv
+    assert not any("about:blank" in " ".join(c[0]) for c in run.calls)
+
+
+def test_resolve_tab_returns_none_with_no_tabs_and_no_url():
+    run = ZeroTabRunner()
+    assert perform.resolve_tab("s", None, _run=run) is None
+    assert not any(c[0][0] == "nav" for c in run.calls)
+
+
+def test_zero_tab_bridge_does_not_abort_the_run():
+    """The shipped bug, end to end: with tab=None on a bridge with no tabs, the first nav
+    404s ('tab not found'); execute_steps must re-nav in a new tab, pin it, and carry it
+    through the REST of the plan — instead of aborting."""
+    run = ZeroTabRunner()
+    res = perform.execute_plan(_DL, _PATH, "https://app.test/home", server="s", tab=None,
+                               _run=run)
+    assert not any(r["status"] in ("error", "aborted") for r in res)
+    assert [r["status"] for r in res] == ["ok", "ok", "ok"]
+    # the first nav was retried at the SAME url with --new-tab, and every later call carried
+    # the tab it printed.
+    first, retry = run.calls[0], run.calls[1]
+    assert first[0] == ["nav", "https://app.test/home"] and first[1] is None
+    assert retry[0] == ["nav", "https://app.test/home", "--new-tab", "--print-tab-id"]
+    assert [c[1] for c in run.calls[2:]] == ["fresh"] * len(run.calls[2:])
+    assert run.calls[-1][0][:2] == ["download", "https://app.test/files/q3.pdf"]
+
+
+def test_a_genuine_nav_failure_is_not_retried_in_a_new_tab():
+    run = FakeRunner(fail_on="app.test/reports")     # fails with 'boom', not 'not found'
+    res = perform.execute_plan(_DL, _PATH, "https://app.test/home", tab="t1", _run=run)
+    assert res[-1]["status"] == "aborted"
+    assert not any("--new-tab" in c for c in run.calls)
+
+
 def test_dry_run_touches_nothing():
     run = FakeRunner()
     res = perform.execute_plan(_DL, _PATH, "https://app.test/home", dry_run=True, _run=run)

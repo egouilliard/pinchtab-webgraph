@@ -182,6 +182,20 @@ def fetch_js(url):
     return _FETCH_JS % {"url": json.dumps(url)}
 
 
+def _tab_is_missing(message):
+    """Does this failure mean 'the tab I aimed at is gone'? PinchTab answers a command aimed
+    at a dead/stale tab id with `Error 404: tab <id> not found` — that is the ONE failure a
+    nav may retry in a new tab. Anything else (a real 404 page, a blocked domain, an invalid
+    url) must surface: retrying it in a new tab would only hide it."""
+    return "not found" in (message or "").lower()
+
+
+def _printed_tab_id(out):
+    """The tab id `nav --print-tab-id` prints (last non-empty line of stdout)."""
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else None
+
+
 class BrowserError(RuntimeError):
     """A browser command failed. `step_fatal` marks the failures that must abort a flow
     (a nav/click that didn't land means every later step is aimed at the wrong page)."""
@@ -233,7 +247,27 @@ class PinchTabBrowser:
     # --- the port ---------------------------------------------------------------
 
     def nav(self, url):
-        self.run(["nav", url])
+        """Navigate, and SELF-HEAL a missing tab.
+
+        The tab we target (`self.tab`, or the bridge's stored default when we have none) can
+        simply not exist: a freshly started bridge has NO tabs at all, and the stored default
+        id goes stale as soon as its tab is closed. Both surface identically — `Error 404: tab
+        <id> not found` — and every later command would 404 the same way. So on THAT failure
+        (and only that one — see `_tab_is_missing`) we re-nav to the SAME url with `--new-tab`,
+        and PIN the id it prints onto `self.tab`, so click/fill/upload/eval all land on the
+        tab we just opened. Mirrors recipe.nav(), which has done this for ages.
+
+        Note the tab can only ever be opened at a REAL url: the bridge rejects a blank-page url
+        with `400 invalid url`, which is why there is no "open a blank tab first" path."""
+        try:
+            self.run(["nav", url])
+            return
+        except BrowserError as exc:
+            if not _tab_is_missing(str(exc)):
+                raise                      # a genuine nav failure — do not mask it
+        tab = _printed_tab_id(self.run(["nav", url, "--new-tab", "--print-tab-id"]))
+        if tab:
+            self.tab = tab                 # every later command now targets the live tab
 
     def click(self, selector):
         """Click, and TOLERATE a navigation.
@@ -338,9 +372,16 @@ class PinchTabBrowser:
         return self.evaluate("location.href") or ""
 
 
-def resolve_tab(server, token, _run=None):
+def resolve_tab(server, token, url=None, _run=None):
     """Pin a live page tab. PinchTab stores a DEFAULT tab id which goes stale, after which
-    every command 404s with 'tab not found' — so a run resolves one up front."""
+    every command 404s with 'tab not found' — so a run resolves one up front.
+
+    Adopt an existing page tab if there is one. Otherwise (a freshly started bridge has none)
+    open a tab AT `url` if the caller knows one — `pinchtab nav <url> --new-tab --print-tab-id`
+    is the ONLY way to create a tab, and it needs a REAL url (the bridge rejects a blank-page
+    url with `400 invalid url`, so there is no blank-tab fallback to fall back to).
+
+    Returning None is SAFE: `PinchTabBrowser.nav` self-heals a missing tab at its target url."""
     probe = PinchTabBrowser(server, token, None, timeout=15, _run=_run)
     try:
         tabs = json.loads(probe.run(["tab", "--json"], timeout=15) or "[]")
@@ -352,8 +393,9 @@ def resolve_tab(server, token, _run=None):
             return active[-1]["id"]
     except (BrowserError, ValueError, TypeError):
         pass
+    if not url:
+        return None
     try:
-        out = probe.run(["nav", "about:blank", "--new-tab", "--print-tab-id"])
-        return out.strip().splitlines()[-1].strip() or None
+        return _printed_tab_id(probe.run(["nav", url, "--new-tab", "--print-tab-id"]))
     except BrowserError:
         return None

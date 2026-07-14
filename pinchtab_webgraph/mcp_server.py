@@ -609,7 +609,8 @@ async def perform(goal: str | None = None, host: str | None = None,
             return out
 
     token = perform_mod.load_token()
-    tab = None if dry_run else await asyncio.to_thread(perform_mod.resolve_tab, server, token)
+    tab = None if dry_run else await asyncio.to_thread(perform_mod.resolve_tab, server, token,
+                                                       plan["start_url"])
     steps = await asyncio.to_thread(
         perform_mod.execute_plan, plan["trigger"], plan["path_steps"], plan["start_url"],
         allow_submit=allow_submit, server=server, token=token, tab=tab, values=values,

@@ -57,11 +57,24 @@ returns, with a `status` field to branch on.
 | `list_content` | offline | Per-view inventory of captured collections | `ok` / `empty` |
 | `list_forms` | offline | Every create-form: label, host, depth, field count | (no `status`; `{meta, forms}`) |
 | `link_paths` | offline | Shortest / all paths between two pages of a link graph | `ok` / `no_path` / `{not_found,ambiguous}_{from,to}` |
+| `propose_flow` | **pure** | Validate a candidate [automation-flow](flows.md) document and **echo it back** — the flow-authoring agent's only write-*shaped* verb | `ok` / `invalid` (+ `path` / `error`), always with the whole `doc` |
 | `crawl` | live | Crawl a site into its per-host cache (**REPLACES** it) | `ok` / `timeout` / `partial` / `failed` / bridge errors |
 | `ask_howto` | live | Cache-first how-to; runs the browser only on a miss (**MERGES**) | underlying `howto` status + `cache_state` ∈ hit/updated/live_failed |
 
 All offline tools may also return a resolver/load status:
 `invalid_args`, `invalid_host`, `no_cache_for_host`, `invalid_graph`.
+
+**`propose_flow` is PURE — and deliberately toothless.** It takes `(doc, note)`, runs
+`flow.validate_report(doc)` (no `host=` / `graph=`: the document carries its own host) and returns
+the verdict **plus the document**. It performs **no disk write, no browser action and no
+subprocess** — a test poisons `open` / `os.replace` / `subprocess` to prove it. It exists so a
+model can **hand a candidate flow to a UI**: the [web UI](ui.md#the-flow-agent-and-the-mode-axis)
+intercepts every call and turns it into a `flow_draft` frame that re-renders its canvas + JSON pane.
+
+There is deliberately **no flow save / update / delete / run tool anywhere in this module** (guarded
+by `test_no_flow_save_or_run_tool_exists_anywhere`), so an agent **can only propose** — persisting or
+executing a flow stays a human action. See
+[flows.md → the agent can only PROPOSE](flows.md#the-agent-can-only-propose--and-that-is-structural).
 
 A down bridge surfaces as `bridge_unavailable` (CLI not on PATH),
 `bridge_unreachable` (no answer / timeout), or `bridge_no_token` (auth not configured).

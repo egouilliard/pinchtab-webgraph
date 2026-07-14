@@ -24,8 +24,10 @@ load-bearing:
 | Step VM | [`pinchtab_webgraph/runner.py`](../pinchtab_webgraph/runner.py) — the interpreter. Browser, artifact store and sleep are **injectable ports**. |
 | Browser port | [`pinchtab_webgraph/browser.py`](../pinchtab_webgraph/browser.py) — `PinchTabBrowser` + the live-DOM primitives (`query`, `next_page`, `page_signature`, `fetch_bytes`/`save_bytes`). |
 | Artifact store | [`pinchtab_webgraph/artifacts.py`](../pinchtab_webgraph/artifacts.py) — content-addressed store + the persistent dedupe ledger. |
+| Resolvability | [`pinchtab_webgraph/flow_resolve.py`](../pinchtab_webgraph/flow_resolve.py) — does a step's `goal` name anything on the **real crawled site**? The one check `validate()` structurally cannot do (it needs a graph off disk). Produces **warnings**, never errors. See [Resolvability warnings](#resolvability-warnings). |
 | CLI | [`pinchtab_webgraph/flow_cmd.py`](../pinchtab_webgraph/flow_cmd.py) — `pwg flow run \| validate \| schema` (`--jsonl` streams the run as JSON Lines). |
 | Web UI | The **[Flows tab](#running-flows-from-the-web-ui)** — [`ui/flow_store.py`](../pinchtab_webgraph/ui/flow_store.py) (saved flows + run history on disk) and [`ui/flow_runner.py`](../pinchtab_webgraph/ui/flow_runner.py) (runs `flow_cmd --jsonl` as a subprocess and relays its frames). Opt-in: `PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1`. |
+| AI authoring | **[Describe the flow to an agent](#authoring-a-flow-with-the-ai-agent)** instead of hand-typing it: the [`propose_flow`](#propose_flow-and-the-flow_draft-frame) MCP tool + a chat/canvas/JSON workbench. The agent can only **propose**; you Save and you Run. |
 
 ## Contents
 
@@ -39,6 +41,13 @@ load-bearing:
 - [The capability / safety model](#the-capability--safety-model)
 - [Downloads: in-session fetch first, CLI fallback](#downloads-in-session-fetch-first-cli-fallback)
 - [The dedupe ledger](#the-dedupe-ledger)
+- [Authoring a flow with the AI agent](#authoring-a-flow-with-the-ai-agent)
+  - [One document, three views](#one-document-three-views)
+  - [`propose_flow` and the `flow_draft` frame](#propose_flow-and-the-flow_draft-frame)
+  - [The agent can only PROPOSE — and that is structural](#the-agent-can-only-propose--and-that-is-structural)
+  - [The agent always edits YOUR current draft](#the-agent-always-edits-your-current-draft)
+  - [The canvas, and the one source of truth for the DSL](#the-canvas-and-the-one-source-of-truth-for-the-dsl)
+  - [Resolvability warnings](#resolvability-warnings)
 - [Authoring a flow — a walkthrough](#authoring-a-flow--a-walkthrough)
 - [Run records and events](#run-records-and-events)
 - [Running flows from the web UI](#running-flows-from-the-web-ui)
@@ -304,7 +313,225 @@ reports **0 new, 5 dupes**. A torn last line (from a killed run) is skipped, not
 Scope defaults to the flow's name and is validated as a directory segment (allowlist, not an
 escape) — the same treatment `cache_store` gives a host.
 
+## Authoring a flow with the AI agent
+
+Everything above describes the **format**. It is not the **interface**. Hand-typing this JSON
+means knowing the op vocabulary by heart, and that is the wrong bar for "download every report
+PDF across all the pages".
+
+So in the **[Flows tab](#running-flows-from-the-web-ui)** you can just **say that**, and an agent
+drafts the document for you — grounded in the site you actually crawled:
+
+> **you:** download every report PDF across all the pages
+>
+> **agent:** *(calls `find_content` → `list_content` → `graph_summary` to find the real reports
+> view and the real download controls, then `propose_flow`)* — the draft appears on the canvas
+> and in the JSON pane, live.
+
+The document it hands back is the *same* document described above, and the CLI runs it unchanged.
+The agent is an **authoring** front end, not a second runtime.
+
+**Why this beats a generic AI flow builder:** the agent already holds the six read-only tools over
+the **crawled interaction graph** (`howto` / `list_forms` / `find_content` / `list_content` /
+`graph_summary` / `link_paths`). It **looks the trigger up** instead of inventing a selector. A
+generic builder can only guess `.btn-download`; this one resolves the real click-path, on your
+real site, and its `goal` strings are ones the runner's own resolver will match.
+
+### One document, three views
+
+There is **ONE flow document** and **THREE synchronized views** of it. Any of them mutates the
+doc; the other two re-render; [validation](#the-document-format) runs on every change.
+
+```
+┌──────────────────┬─────────────────────────┬──────────────────────────┐
+│  CHAT (agent)    │  CANVAS (visual)        │  JSON (the format)       │
+│  ──────────────  │  ─────────────────────  │  ──────────────────────  │
+│ “download every  │  ┌───────────────────┐  │  { "name": "reports",    │
+│  report PDF      │  │ goto  goal=Reports│  │    "steps": [            │
+│  across all the  │  └───────────────────┘  │      {"op":"goto", …},   │
+│  pages”          │  ┌ paginate ─────────┐  │      {"op":"paginate",   │
+│                  │  │ ┌ for_each ─────┐ │  │       "body":[ … ]}      │
+│  → propose_flow  │  │ │ ▸ download    │ │  │    ] }                   │
+│    (draft chip)  │  │ └───────────────┘ │  │                          │
+│                  │  └───────────────────┘  │  ✓ valid · 2 steps       │
+└──────────────────┴─────────────────────────┴──────────────────────────┘
+        the agent            you click a box          you type
+        proposes             to edit it               the format
+```
+
+| The view | Mutates the doc by | Re-renders when the doc changes elsewhere |
+| --- | --- | --- |
+| **Chat** | the agent calling [`propose_flow`](#propose_flow-and-the-flow_draft-frame) | it doesn't re-render — it is *told* the current draft on every turn ([below](#the-agent-always-edits-your-current-draft)) |
+| **Canvas** | click a box to edit it; `+` / move / delete / wrap-in-a-loop | repaints from the new doc |
+| **JSON** | type the format directly | rewritten — except from its **own** keystrokes (that would fight the caret) |
+
+A validation **error highlights the box.** `flow.validate()` reports its failure at a path like
+`steps[1].body[0]` — and that string is *exactly* a canvas box's `data-path`, because
+[`flow_canvas.js`](../pinchtab_webgraph/ui/static/flow_canvas.js) uses `flow.py`'s path grammar
+verbatim. So the validator can point at the offending **box**, not merely print a path.
+
+### `propose_flow` and the `flow_draft` frame
+
+**One** new MCP tool ([`mcp_server.propose_flow`](../pinchtab_webgraph/mcp_server.py)):
+
+```python
+propose_flow(doc: dict, note: str | None = None) -> dict
+```
+
+It is a **pure validate-and-echo**. It runs `flow.validate_report(doc)` — the same verdict shape
+`pwg flow validate` prints and `POST /api/flows/validate` returns, derived in **one** place so the
+CLI, the HTTP surface and the agent all answer the same question with the same words — and hands
+`doc` straight back with the verdict attached:
+
+```json
+{"status": "ok", "name": "…", "host": "…", "steps": 2, "capabilities": {…}, "inputs": [],
+ "doc": { … the whole document … }, "note": "paginate over all report pages"}
+```
+
+The **chat layer intercepts every call** and emits a `flow_draft` frame — exactly mirroring how an
+OK `howto` result becomes the [`tour` frame](ui.md#show-me-how-guided-tour):
+
+```json
+{"type": "flow_draft", "doc": {…}, "status": "ok|invalid", "path": null, "error": null,
+ "name": "…", "note": "…"}
+```
+
+…and the SPA re-renders the canvas + JSON pane from it. That is how the draft lands **live**, mid-
+conversation, instead of arriving as a wall of JSON in a code block you then have to copy.
+
+The agent must always resend the **WHOLE** document, never a diff — the frame *replaces* the draft.
+An **invalid** draft is still echoed and still rendered (with its `path`/`error`, and the canvas box
+lit up): a withheld bad draft teaches you nothing, whereas a shown one tells you exactly what the
+agent wrote and where it is wrong.
+
+### The agent can only PROPOSE — and that is structural
+
+**The human clicks Save. The human clicks Run.** The agent has no path to either. This is not a
+prompt instruction or a convention — it is enforced by the shape of the code, in three independent
+ways:
+
+1. **`propose_flow` is pure.** No disk write, no browser, no subprocess — it validates a dict and
+   returns it. `tests/test_mcp_server.py::test_propose_flow_is_pure_no_disk_no_subprocess` proves
+   it by **poisoning `open` / `os.replace` / `subprocess`** and calling the tool: any I/O would
+   raise.
+2. **No save/run tool exists anywhere on the MCP surface.** Nothing in `mcp_server.py` reaches
+   [`flow_store`](../pinchtab_webgraph/ui/flow_store.py) (save) or
+   [`flow_runner`](../pinchtab_webgraph/ui/flow_runner.py) (run). Guarded by
+   `test_no_flow_save_or_run_tool_exists_anywhere` — so the fence can't be quietly widened later.
+3. **The tool fence is additive and fails closed.** The six-tool read-only browsing fence
+   (`chat.OFFLINE_TOOL_NAMES`) is **untouched**; `FLOW_TOOL_NAMES = {"propose_flow"}` is a
+   **sibling** set, unioned in **only** when `mode == "flow"`:
+
+   ```python
+   def effective_tool_names(mode="workspace"):
+       if mode == "flow":
+           return OFFLINE_TOOL_NAMES | FLOW_TOOL_NAMES   # 6 + 1
+       return OFFLINE_TOOL_NAMES                         # 6 — and any UNKNOWN mode lands here
+   ```
+
+   An unrecognized mode degrades to the base fence. The safety story is *"flow mode **adds** one
+   provably-pure tool"*, never *"flow mode **widens** the fence"*.
+
+And a session's **mode is pinned at creation** (like its backend): a resumed chat takes its mode
+from its own stored record, so a workspace chat **cannot be escalated** into flow mode by
+reconnecting with `?mode=flow`. See
+[ui.md → The flow agent and the `mode` axis](ui.md#the-flow-agent-and-the-mode-axis).
+
+The [capability model](#the-capability--safety-model) is untouched underneath all of this: even
+after you Save and Run an agent-drafted flow, a write happens only if the **document declares** it
+*and* **you grant** it. The agent drafting a `capabilities.allow_submit` does not grant it — the
+run panel's checkbox is still yours, and the runner re-checks per step.
+
+### The agent always edits YOUR current draft
+
+Every user message ships the **live document** back to the agent as `user_message.draft` (the SPA
+reads it straight from the editor's current state, never from the agent's own last copy). The turn
+is prefixed with it, so the agent revises **the document on your screen**.
+
+That is what makes the three views a single doc rather than three that fork: edits you make **by
+hand between turns survive the agent's next revision**. Verified in a real browser — a hand-added
+`wait` step and a changed `max_pages` both came back intact in the agent's next draft.
+
+A **replayed** draft (one re-read out of a stored transcript when you reopen an old chat) is
+deliberately **never** applied: it is history, quite possibly for a different flow than the one now
+open, and applying it would silently clobber your work. It renders as a chip with an explicit
+**"Restore this draft"** button — a human press is the only way a historical document reaches the
+editor — and a monotonic generation guard drops any async writer whose document has been superseded.
+
+### The canvas, and the one source of truth for the DSL
+
+The canvas is a **vertical flow diagram with containers**: boxes top-to-bottom joined by
+connectors, and a body op (`for_each` / `paginate`) renders as a container that visibly **wraps**
+its children. A flow is a nested sequence, and the containment should be honest.
+
+Every per-op edit form is **derived from `GET /api/flows/op_schema`**, which is served from
+`flow.py`'s own `LEAF_OPS` / `BODY_OPS` tables:
+
+```console
+$ curl -s localhost:8765/api/flows/op_schema | python3 -m json.tool
+{
+  "leaf_ops": {"goto": {"one_of": ["url", "goal", "match"], "opt": ["start", "match"]}, …},
+  "body_ops": {"for_each": {"req": ["match"], "opt": ["as", "max"]}, …},
+  "capabilities": {"allow_submit": false, "allow_download": true, "allow_upload": false},
+  "write_ops": ["upload"],
+  "body_vars": {"for_each": ["index"], "paginate": ["page"]},
+  "max_depth": 6,
+  "max_steps": 500
+}
+```
+
+**There is deliberately NO op list in the JavaScript.** 12 leaf ops + 2 body ops, one table, one
+place. Add an op to `flow.LEAF_OPS` and it appears in the UI's op picker and gets an edit form —
+a second copy of the DSL in JS would drift the first time an op changed. (The same tables also
+generate the agent's system prompt, so the prompt cannot drift from the validator either.)
+
+Values on the canvas are attacker-controlled (a flow targets a hostile site) *and* model-controlled
+now that an agent writes them, so everything is `createElement` + `textContent` — never
+`innerHTML` — and an `href` is never rendered as a live `<a>`.
+
+### Resolvability warnings
+
+The sharpest papercut this layer had: a `goto` whose `goal` names **nothing on the actual site**
+validated **green**, saved, ran — and only *then* aborted with `could not resolve 'reports'
+against the graph: no_match`.
+
+`flow.validate()` structurally cannot catch that: it proves the document's **shape**, and it must
+stay pure enough to run before a graph or a browser is ever touched. So the check lives in its own
+module, [`flow_resolve.py`](../pinchtab_webgraph/flow_resolve.py), and splits cleanly:
+
+```
+flow.goal_targets(doc)      pure — WHICH steps resolve against the graph, and WHERE (`steps[1].body[0]`)
+  + api.resolve_action      the graph read — the SAME resolver runner.py runs
+  = warnings
+```
+
+Because it calls **the very same `api.resolve_action` the runner calls**, the authoring-time
+warning and the run-time abort agree **by construction** — they cannot drift into disagreeing.
+
+They are **warnings, not errors**, and the distinction is load-bearing:
+
+| | |
+| --- | --- |
+| **Verdict** | stays `ok`. **Save stays enabled.** A flow may legitimately be authored *before* the host is crawled — "not crawled" must never mean "not savable". |
+| **No host / no cache on disk** | **no warnings at all** (and no error). |
+| **A `${…}`-substituted goal** | not checkable now (it's only known at run time), so not warned — that would be noise, not signal. |
+| **Anything else that doesn't resolve** | a warning carrying the step's `path` (so [the canvas paints that box amber](ui.md#flows-view-opt-in)), the message, and **candidate labels the site really has** — *did you mean “Add Report”?* |
+| **A corrupt/stale graph, or a `match` that isn't a legal regex** | **no warnings**. It is advisory: it can never turn a validation request into a 500. |
+
+The "did you mean…?" suggestions are deliberately **dumb and deterministic** (no LLM): token
+overlap against the graph's real trigger labels first — which is what catches the plural/singular
+miss, `"reports"` vs “Add Report” — with a stdlib `difflib` near-match only as a fallback. A
+wrong-but-plausible suggestion would be worse than none.
+
+The human gets these from **`POST /api/flows/validate`** (which the editor calls on every change),
+**not** from `propose_flow` — which stays [pure](#the-agent-can-only-propose--and-that-is-structural).
+The agent grounds its goals the other way: by calling `howto` before it proposes.
+
 ## Authoring a flow — a walkthrough
+
+> The **[AI agent](#authoring-a-flow-with-the-ai-agent)** does most of this for you now. This is
+> the by-hand path — still the right one for the CLI, for CI, and for understanding what the agent
+> is producing.
 
 **1. Crawl the site once.** Flow `goal` steps resolve offline against the interaction graph, so
 the graph has to exist:
@@ -382,7 +609,8 @@ supplied value). Nothing is ever silently dropped.
 
 The flow layer shipped CLI-only, which meant an automation platform you could not *see* your
 automations in. The optional **[web UI](ui.md)** now carries a fourth tab — **Flows** — where a
-host's saved automations are listed, written, validated, run, re-run, and audited.
+host's saved automations are listed, **[described to an agent](#authoring-a-flow-with-the-ai-agent)**
+or drawn on a canvas, validated, run, re-run, and audited.
 
 ```bash
 PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1 pinchtab-webgraph-ui        # 1 / true / yes / on
@@ -396,26 +624,42 @@ still author and validate a flow on a server that is not allowed to run one.
 
 ### The tab
 
+The tab is a **workbench**: the host's flow list, then the [three synchronized
+views](#one-document-three-views) of the one document — a **chat agent**, a **visual canvas**, and
+the **JSON** — plus the run panel, the run log, the history and the ledger.
+
 ```
 ┌───────────────┬──────────────────────────────────────────────────────────┐
 │ Crawled       │ app.example.com   [Workspace][Graph][Explore][Flows]      │
-│ graphs        ├──────────────────┬───────────────────────────────────────┤
-│ ───────────   │  Flows           │  { "name": "download-all-reports",     │
-│ app.example   │  ─────────────   │    "steps": [ … ] }        ← editor    │
-│ …             │  ▸ download-all  │  ✓ ok · 4 steps · download             │
-│               │    reports  ·3   │  ┌──────────────────────────────────┐  │
-│               │  ▸ export-users  │  │ Run: [x] Dry run  [ ] Allow submit│  │
-│               │                  │  │      [Run flow] [Cancel]  5 new · │  │
-│               │  [+ New flow]    │  │                          0 dupe   │  │
-│               │                  │  │  ✓ download  report-a.pdf  new    │  │
-│               │                  │  └──────────────────────────────────┘  │
-│               │                  │  Runs (history)   │  Artifacts (all-time)│
-└───────────────┴──────────────────┴───────────────────────────────────────┘
+│ graphs        ├──────────┬────────────────┬──────────────────────────────┤
+│ ───────────   │  Flows   │  Chat (agent)  │  ┌ canvas ─────────────────┐ │
+│ app.example   │  ──────  │  ────────────  │  │ goto  goal=Reports       │ │
+│ …             │ ▸ downl- │ “download every│  │ ┌ paginate ────────────┐ │ │
+│               │   all-   │  report PDF    │  │ │ ┌ for_each ────────┐ │ │ │
+│               │   reports│  across all    │  │ │ │ ▸ download        │ │ │ │
+│               │   ·3     │  the pages”    │  │ │ └──────────────────┘ │ │ │
+│               │ ▸ export-│                │  │ └──────────────────────┘ │ │
+│               │   users  │  ▸ draft ✓ ok  │  └──────────────────────────┘ │
+│               │          │    (chip)      │  { "name": …, "steps": […] }  │
+│               │ [+ New   │                │  ✓ valid · 2 steps  ← JSON    │
+│               │   flow]  │                │  ┌──────────────────────────┐ │
+│               │          │                │  │ [x] Dry run [ ] Allow sub│ │
+│               │          │                │  │ [Run flow][Cancel] 5 new·│ │
+│               │          │                │  │  ✓ download report-a.pdf │ │
+│               │          │                │  └──────────────────────────┘ │
+│               │          │                │  Runs (history) │ Artifacts   │
+└───────────────┴──────────┴────────────────┴──────────────────────────────┘
 ```
 
 - **Flow list** (left) — every flow saved under the selected host, with its step count and how
   many times it has run. **`+ New flow`** seeds the editor with a runnable starter document (a
   paginate + for_each + download flow, so the dedupe story is there from the first keystroke).
+- **Chat (the flow agent)** — *"describe the automation you want."* The agent queries the crawled
+  graph, then [`propose_flow`](#propose_flow-and-the-flow_draft-frame)s a draft straight onto the
+  canvas + JSON. It can only **propose** — [structurally](#the-agent-can-only-propose--and-that-is-structural).
+  Its chats are **separate** from the Workspace tab's (same store, `mode=flow`).
+- **Canvas** — [the vertical diagram with containers](#the-canvas-and-the-one-source-of-truth-for-the-dsl).
+  Click a box to edit it; `+` / move / delete / wrap. A validation error **lights the offending box**.
 - **Editor** — a plain JSON textarea with a **live validator**: every keystroke (debounced) is
   `POST`ed to `/api/flows/validate`, which is [`flow.validate()`](#the-document-format) — pure, no
   browser, no graph. A typo'd `${itm.href}` turns the bar red and names both the variable *and its
@@ -522,6 +766,7 @@ CRUD + audit. All of it works with the env gate **off**; only `/ws/flows/run` is
 | --- | --- |
 | `POST /api/flows/validate` | `flow.validate()` on a posted document → `{"status":"ok", name, host, steps, capabilities, inputs, warnings}` or `{"status":"invalid", path, error}`. The editor's live check. `warnings` is the **resolvability** pass (`flow_resolve.py`): `[{"path":"steps[0]", "op":"goto", "goal":"reports", "match":null, "message":"no trigger matches “reports” in the example.test graph", "candidates":["Add Report"]}]` — advisory, still `ok`, still savable, and empty when the host has no cache. `POST`/`PUT` of a flow return it too. |
 | `POST /api/flows/schema` | Stateless — the document's `inputs` as a JSON Schema (what the run form is built from). |
+| `GET /api/flows/op_schema` | Stateless — **the op vocabulary itself**, served straight from `flow.py`'s `LEAF_OPS` / `BODY_OPS` (+ `capabilities`, `write_ops`, `body_vars`, `max_depth`, `max_steps`). The canvas derives **every** per-op edit form from it, so the editor cannot fall out of step with the validator. See [the canvas](#the-canvas-and-the-one-source-of-truth-for-the-dsl). |
 | `GET /api/hosts/{host}/flows` | `{"flows":[…]}` — the host's flow **summaries** (id, name, steps, capabilities, inputs, `run_count`, timestamps; **no** doc). |
 | `POST /api/hosts/{host}/flows` | Create. Validates first. `429 too_many_flows` at the cap. |
 | `GET /api/hosts/{host}/flows/{flow_id}` | The **full** record, `doc` included (the editor needs it). |
@@ -647,6 +892,18 @@ The **UI** layer adds **63** more (`tests/test_flow_store.py`, `tests/test_ui_fl
 browser against a real bridge: author a flow → watch validation go red on a typo'd `${itm.href}` →
 save → run live (3 pages paginated, **5 files downloaded, 5 new · 0 dupe**) → run again on the same
 ledger (**0 new · 5 dupe**), with the crawl left un-wedged afterwards.
+
+**[AI authoring](#authoring-a-flow-with-the-ai-agent)** was proven the same way — a real bridge, real
+Chrome, nothing mocked. Asked *"download every report PDF across all the pages"*, the agent called
+`find_content` / `list_content` / `graph_summary`, then `propose_flow`; the draft landed **live** in
+the canvas and the JSON pane; saved and run it fetched **5 new** files across 3 pages, and a re-run
+reported **0 new / 5 dupe**. The three-way sync was exercised in **all three directions**, including
+the agent preserving a human's hand-added `wait` step and changed `max_pages` across a revision.
+[`flow_resolve.py`](../pinchtab_webgraph/flow_resolve.py) adds **13** unit tests
+(`tests/test_flow_resolve.py`), and the propose-only fence is nailed down by
+`test_propose_flow_is_pure_no_disk_no_subprocess` + `test_no_flow_save_or_run_tool_exists_anywhere`.
+
+Whole suite: **817 passed, 2 skipped**.
 
 ---
 

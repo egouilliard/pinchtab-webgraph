@@ -15,10 +15,12 @@ single console script, `pinchtab-webgraph-ui`. From one loopback-only browser ap
 - **[explore / search](#explore-view)** everything the crawl captured — full-text search,
   the create-form inventory + a goal path-finder, and the per-view content inventory —
   plus a Ctrl/Cmd-K [command palette](#command-palette) launcher over the whole UI;
-- **write, run and re-run [automation flows](#flows-view-opt-in)** — the host's saved
-  [declarative flows](flows.md), with a live-validating editor, visible capability toggles,
-  a streaming run log with a live `N new · M dupe` dedupe counter, run history, and the
-  flow's all-time artifact ledger (opt-in);
+- **author, run and re-run [automation flows](#flows-view-opt-in)** — the host's saved
+  [declarative flows](flows.md), in a workbench of **three synchronized views**: an
+  [**AI agent** you describe the automation to](flows.md#authoring-a-flow-with-the-ai-agent),
+  an editable **visual canvas**, and the live-validating **JSON** — plus visible capability
+  toggles, a streaming run log with a live `N new · M dupe` dedupe counter, run history, and
+  the flow's all-time artifact ledger (opt-in);
 - store per-host login credentials in a keyring-backed [vault](#vault-credentials).
 
 Underneath it's a small FastAPI app that serves a read-only REST API over the offline
@@ -235,10 +237,11 @@ Ctrl/Cmd-K shortcut fires even while a chat or crawl input is focused.
 ## Flows view (opt-in)
 
 The fourth tab, **Flows**, is the front end for the [declarative automation flow
-layer](flows.md) — the host's **saved automations**: list them, write one in a live-validating
-JSON editor, run it against a real browser, watch every step stream in, and re-run it to see the
-content-hash dedupe do its job. Before it, the flow layer was CLI-only and the UI had no way to
-show you your own automations.
+layer](flows.md) — the host's **saved automations**. It is a **workbench**, not a textarea:
+**[describe the automation to an agent](flows.md#authoring-a-flow-with-the-ai-agent)**, or draw it
+on a **visual canvas**, or type the **JSON** — three synchronized views of **one** document. Then
+run it against a real browser, watch every step stream in, and re-run it to see the content-hash
+dedupe do its job.
 
 ```bash
 PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1 pinchtab-webgraph-ui        # 1 / true / yes / on
@@ -246,24 +249,39 @@ PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1 pinchtab-webgraph-ui        # 1 / true / yes / 
 
 **Off by default**, the same posture as [New crawl](#new-crawl-get-wscrawl-opt-in) — and more
 warranted: a crawl *structurally never submits*, where a flow's `do{submit:true}` / `upload` step
-**can write to the real site**. With the gate unset the editor and the CRUD routes still work; only
-`/ws/flows/run` refuses (`flow_unavailable` / `disabled`).
+**can write to the real site**. With the gate unset the editor, **the agent** and the CRUD routes
+still work; only `/ws/flows/run` refuses (`flow_unavailable` / `disabled`). Authoring is always
+safe; *running* is what is gated.
 
 ```
 ┌───────────────┬──────────────────────────────────────────────────────────┐
 │ Crawled       │ app.example.com   [Workspace][Graph][Explore][Flows]      │
-│ graphs        ├──────────────────┬───────────────────────────────────────┤
-│ ───────────   │  Flows           │  { "name": "download-all-reports", … } │
-│ app.example   │  ─────────────   │  ✓ ok · 4 steps · download   ← validator│
-│ …             │  ▸ download-all  │  ┌──────────────────────────────────┐  │
-│               │    reports  ·3   │  │ [x] Dry run  [ ] Allow submit     │  │
-│               │  ▸ export-users  │  │ [Run flow] [Cancel]  5 new · 0 dupe│  │
-│  [Credentials]│  [+ New flow]    │  │  ✓ download  report-a.pdf   new    │  │
-│               │                  │  └──────────────────────────────────┘  │
-│               │                  │  Runs (history)  │ Artifacts (all-time) │
-└───────────────┴──────────────────┴───────────────────────────────────────┘
+│ graphs        ├──────────┬────────────────┬──────────────────────────────┤
+│ ───────────   │  Flows   │ Chat (mode=    │  ┌ canvas ─────────────────┐ │
+│ app.example   │  ──────  │       flow)    │  │ goto  goal=Reports       │ │
+│ …             │ ▸ downl- │ ──────────────  │  │ ┌ paginate ────────────┐ │ │
+│               │   all-   │ “download every│  │ │ ┌ for_each ────────┐ │ │ │
+│               │   reports│  report PDF    │  │ │ │ ▸ download        │ │ │ │
+│               │   ·3     │  across all    │  │ │ └──────────────────┘ │ │ │
+│               │ ▸ export-│  the pages”    │  │ └──────────────────────┘ │ │
+│               │   users  │                │  └──────────────────────────┘ │
+│  [Credentials]│          │ ▸ draft ✓ ok   │  { "name": …, "steps": […] }  │
+│               │ [+ New   │   (chip)       │  ✓ valid · 2 steps  ← JSON    │
+│               │   flow]  │                │  ┌──────────────────────────┐ │
+│               │          │                │  │ [x] Dry run [ ] Allow sub│ │
+│               │          │                │  │ [Run flow][Cancel] 5 new·│ │
+│               │          │                │  └──────────────────────────┘ │
+│               │          │                │  Runs (history) │ Artifacts   │
+└───────────────┴──────────┴────────────────┴──────────────────────────────┘
 ```
 
+- **Three synchronized views, one document.** The **chat agent** proposes; the **canvas** is
+  clicked; the **JSON** is typed. Any of them mutates the doc, the other two re-render, and
+  validation runs on every change. A validation error at `steps[1].body[0]` **highlights that
+  canvas box** — the canvas's `data-path` uses `flow.py`'s path grammar verbatim. The full model
+  is in **[flows.md → Authoring a flow with the AI
+  agent](flows.md#authoring-a-flow-with-the-ai-agent)**; the UI-side wiring is
+  [below](#the-flow-agent-and-the-mode-axis).
 - **Live validator.** Every keystroke (debounced) is `POST`ed to `/api/flows/validate` — which is
   `flow.validate()`: pure, no browser, no graph. A typo'd `${itm.href}` is caught **as you type**,
   named together with its exact path in the document, and **Save stays disabled** until the document
@@ -290,6 +308,52 @@ warranted: a crawl *structurally never submits*, where a flow's `do{submit:true}
 - **A flow run and a live crawl refuse each other** (cross-veto, both directions): they drive the
   same single-tenant PinchTab bridge. A **dry** run is exempt — it opens no browser.
 
+### The flow agent and the `mode` axis
+
+The Flows tab's chat pane is **the same chat pane as the Workspace tab's** — the same
+`createChatPane` factory in `app.js`, mounted a second time with flow-namespaced element ids. One
+implementation, two mounts: a second copy of the pane would drift the first time the frame protocol
+moved. (It did, once: extracting the factory briefly leaked flow chats into the Workspace tab's chip
+bar — fixed by the `mode` filter below, and regression-tested.)
+
+What separates them is **one axis: `mode`.**
+
+| | `mode: "workspace"` (the default) | `mode: "flow"` |
+| --- | --- | --- |
+| **The job** | the navigation assistant — *"how do I do X on this site?"* | the **flow author** — *"download every report PDF across all the pages"* |
+| **Tools** | the **6** offline graph tools (`chat.OFFLINE_TOOL_NAMES`) | those same **6**, **plus** `propose_flow` (`FLOW_TOOL_NAMES`) — 7 |
+| **System prompt** | `build_system_prompt` | `build_flow_system_prompt` — a **sibling**, not a branch. Its op table, capability names and loop vars are **generated from `flow.py`'s tables**, so the prompt can't drift from the validator |
+| **Extra per-turn payload** | `live_url` (the live pane's position) | `draft` (the live flow document) |
+| **Extra frame** | `tour` (after an OK `howto`) | `flow_draft` (after a `propose_flow`) |
+| **Where its chats are listed** | the Workspace chip bar | the Flows tab's chip bar |
+
+**The fence is additive and fails closed.** `chat.effective_tool_names(mode)` is the single safety
+predicate: flow mode **unions in** `{"propose_flow"}`; the 6-tool browsing fence is never widened;
+and **any unknown mode degrades to the base 6** (so a typo'd or hostile mode token can never be the
+thing that grants a tool). `server._mode()` normalizes the query param the same way.
+
+**A session's mode is PINNED at creation** — written into its record by `chat_store.create` and read
+back from the record on every resume, exactly like its `backend`. `open_chat_session` passes
+`mode=None` for a resumed session, so **the query param is irrelevant once a session exists**: a
+workspace chat **cannot be escalated** into flow mode by reconnecting with `?mode=flow` (and thereby
+handed a tool it was never granted). A record written before flow mode existed counts as
+`"workspace"`.
+
+**And the agent can only PROPOSE.** `propose_flow` is a pure validate-and-echo — no disk, no
+browser, no subprocess — and **no tool anywhere on the MCP surface reaches `flow_store` (save) or
+`flow_runner` (run)**. Both facts are held by tests (`test_propose_flow_is_pure_no_disk_no_subprocess`
+poisons `open`/`os.replace`/`subprocess`; `test_no_flow_save_or_run_tool_exists_anywhere` guards the
+surface). **Save and Run are the human's, and only the human's.** See
+[flows.md](flows.md#the-agent-can-only-propose--and-that-is-structural).
+
+**The draft round-trips every turn.** The SPA ships the **live** document (`getDraft()`, read from
+the editor's current state — never the agent's stale copy) as `user_message.draft`, and
+`chat.augment_with_flow_draft` prefixes the turn with it. So the agent revises *the document on your
+screen*, and **hand edits made between turns survive**. A **replayed** draft (out of a stored
+transcript) is deliberately **never** auto-applied — it renders as a chip with an explicit **"Restore
+this draft"** button, and a monotonic generation guard drops any superseded async writer, so
+reopening an old chat can't clobber the flow you just opened.
+
 ### Flow modules (and what they mirror)
 
 The tab is two new server modules, each a deliberate twin of an existing one:
@@ -312,13 +376,14 @@ holding a real, logged-in browser tab comes free with it.
 
 ### The flow REST + WS surface
 
-Eleven REST routes (CRUD + audit; all usable with the env gate **off**) and one gated WebSocket.
+Twelve REST routes (CRUD + audit; all usable with the env gate **off**) and one gated WebSocket.
 The full table, the status-code contract, the frame protocol, and the artifact-scope caveat live in
 **[flows.md → Running flows from the web UI](flows.md#running-flows-from-the-web-ui)**. In brief:
 
 | Method · Path | Does |
 | --- | --- |
-| `POST /api/flows/validate` · `/api/flows/schema` | Stateless: validate a posted document / derive its `inputs` JSON Schema. |
+| `POST /api/flows/validate` · `/api/flows/schema` | Stateless: validate a posted document (structural verdict **+ [resolvability `warnings`](flows.md#resolvability-warnings)**) / derive its `inputs` JSON Schema. |
+| `GET /api/flows/op_schema` | Stateless: **the op vocabulary itself**, served from `flow.py`'s own `LEAF_OPS`/`BODY_OPS`. **Every** per-op canvas form is derived from it — there is no second copy of the DSL in JS to drift. |
 | `GET` · `POST /api/hosts/{host}/flows` | List the host's flow summaries / create one. |
 | `GET` · `PUT` · `DELETE /api/hosts/{host}/flows/{flow_id}` | The full record (doc included) / replace / delete (idempotent, cascades to runs). |
 | `GET /api/hosts/{host}/flows/{flow_id}/schema` | The saved flow's `inputs` as a JSON Schema. |
@@ -416,11 +481,20 @@ and a single validation choke-point. `<host>` is run through `cache_store.valida
 `<id>` is a **uuid4 hex** (`^[0-9a-f]{32}$`) validated by `chat_store.validate_session_id`
 — no separators or dots, so a raw id can never resolve outside its host's directory.
 
-Each record carries `id`, `host`, `backend`, `title` / `title_locked`, `created_at` /
-`updated_at`, `message_count`, `sdk_session_id`, and **two** history fields:
+Each record carries `id`, `host`, `backend`, **`mode`**, `title` / `title_locked`, `created_at` /
+`updated_at`, `message_count`, `sdk_session_id`, and **two** history fields.
+
+**`mode`** (`workspace` | `flow`) is written once at creation and — like `backend` — **pinned** on
+every resume, never re-resolved (see [The flow agent and the `mode`
+axis](#the-flow-agent-and-the-mode-axis)). A record written before flow mode existed reads back as
+`"workspace"`, so an old chat keeps resuming as the navigation assistant it was created as.
+
+The history fields:
 
 - **`transcript`** — the display-only fold of the emitted WS frames (user text +
-  assistant `text` / `tool_use` / `tool_result` / `tour` / `error` entries). Replayed
+  assistant `text` / `tool_use` / `tool_result` / `tour` / **`flow_draft`** / `error` entries;
+  a `flow_draft` persists the **proposed document itself**, not just its note, so reopening a
+  flow chat can restore the draft to the canvas). Replayed
   verbatim on reconnect, so the chat **log** is restored for **every** backend. A
   `TranscriptSink` wraps the route's `emit` and folds each frame into the record as it is
   sent, so both backends persist identically.
@@ -598,8 +672,8 @@ any filesystem access.
 
 | Method · Path | Does | Notes |
 | --- | --- | --- |
-| `GET /api/hosts/{host}/sessions` | list a host's chats | `{"sessions":[…]}`, lightweight **summaries** (no transcript / wire state), newest `updated_at` first |
-| `POST /api/hosts/{host}/sessions` | create a chat | optional `{"title"}` body; returns the new summary. **429 `too_many_sessions`** at `MAX_SESSIONS_PER_HOST` (50) |
+| `GET /api/hosts/{host}/sessions?mode=` | list a host's chats | `{"sessions":[…]}`, lightweight **summaries** (no transcript / wire state), newest `updated_at` first. The optional **`mode=`** filter (`workspace` \| `flow`) is what keeps the two chip bars separate — the Workspace tab lists `workspace` chats and the [Flows tab](#the-flow-agent-and-the-mode-axis) lists `flow` chats, out of the same store |
+| `POST /api/hosts/{host}/sessions` | create a chat | optional `{"title", "mode"}` body; returns the new summary. `mode` (`workspace` \| `flow`, **unknown fails closed to `workspace`**) is written **once** here and [pinned](#the-flow-agent-and-the-mode-axis) on every resume. **429 `too_many_sessions`** at `MAX_SESSIONS_PER_HOST` (50) |
 | `GET /api/hosts/{host}/sessions/{id}` | one chat's full record | includes `transcript`, **minus** the resume-only internals (`wire_messages`, `sdk_session_id`). `session_not_found` (**404**) if absent |
 | `PATCH /api/hosts/{host}/sessions/{id}` | rename | body `{"title"}`; locks the title. `session_not_found` (**404**) if absent |
 | `DELETE /api/hosts/{host}/sessions/{id}` | delete | **idempotent** — deleting an absent chat is a green `{"deleted": false}`, never a 404 |
@@ -652,11 +726,17 @@ socket with `invalid_session`, and an id that doesn't resolve (or belongs to ano
 closes it with `session_not_found`. When absent, the connection uses/mints the host's chat
 without restoring a prior transcript.
 
+The optional **`mode=`** query param (`workspace` | `flow`) selects the agent's job — the
+navigation assistant, or the [flow author](#the-flow-agent-and-the-mode-axis). It applies to a
+**brand-new** session only: a **resumed** session's mode is **pinned** from its own record, so a
+workspace chat can never be re-opened with the `propose_flow` tool attached. An **unknown** value
+fails closed to `workspace`.
+
 **Client → server:**
 
 | Frame | Meaning |
 | --- | --- |
-| `{"type":"user_message","text":<str>,"live_url":<str\|null>}` | a user turn; the optional `live_url` is the live pane's current page (tracked by the SPA from screencast `location` frames). When present it is folded into the turn so the agent calls `howto` with `start=<live_url>` and routes **from where the user is**, not the crawl root. See [Live-position awareness](#live-position-awareness). Any other `type` is ignored |
+| `{"type":"user_message","text":<str>,"live_url":<str\|null>,"draft":<dict\|null>}` | a user turn. The optional `live_url` is the live pane's current page (tracked by the SPA from screencast `location` frames); when present it is folded into the turn so the agent calls `howto` with `start=<live_url>` and routes **from where the user is**, not the crawl root (see [Live-position awareness](#live-position-awareness)). The optional `draft` (**`mode=flow`** only) is the **live flow document** on the user's screen, folded into the turn by `chat.augment_with_flow_draft` so the agent edits **your** current doc — hand edits between turns survive. Any other `type` is ignored |
 
 **Server → client:**
 
@@ -667,6 +747,7 @@ without restoring a prior transcript.
 | `{"type":"tool_use","name":<str>,"input":<dict>}` | the agent is about to call a tool |
 | `{"type":"tool_result","name":<str>,"status":"ok"\|"error"}` | a tool returned |
 | `{"type":"tour","data":{"goal","start_url","trigger_label","opens_at","form","steps":[…]}}` | a **"Show Me How"** guided tour — emitted once after an OK `howto` tool result (from its FIRST result's `tour` field). `steps` is the ordered highlight list; the SPA replays it on the live pane. See [Show Me How guided tour](#show-me-how-guided-tour). |
+| `{"type":"flow_draft","doc":{…},"status":"ok"\|"invalid","path","error","name","note"}` | **`mode=flow`** only — the exact **twin of `tour`**, emitted after a [`propose_flow`](flows.md#propose_flow-and-the-flow_draft-frame) tool result: the WHOLE candidate document plus the validator's verdict. The SPA re-renders its **canvas + JSON pane** from it, so the draft lands **live** mid-conversation. An **invalid** draft is still emitted and still rendered (with `path`/`error`, and the offending canvas box lit up) — a withheld bad draft teaches the user nothing. Persisted into the transcript, so reopening a flow chat restores its drafts (as **chips**, never auto-applied — see [the mode axis](#the-flow-agent-and-the-mode-axis)) |
 | `{"type":"done"}` | end of the turn (exactly once) |
 | `{"type":"error","detail":<str>}` | a per-turn error (e.g. tool-iteration limit) |
 | `{"type":"error","status":"invalid_host",…}` | bad host token; the socket then closes |
@@ -876,7 +957,16 @@ graph first (its own SIGTERM handler), a cancelled crawl can still promote what 
   subprocess that *could* otherwise run Bash/Write on the host, so it is fenced harder still:
   all built-in tools are removed (`tools=[]`), no `~/.claude` / `CLAUDE.md` / project settings
   are loaded, and a deny-by-default `can_use_tool` backstop rejects anything off the
-  six-tool allow-list.
+  allow-list.
+- **The flow agent can only PROPOSE — it can neither save nor run.** [`mode=flow`](#the-flow-agent-and-the-mode-axis)
+  **adds exactly one** tool to that six-tool fence — `propose_flow` — and never widens it. That
+  tool is a **pure validate-and-echo**: no disk write, no browser, no subprocess (a test poisons
+  `open` / `os.replace` / `subprocess` to prove it). And **no tool anywhere on the MCP surface
+  reaches `flow_store` (save) or `flow_runner` (run)** — also guarded by a test — so the human's
+  **Save** and **Run** buttons remain the only authority, and the [capability
+  model](flows.md#the-capability--safety-model) still applies to everything the agent drafts.
+  `effective_tool_names()` **fails closed** on an unknown mode, and a session's mode is **pinned**
+  from its record, so a workspace chat can't be escalated via `?mode=flow`.
 - **Crawl-from-UI is the strongest capability — and the most fenced.** The
   [New crawl](#new-crawl-get-wscrawl-opt-in) socket (`/ws/crawl`) can
   make the server drive a **real browser** through the whole target app and open every
@@ -934,9 +1024,14 @@ graph first (its own SIGTERM handler), a cancelled crawl can still promote what 
   [Chat sessions](#chat-sessions).
 - **Flows are opt-in and single-tenant.** Running a saved [flow](#flows-view-opt-in) needs
   `PINCHTAB_WEBGRAPH_ENABLE_FLOWS`; one run at a time, and a run and a crawl refuse each other
-  (same bridge, same tab). Authoring, validating and browsing runs/artifacts work with the gate
-  off. The dedupe scope in the UI is the flow's **id**, which is *not* what the CLI defaults to
-  — see the [artifact-scope caveat](flows.md#caveat-the-artifact-scope-diverges-between-cli-and-ui).
+  (same bridge, same tab). **Authoring** — including the [AI
+  agent](flows.md#authoring-a-flow-with-the-ai-agent) — validating, and browsing runs/artifacts
+  all work with the gate **off**; only *running* is gated. The dedupe scope in the UI is the flow's
+  **id**, which is *not* what the CLI defaults to — see the [artifact-scope
+  caveat](flows.md#caveat-the-artifact-scope-diverges-between-cli-and-ui).
+- **The flow agent needs a chat backend, like any other chat.** With neither an
+  `ANTHROPIC_API_KEY` nor a logged-in `claude` CLI, the Flows tab's chat pane reports
+  `chat_unavailable` and the canvas + JSON editor keep working — you can still author by hand.
 - **Chat replies render as markdown.** The SPA renders the assistant's reply — bold,
   italics, headings, ordered/unordered lists, inline + block code, links, and GitHub-style
   **tables** — through a small HTML-escape-first renderer, so no model or crawled-site text

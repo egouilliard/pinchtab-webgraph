@@ -626,3 +626,339 @@ def test_graph_raw_edge_shape_locks_adapter_contract(populated_cache_home):
     for e in edges:
         assert "from" in e and "to" in e and "label" in e and "kind" in e
         assert "source" not in e and "target" not in e
+
+
+# --- flow routes: CRUD + validation + run history + artifacts ----------------
+#
+# The flow store is exercised against an isolated home (PINCHTAB_WEBGRAPH_HOME -> a tmp dir)
+# via the shared isolated_cache_home fixture. The KEY contract asserted here is the status
+# convention: a flow document that fails validation is a structured MISS — 200 with
+# {"status":"invalid"} in the BODY, NOT a 400 — while a malformed flow_id TOKEN is a real
+# protocol error (400). See the note in server._STATUS_CODE.
+
+FLOW_HOST = "flow.example.com"
+
+
+def _flow_doc(name="my-flow", **extra):
+    doc = {"name": name, "steps": [{"op": "goto", "url": "https://flow.example.com/x"}]}
+    doc.update(extra)
+    return doc
+
+
+def test_flows_crud_round_trip(isolated_cache_home):
+    # empty to start
+    r = client.get("/api/hosts/%s/flows" % FLOW_HOST)
+    assert r.status_code == 200 and r.json()["flows"] == []
+
+    # create
+    r = client.post("/api/hosts/%s/flows" % FLOW_HOST,
+                    json=_flow_doc(inputs={"since": {"type": "string"}}))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok" and body["name"] == "my-flow"
+    fid = body["id"]
+    assert "doc" not in body                     # the summary omits the full document
+
+    # list
+    r = client.get("/api/hosts/%s/flows" % FLOW_HOST)
+    assert [f["id"] for f in r.json()["flows"]] == [fid]
+
+    # get (the FULL record, doc included — the editor needs it)
+    r = client.get("/api/hosts/%s/flows/%s" % (FLOW_HOST, fid))
+    assert r.status_code == 200
+    assert r.json()["doc"]["name"] == "my-flow"
+
+    # schema (derived from the doc's `inputs`)
+    r = client.get("/api/hosts/%s/flows/%s/schema" % (FLOW_HOST, fid))
+    assert r.status_code == 200
+    assert r.json() == {"type": "object", "additionalProperties": False,
+                        "properties": {"since": {"type": "string"}}}
+
+    # update (full replace, re-validated)
+    r = client.put("/api/hosts/%s/flows/%s" % (FLOW_HOST, fid), json=_flow_doc("renamed"))
+    assert r.status_code == 200 and r.json()["name"] == "renamed"
+    assert client.get("/api/hosts/%s/flows/%s" % (FLOW_HOST, fid)).json()["doc"]["name"] \
+        == "renamed"
+
+    # delete (idempotent)
+    r = client.delete("/api/hosts/%s/flows/%s" % (FLOW_HOST, fid))
+    assert r.status_code == 200 and r.json()["deleted"] is True
+    assert client.get("/api/hosts/%s/flows/%s"
+                      % (FLOW_HOST, fid)).status_code == 404
+    r = client.delete("/api/hosts/%s/flows/%s" % (FLOW_HOST, fid))
+    assert r.status_code == 200 and r.json()["deleted"] is False
+
+
+def test_flow_create_invalid_doc_is_200_with_status_in_body(isolated_cache_home):
+    # THE house convention: a structural miss on user-submitted JSON is a 200 answer that
+    # SAYS it is invalid — the same shape `flow_cmd validate` prints. NOT a 400.
+    r = client.post("/api/hosts/%s/flows" % FLOW_HOST,
+                    json={"name": "x", "steps": []})          # an empty step list
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "invalid"
+    assert body["path"] == "steps" and "steps" in body["error"]
+    assert client.get("/api/hosts/%s/flows" % FLOW_HOST).json()["flows"] == []
+
+
+def test_flow_update_invalid_doc_is_200_and_does_not_clobber(isolated_cache_home):
+    fid = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_flow_doc("v1")).json()["id"]
+    r = client.put("/api/hosts/%s/flows/%s" % (FLOW_HOST, fid),
+                   json={"name": "v2", "steps": [{"op": "nope"}]})
+    assert r.status_code == 200 and r.json()["status"] == "invalid"
+    assert client.get("/api/hosts/%s/flows/%s"
+                      % (FLOW_HOST, fid)).json()["doc"]["name"] == "v1"
+
+
+def test_flow_capability_declaration_is_enforced_at_save(isolated_cache_home):
+    # SAFE BY DEFAULT: a step that submits, in a doc that doesn't declare allow_submit, is
+    # rejected at SAVE time — a scheduled run can never half-execute it.
+    r = client.post("/api/hosts/%s/flows" % FLOW_HOST,
+                    json={"name": "writer",
+                          "steps": [{"op": "do", "goal": "create", "submit": True}]})
+    assert r.status_code == 200 and r.json()["status"] == "invalid"
+    assert "allow_submit" in r.json()["error"]
+
+
+def test_flows_too_many_returns_429(isolated_cache_home, monkeypatch):
+    monkeypatch.setattr(ui_server.flow_store, "MAX_FLOWS_PER_HOST", 2)
+    for i in range(2):
+        assert client.post("/api/hosts/%s/flows" % FLOW_HOST,
+                           json=_flow_doc("f%d" % i)).status_code == 200
+    r = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_flow_doc("f3"))
+    assert r.status_code == 429
+    assert r.json()["status"] == "too_many_flows" and r.json()["max"] == 2
+
+
+def test_flow_not_found_and_bad_ids(isolated_cache_home):
+    missing = "0" * 32
+    for url in ("/api/hosts/%s/flows/%s" % (FLOW_HOST, missing),
+                "/api/hosts/%s/flows/%s/schema" % (FLOW_HOST, missing),
+                "/api/hosts/%s/flows/%s/runs" % (FLOW_HOST, missing),
+                "/api/hosts/%s/flows/%s/artifacts" % (FLOW_HOST, missing)):
+        r = client.get(url)
+        assert r.status_code == 404 and r.json()["status"] == "flow_not_found"
+
+    # a malformed id TOKEN is a protocol error (400), rejected before any filesystem access.
+    r = client.get("/api/hosts/%s/flows/%s" % (FLOW_HOST, "NOT-HEX"))
+    assert r.status_code == 400 and r.json()["status"] == "invalid_flow"
+    fid = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_flow_doc()).json()["id"]
+    r = client.get("/api/hosts/%s/flows/%s/runs/%s" % (FLOW_HOST, fid, "../../etc/passwd"))
+    assert r.status_code in (400, 404)      # starlette may 404 a path-traversal segment
+
+
+def test_flow_routes_reject_invalid_host(isolated_cache_home):
+    r = client.get("/api/hosts/%s/flows" % "bad host")
+    assert r.status_code == 400 and r.json()["status"] == "invalid_host"
+    r = client.post("/api/hosts/%s/flows" % "bad host", json=_flow_doc())
+    assert r.status_code == 400 and r.json()["status"] == "invalid_host"
+
+
+def test_flow_runs_routes(isolated_cache_home):
+    fid = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_flow_doc()).json()["id"]
+    assert client.get("/api/hosts/%s/flows/%s/runs" % (FLOW_HOST, fid)).json()["runs"] == []
+
+    rid = ui_server.flow_store.new_run_id()
+    ui_server.flow_store.start_run(FLOW_HOST, fid, rid, dry_run=True, capabilities={},
+                                   inputs={})
+    ui_server.flow_store.finish_run(FLOW_HOST, fid, rid,
+                                    {"status": "ok",
+                                     "steps": [{"op": "goto", "status": "ok"}],
+                                     "stats": {"steps_executed": 1}})
+
+    r = client.get("/api/hosts/%s/flows/%s/runs" % (FLOW_HOST, fid))
+    runs = r.json()["runs"]
+    assert len(runs) == 1 and runs[0]["id"] == rid and runs[0]["status"] == "ok"
+    assert "steps" not in runs[0]                # summaries omit the heavy payloads
+
+    r = client.get("/api/hosts/%s/flows/%s/runs/%s" % (FLOW_HOST, fid, rid))
+    assert r.status_code == 200 and r.json()["steps"] == [{"op": "goto", "status": "ok"}]
+
+    r = client.get("/api/hosts/%s/flows/%s/runs/%s" % (FLOW_HOST, fid, "0" * 32))
+    assert r.status_code == 404 and r.json()["status"] == "run_not_found"
+    r = client.get("/api/hosts/%s/flows/%s/runs/%s" % (FLOW_HOST, fid, "NOTHEX"))
+    assert r.status_code == 400 and r.json()["status"] == "invalid_run"
+
+    # the run history CASCADES away with the flow.
+    client.delete("/api/hosts/%s/flows/%s" % (FLOW_HOST, fid))
+    assert client.get("/api/hosts/%s/flows/%s/runs"
+                      % (FLOW_HOST, fid)).status_code == 404
+
+
+def test_flow_artifacts_route(isolated_cache_home):
+    from pinchtab_webgraph import artifacts as artifacts_mod
+    fid = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_flow_doc()).json()["id"]
+
+    # the scope is the flow_id — the same one the run WS passes as --scope.
+    store = artifacts_mod.ArtifactStore(scope=fid)
+    staged = store.staging_path("report.pdf")
+    with open(staged, "wb") as fh:
+        fh.write(b"pdf-bytes")
+    store.accept(staged, name="report.pdf", source="https://flow.example.com/r.pdf")
+
+    r = client.get("/api/hosts/%s/flows/%s/artifacts" % (FLOW_HOST, fid))
+    assert r.status_code == 200
+    body = r.json()
+    assert [a["name"] for a in body["artifacts"]] == ["report.pdf"]
+    assert body["stats"]["count"] == 1 and body["stats"]["scope"] == fid
+
+
+# --- stateless flow validate / schema ----------------------------------------
+
+def test_flows_validate_stateless():
+    r = client.post("/api/flows/validate", json=_flow_doc("v", host="h.test"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"status": "ok", "name": "v", "host": "h.test", "steps": 1,
+                    "capabilities": {"allow_submit": False, "allow_download": True,
+                                     "allow_upload": False},
+                    "inputs": []}
+
+    r = client.post("/api/flows/validate", json={"name": "x", "steps": []})
+    assert r.status_code == 200                 # a structural miss stays a 200
+    assert r.json()["status"] == "invalid" and r.json()["path"] == "steps"
+
+
+def test_flows_schema_stateless():
+    r = client.post("/api/flows/schema",
+                    json=_flow_doc(inputs={"since": {"type": "string", "required": True},
+                                           "n": {"type": "integer", "default": 5}}))
+    assert r.status_code == 200
+    assert r.json() == {"type": "object", "additionalProperties": False,
+                        "required": ["since"],
+                        "properties": {"since": {"type": "string"},
+                                       "n": {"type": "integer", "default": 5}}}
+
+    r = client.post("/api/flows/schema", json={"steps": []})
+    assert r.status_code == 200 and r.json()["status"] == "invalid"
+
+
+# --- the flow-run WS gate + the crawl<->flow cross-veto -----------------------
+
+def test_ws_flow_run_disabled_by_default(isolated_cache_home, monkeypatch):
+    monkeypatch.delenv("PINCHTAB_WEBGRAPH_ENABLE_FLOWS", raising=False)
+    fid = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_flow_doc()).json()["id"]
+    with client.websocket_connect(
+            "/ws/flows/run?host=%s&flow_id=%s" % (FLOW_HOST, fid)) as ws:
+        f = ws.receive_json()
+        assert f["type"] == "error" and f["status"] == "flow_unavailable"
+        assert f["reason"] == "disabled"
+
+
+def test_ws_flow_run_rejects_bad_flow_id_and_missing_flow(isolated_cache_home, monkeypatch):
+    monkeypatch.setenv("PINCHTAB_WEBGRAPH_ENABLE_FLOWS", "1")
+    with client.websocket_connect(
+            "/ws/flows/run?host=%s&flow_id=NOTHEX" % FLOW_HOST) as ws:
+        assert ws.receive_json()["status"] == "invalid_flow"
+    with client.websocket_connect(
+            "/ws/flows/run?host=%s&flow_id=%s" % (FLOW_HOST, "0" * 32)) as ws:
+        assert ws.receive_json()["status"] == "flow_not_found"
+
+
+def test_crawl_is_vetoed_by_a_live_flow_run(monkeypatch):
+    # ONE single-tenant bridge, ONE driver: a live flow run must lock a crawl out.
+    monkeypatch.setenv("PINCHTAB_WEBGRAPH_ENABLE_CRAWL", "1")
+    ui_server.app.state.live_flow_runs = 1
+    try:
+        with client.websocket_connect("/ws/crawl?url=http://example.test/") as ws:
+            f = ws.receive_json()
+            assert f["type"] == "error" and f["status"] == "too_many_sessions"
+    finally:
+        ui_server.app.state.live_flow_runs = 0
+
+
+def test_live_flow_run_is_vetoed_by_a_crawl(isolated_cache_home, monkeypatch):
+    # …and symmetrically: a crawl in flight locks a LIVE (non-dry) flow run out.
+    monkeypatch.setenv("PINCHTAB_WEBGRAPH_ENABLE_FLOWS", "1")
+    fid = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_flow_doc()).json()["id"]
+    ui_server.app.state.live_crawls = 1
+    try:
+        with client.websocket_connect(
+                "/ws/flows/run?host=%s&flow_id=%s" % (FLOW_HOST, fid)) as ws:
+            assert ws.receive_json()["type"] == "flow"
+            ws.send_json({"type": "run", "inputs": {}, "dry_run": False})
+            f = ws.receive_json()
+            assert f["type"] == "error" and f["status"] == "too_many_sessions"
+    finally:
+        ui_server.app.state.live_crawls = 0
+
+
+def test_dry_run_is_not_vetoed_by_a_crawl(isolated_cache_home, monkeypatch):
+    # A DRY run touches no browser at all, so it neither needs the bridge nor waits for it.
+    monkeypatch.setenv("PINCHTAB_WEBGRAPH_ENABLE_FLOWS", "1")
+    fid = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_flow_doc()).json()["id"]
+
+    from contextlib import asynccontextmanager as _acm
+    from tests.test_ui_flow_runner import FakeProcess
+
+    proc = FakeProcess(stdout_lines=[b'{"type":"result","status":"ok","steps":[]}\n'],
+                       exits_on_its_own=True)
+
+    @_acm
+    async def fake(*, flow_path, host, flow_id, run_id, **_kw):
+        yield ui_server.flow_runner.FlowRunSession(process=proc, host=host, flow_id=flow_id,
+                                                   run_id=run_id)
+
+    monkeypatch.setattr(ui_server.flow_runner, "open_flow_run_session", fake)
+    ui_server.app.state.live_crawls = 1
+    try:
+        with client.websocket_connect(
+                "/ws/flows/run?host=%s&flow_id=%s" % (FLOW_HOST, fid)) as ws:
+            assert ws.receive_json()["type"] == "flow"
+            ws.send_json({"type": "run", "inputs": {}, "dry_run": True})
+            assert ws.receive_json()["type"] == "status"
+            assert ws.receive_json()["type"] == "result"
+    finally:
+        ui_server.app.state.live_crawls = 0
+
+
+def test_live_flow_run_counter_survives_a_start_run_failure(isolated_cache_home, monkeypatch):
+    # flow_store.start_run atomic_writes to disk, so it CAN raise (disk full, read-only fs).
+    # If that raise escapes the try that owns the decrementing finally, the live-run count
+    # leaks and — MAX_LIVE_FLOW_RUNS being 1, plus the cross-veto — every later flow run AND
+    # every later crawl is refused with too_many_sessions until the process restarts.
+    monkeypatch.setenv("PINCHTAB_WEBGRAPH_ENABLE_FLOWS", "1")
+    fid = client.post("/api/hosts/%s/flows" % FLOW_HOST, json=_flow_doc()).json()["id"]
+
+    from contextlib import asynccontextmanager as _acm
+    from tests.test_ui_flow_runner import FakeProcess
+
+    real_start_run = ui_server.flow_store.start_run
+    calls = {"n": 0}
+
+    def flaky_start_run(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("No space left on device")   # the FIRST run's placeholder write
+        return real_start_run(*args, **kwargs)
+
+    monkeypatch.setattr(ui_server.flow_store, "start_run", flaky_start_run)
+
+    proc = FakeProcess(stdout_lines=[b'{"type":"result","status":"ok","steps":[]}\n'],
+                       exits_on_its_own=True)
+
+    @_acm
+    async def fake(*, flow_path, host, flow_id, run_id, **_kw):
+        yield ui_server.flow_runner.FlowRunSession(process=proc, host=host, flow_id=flow_id,
+                                                   run_id=run_id)
+
+    monkeypatch.setattr(ui_server.flow_runner, "open_flow_run_session", fake)
+
+    ui_server.app.state.live_flow_runs = 0
+    with pytest.raises(OSError):
+        with client.websocket_connect(
+                "/ws/flows/run?host=%s&flow_id=%s" % (FLOW_HOST, fid)) as ws:
+            assert ws.receive_json()["type"] == "flow"
+            ws.send_json({"type": "run", "inputs": {}, "dry_run": False})
+            ws.receive_json()          # the socket dies with the server-side OSError
+    assert ui_server.app.state.live_flow_runs == 0     # released, not leaked
+
+    # …and the very next LIVE run is served, not refused: the bridge was never really busy.
+    with client.websocket_connect(
+            "/ws/flows/run?host=%s&flow_id=%s" % (FLOW_HOST, fid)) as ws:
+        assert ws.receive_json()["type"] == "flow"
+        ws.send_json({"type": "run", "inputs": {}, "dry_run": False})
+        f = ws.receive_json()
+        assert f["type"] == "status", f              # NOT {"status": "too_many_sessions"}
+        assert ws.receive_json()["type"] == "result"
+    assert ui_server.app.state.live_flow_runs == 0

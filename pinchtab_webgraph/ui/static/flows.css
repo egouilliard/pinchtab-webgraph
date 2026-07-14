@@ -1,0 +1,316 @@
+/* pinchtab-webgraph — the Flows view.
+   Everything is scoped under .flows-view so it can never leak into the Workspace,
+   Graph or Explore views. Two panes: the host's saved flows on the left, the editor +
+   run panel + results on the right. Reuses the SPA's CSS custom properties, so light/
+   dark theming comes for free. Layout mirrors graph.css / explore.css. */
+
+.flows-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+/* a display:flex base rule beats the bare UA [hidden] (same reason graph.css needs it). */
+.flows-view[hidden] { display: none; }
+
+.flows-body {
+  display: flex;
+  gap: 1rem;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* left pane: the flow list ------------------------------------------------- */
+.flows-sidebar {
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  padding-right: 0.9rem;
+}
+.flows-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.flows-sidebar-head h2 { margin: 0; font-size: 0.9rem; }
+.flow-new-btn {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  padding: 0.25rem 0.6rem;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.flow-new-btn:hover { background: var(--accent-soft); }
+
+.flow-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+/* the row is a real <button> (keyboard- and AT-reachable) inside a bare <li>; the
+   resets below make it render exactly as the old <li> did. */
+.flow-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 0.5rem 0.6rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.flow-row:hover { background: var(--panel-2); }
+.flow-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.flow-row.selected { background: var(--accent-soft); border-color: var(--border-strong); }
+.flow-row-name { font-size: 0.85rem; font-weight: 600; word-break: break-word; }
+.flow-row-meta { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.flow-row-meta .count { font-size: 0.72rem; color: var(--muted); }
+
+/* right pane: editor + run + results --------------------------------------- */
+.flows-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.flows-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+#flows-status { font-size: 0.78rem; }
+.flows-main h3 { margin: 0 0 0.4rem; font-size: 0.82rem; }
+
+/* JSON editor: a plain <textarea>, no editor library ----------------------- */
+#flow-editor-text {
+  width: 100%;
+  min-height: 260px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  tab-size: 2;
+}
+#flow-editor-text:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--panel);
+}
+
+/* the live validation banner ---------------------------------------------- */
+.flow-validation {
+  font-size: 0.78rem;
+  border-radius: 8px;
+  word-break: break-word;
+  min-height: 0;
+}
+.flow-validation.ok {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+  padding: 0.35rem 0.6rem;
+}
+.flow-validation.bad {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  padding: 0.35rem 0.6rem;
+}
+
+.flow-editor-actions,
+.flow-run-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.flow-editor-actions button,
+.flow-run-actions button {
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  padding: 0.4rem 0.9rem;
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.flow-editor-actions button:hover:not(:disabled),
+.flow-run-actions button:hover:not(:disabled) { background: var(--accent-hover); }
+.flow-editor-actions button:disabled,
+.flow-run-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+.flow-delete-btn,
+.flow-cancel-btn {
+  background: transparent !important;
+  border: 1px solid var(--border-strong) !important;
+  color: var(--muted) !important;
+}
+.flow-delete-btn.confirm { color: var(--warn-fg) !important; border-color: var(--warn-fg) !important; }
+#flow-save-msg { font-size: 0.78rem; }
+
+/* run panel: inputs + the capability grants -------------------------------- */
+.flow-run {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.7rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.flow-run[hidden] { display: none; }
+.flow-inputs { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+.flow-input {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.flow-input-name { color: var(--text); }
+.flow-input input[type="text"],
+.flow-input input[type="number"],
+.flow-input select {
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.flow-grants { display: flex; gap: 0.9rem; flex-wrap: wrap; }
+.flow-grants label,
+.flow-dry {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+/* a capability the flow does NOT declare: the grant is dimmed AND disabled, so the
+   "declared AND granted" rule is legible at a glance rather than implied. */
+.flow-grants label.undeclared { opacity: 0.45; cursor: not-allowed; }
+.flow-dry { color: var(--warn-fg); }
+
+/* the live dedupe counter — the differentiator, visible DURING the run ------ */
+.flow-dedupe { margin-left: auto; font-size: 0.82rem; font-weight: 600; }
+.flow-dedupe-new { color: var(--ok-fg); }
+.flow-dedupe-sep { color: var(--muted); font-weight: 400; }
+.flow-dedupe-dupe { color: var(--muted); }
+
+/* the run log -------------------------------------------------------------- */
+.flow-log {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 0.4rem 0.55rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+.flow-log:empty { display: none; }
+.flow-log-line { display: flex; gap: 0.5rem; word-break: break-word; }
+.flow-log-line.flow-info { color: var(--muted); }
+.flow-log-line.flow-ok { color: var(--ok-fg); }
+.flow-log-line.flow-error { color: var(--warn-fg); }
+.flow-step-status {
+  flex: 0 0 4.5rem;
+  color: var(--muted);
+}
+.flow-step-status.st-new { color: var(--ok-fg); font-weight: 600; }
+.flow-step-status.st-dupe { color: var(--muted); }
+.flow-step-status.st-error { color: var(--warn-fg); font-weight: 600; }
+.flow-step-status.st-dry-run { color: var(--accent); }
+.flow-step-op { flex: 0 0 5rem; color: var(--accent); }
+.flow-step-detail { flex: 1 1 auto; min-width: 0; }
+
+/* results: history + the all-time artifact ledger --------------------------- */
+.flow-results { display: flex; gap: 1rem; flex-wrap: wrap; }
+.flow-results[hidden] { display: none; }
+.flow-results-col { flex: 1 1 320px; min-width: 0; }
+
+.flow-runs,
+.flow-artifacts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.flow-run-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 0.45rem 0.6rem;
+  cursor: pointer;
+}
+.flow-run-row:hover { background: var(--panel-2); }
+.flow-run-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.flow-run-when { font-size: 0.74rem; color: var(--muted); }
+.flow-run-stats { font-size: 0.76rem; color: var(--muted); margin-top: 0.15rem; }
+
+.flow-artifact {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  padding: 0.25rem 0.1rem;
+  border-bottom: 1px solid var(--border);
+}
+.flow-artifact-name { flex: 1 1 auto; min-width: 0; word-break: break-all; }
+.flow-artifact-size,
+.flow-artifact-when { color: var(--muted); font-size: 0.74rem; white-space: nowrap; }
+.flow-artifact-sha {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+}
+#flow-artifacts-summary { font-size: 0.76rem; word-break: break-all; }
+
+.flow-empty { font-size: 0.82rem; color: var(--muted); padding: 0.4rem 0; margin: 0; }
+
+/* responsive: stack the two panes on a narrow viewport ---------------------- */
+@media (max-width: 860px) {
+  .flows-body { flex-direction: column; }
+  .flows-sidebar {
+    flex: 0 0 auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    padding-right: 0;
+    padding-bottom: 0.7rem;
+  }
+  .flow-list { max-height: 160px; }
+}

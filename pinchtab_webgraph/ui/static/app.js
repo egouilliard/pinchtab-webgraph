@@ -26,13 +26,15 @@ const hostCountsEl = el("host-counts");
 const placeholderEl = el("placeholder");
 const panesEl = el("panes");
 
-// view switcher (Workspace | Graph | Explore) + the lazily-populated graph container
+// view switcher (Workspace | Graph | Explore | Flows) + the lazily-populated graph container
 const viewTabsEl = el("view-tabs");
 const tabWorkspaceEl = el("tab-workspace");
 const tabGraphEl = el("tab-graph");
 const tabExploreEl = el("tab-explore");
+const tabFlowsEl = el("tab-flows");
 const graphViewEl = el("graph-view");
 const exploreViewEl = el("explore-view");
+const flowsViewEl = el("flows-view");
 
 // command palette (Ctrl/Cmd+K)
 const cmdkModalEl = el("cmdk-modal");
@@ -163,22 +165,34 @@ const EXPLORE_VIEW_IDS = ["explore-tab-search", "explore-search-input",
   "explore-goal-result", "explore-forms-list", "explore-tab-content",
   "explore-content-list"];
 
-// Three-way view switcher: Workspace (chat + live) | Graph (Cytoscape) | Explore (a
-// read-only browser over the cache). Toggling ONLY flips the `hidden` panes + the active
-// tab — it NEVER opens/closes chatWs/liveWs (selectHost owns the socket lifecycle).
+// The Flows view's DOM lives in index.html and is DRIVEN by flows.js (loaded eagerly after
+// explore.js). Same discipline as GRAPH_VIEW_IDS / EXPLORE_VIEW_IDS.
+const FLOWS_VIEW_IDS = ["flow-list", "flow-new", "flow-editor-text", "flow-validation",
+  "flow-save", "flow-run-panel", "flow-inputs", "flow-cap-submit", "flow-cap-upload",
+  "flow-cap-download", "flow-dry-run", "flow-run", "flow-cancel", "flow-dedupe",
+  "flow-log", "flow-runs", "flow-artifacts"];
+
+// Four-way view switcher: Workspace (chat + live) | Graph (Cytoscape) | Explore (a
+// read-only browser over the cache) | Flows (the host's saved automations). Toggling ONLY
+// flips the `hidden` panes + the active tab — it NEVER opens/closes chatWs/liveWs
+// (selectHost owns those; flows.js owns its own run socket).
 function setView(view) {
   currentView = view;
   const graph = view === "graph";
   const explore = view === "explore";
-  const workspace = !graph && !explore;
+  const flows = view === "flows";
+  const workspace = !graph && !explore && !flows;
   if (panesEl) panesEl.hidden = !workspace;
   if (graphViewEl) graphViewEl.hidden = !graph;
   if (exploreViewEl) exploreViewEl.hidden = !explore;
+  if (flowsViewEl) flowsViewEl.hidden = !flows;
   if (tabWorkspaceEl) tabWorkspaceEl.classList.toggle("on", workspace);
   if (tabGraphEl) tabGraphEl.classList.toggle("on", graph);
   if (tabExploreEl) tabExploreEl.classList.toggle("on", explore);
+  if (tabFlowsEl) tabFlowsEl.classList.toggle("on", flows);
   if (graph) ensureGraphView();
   if (explore) ensureExploreView();
+  if (flows) ensureFlowsView();
 }
 
 // explore.js is eager (no vendor deps), so the controller is already present — just hand
@@ -191,6 +205,17 @@ function ensureExploreView() {
     return;
   }
   if (typeof openExploreView === "function") openExploreView(selectedHost);
+}
+
+// flows.js is eager too (a plain <textarea> — no editor library, no vendor deps).
+function ensureFlowsView() {
+  const status = el("flows-status");
+  const missing = FLOWS_VIEW_IDS.filter((id) => !el(id));
+  if (missing.length) {
+    if (status) status.textContent = "flows markup missing: " + missing.join(", ");
+    return;
+  }
+  if (typeof openFlowsView === "function") openFlowsView(selectedHost);
 }
 
 async function ensureGraphView() {
@@ -302,11 +327,14 @@ async function selectHost(h) {
   setView("workspace");
   if (typeof destroyGraphView === "function") destroyGraphView();
   if (typeof destroyExploreView === "function") destroyExploreView();
+  if (typeof destroyFlowsView === "function") destroyFlowsView();
   // Stash the (cheap, index) graph_kind now; the fresh-summary .then refreshes it.
   selectedGraphKind = h.summary ? h.summary.graph_kind : null;
-  // A host whose cache failed to load can't render a graph or be explored — disable both.
+  // A host whose cache failed to load can't render a graph, be explored, or run a flow
+  // (every flow resolves its `goto` goals against that same cache) — disable all three.
   if (tabGraphEl) tabGraphEl.disabled = !!h.error;
   if (tabExploreEl) tabExploreEl.disabled = !!h.error;
+  if (tabFlowsEl) tabFlowsEl.disabled = !!h.error;
 
   // reflect selection in the sidebar.
   for (const row of hostsEl.children) row.classList.remove("selected");
@@ -1113,6 +1141,7 @@ function closeVault() {
 if (tabWorkspaceEl) tabWorkspaceEl.addEventListener("click", () => setView("workspace"));
 if (tabGraphEl) tabGraphEl.addEventListener("click", () => setView("graph"));
 if (tabExploreEl) tabExploreEl.addEventListener("click", () => setView("explore"));
+if (tabFlowsEl) tabFlowsEl.addEventListener("click", () => setView("flows"));
 
 if (vaultOpenEl) vaultOpenEl.addEventListener("click", openVault);
 if (vaultCloseEl) vaultCloseEl.addEventListener("click", closeVault);
@@ -1388,12 +1417,15 @@ function cmdkActions() {
   const hasHost = !!selectedHost;
   const graphOff = !!(tabGraphEl && tabGraphEl.disabled);
   const exploreOff = !!(tabExploreEl && tabExploreEl.disabled);
+  const flowsOff = !!(tabFlowsEl && tabFlowsEl.disabled);
   const actions = [
     { label: "Go to Workspace", run: () => setView("workspace") },
     { label: "Go to Graph", disabled: graphOff,
       hint: graphOff ? "unavailable for this host" : "", run: () => setView("graph") },
     { label: "Go to Explore", disabled: exploreOff,
       hint: exploreOff ? "unavailable for this host" : "", run: () => setView("explore") },
+    { label: "Go to Flows", disabled: flowsOff,
+      hint: flowsOff ? "unavailable for this host" : "", run: () => setView("flows") },
     { label: "New chat", disabled: !hasHost, hint: hasHost ? "" : "pick a host first",
       run: () => { if (typeof newChat === "function") newChat(); } },
     // The sidebar crawl form works with NO host selected (it's how you crawl your first

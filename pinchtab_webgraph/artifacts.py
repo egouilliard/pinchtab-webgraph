@@ -130,6 +130,15 @@ class ArtifactStore:
         self._seen[sha] = rec
         return dict(rec, status="new")
 
+    def list_artifacts(self):
+        """All accepted (`new`) records, newest first — the cumulative all-time ledger view.
+
+        A single run only reports what IT fetched, but the ledger's whole point is that it
+        outlives the run (run N knows what run N-1 already has). So the question "what does
+        this automation have?" is answered here, not from a run record. Duplicates were never
+        admitted, so every record is a distinct file."""
+        return sorted(self._seen.values(), key=lambda r: r.get("seen_at") or "", reverse=True)
+
     def stats(self):
         return {"scope": self.scope, "root": self.root, "count": len(self._seen),
                 "bytes": sum(r.get("size") or 0 for r in self._seen.values())}

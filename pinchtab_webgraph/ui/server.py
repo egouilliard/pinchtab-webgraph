@@ -28,8 +28,8 @@ from fastapi import Body, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import api, cache_store, __version__
-from . import chat_backend, chat_store, live_crawl, screencast, vault
+from .. import api, artifacts, cache_store, flow as flow_mod, __version__
+from . import chat_backend, chat_store, flow_runner, flow_store, live_crawl, screencast, vault
 
 app = FastAPI(title="pinchtab-webgraph UI", version=__version__)
 
@@ -52,6 +52,16 @@ _STATUS_CODE = {
     "session_not_found": 404,
     "invalid_session": 400,
     "too_many_sessions": 429,
+    "too_many_flows": 429,
+    "flow_not_found": 404,
+    "invalid_flow": 400,
+    "run_not_found": 404,
+    "invalid_run": 400,
+    # NOTE: "invalid" (a FAILED FLOW-DOCUMENT VALIDATION) is deliberately NOT here. A flow
+    # doc arrives as user-submitted JSON and failing its structural check is a structured
+    # MISS, not a protocol error — so it is a 200 carrying {"status":"invalid","path","error"},
+    # the exact shape `flow_cmd validate` prints and the same house convention as no_match /
+    # no_path. The REQUEST was fine; the DOCUMENT wasn't, and the client renders that.
     # NOTE: "invalid_args" is deliberately NOT here. It is an OVERLOADED status — a
     # 200 structured MISS for the read surface (howto with no goal/match), but a 400
     # for a vault PUT with a bad body. The vault PUT route maps it to 400 locally so
@@ -420,6 +430,11 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...),
 app.state.live_sessions = 0
 # A separate cap on concurrently running crawl subprocesses (see /ws/crawl below).
 app.state.live_crawls = 0
+# …and on concurrently running FLOW subprocesses (see /ws/flows/run below). These two
+# counters VETO EACH OTHER: a crawl and a live flow run both lease the SINGLE-TENANT PinchTab
+# bridge's tab, so letting them overlap would have them fighting over the same browser —
+# each other's navigations, each other's forms. One bridge, one driver.
+app.state.live_flow_runs = 0
 
 
 @app.websocket("/ws/screencast")
@@ -547,7 +562,10 @@ async def crawl_ws(websocket: WebSocket, url: str = Query(...),
         await websocket.close(code=1008)
         return
 
-    if app.state.live_crawls >= live_crawl.MAX_LIVE_CRAWLS:
+    # Capacity — and the CROSS-VETO: a live flow run is already driving the single-tenant
+    # bridge, so a crawl must not start on top of it (and vice versa, below).
+    if (app.state.live_crawls >= live_crawl.MAX_LIVE_CRAWLS
+            or app.state.live_flow_runs >= flow_runner.MAX_LIVE_FLOW_RUNS):
         await websocket.send_json({"type": "error", "status": "too_many_sessions",
                                    "max": live_crawl.MAX_LIVE_CRAWLS})
         await websocket.close(code=1013)
@@ -617,6 +635,378 @@ async def crawl_ws(websocket: WebSocket, url: str = Query(...),
         app.state.live_crawls -= 1
 
 
+# --- flow routes (saved automations + their run history, per host) -----------
+#
+# A flow is a DECLARATIVE document (flow.py) executed by the step VM (runner.py). These
+# routes are its CRUD + audit surface; /ws/flows/run below is how one is actually executed.
+#
+# The `{host}` segment is a STORAGE PARTITION KEY (which host's drawer the flow is filed in),
+# NOT the flow document's own optional `host` field — that one is a runtime navigation guard
+# the runner enforces. flow_store's docstring spells the distinction out; do not conflate them.
+#
+# Validation status convention: a flow document that fails flow.validate is a structured MISS
+# (200 + {"status":"invalid","path","error"}), matching `flow_cmd validate`'s exact output
+# shape — see the note in _STATUS_CODE. A bad flow_id TOKEN is a different thing entirely
+# (invalid_flow -> 400): that is a malformed REQUEST, and it is rejected before any
+# filesystem access, the twin of invalid_session on a chat id.
+
+def _guard_flow(host, flow_id):
+    """Shared host+flow-id guard: None on success, else a structured error dict. Blocks path
+    traversal on the id segment before flow_store touches the filesystem."""
+    err = _resolve_host_token(host)
+    if err is not None:
+        return err
+    try:
+        flow_store.validate_flow_id(flow_id)
+    except ValueError:
+        return {"status": "invalid_flow", "flow": flow_id}
+    return None
+
+
+def _guard_run(host, flow_id, run_id):
+    """The same guard, extended to the run-id segment (invalid_run -> 400)."""
+    err = _guard_flow(host, flow_id)
+    if err is not None:
+        return err
+    try:
+        flow_store.validate_run_id(run_id)
+    except ValueError:
+        return {"status": "invalid_run", "run": run_id}
+    return None
+
+
+def _validated(doc):
+    """flow.validate a caller-supplied document -> (ok_dict, None) | (None, invalid_dict).
+
+    The ok shape mirrors `flow_cmd validate`'s printed JSON exactly, so the CLI and the HTTP
+    surface answer the same question with the same words."""
+    try:
+        flow_mod.validate(doc)
+    except flow_mod.FlowError as e:
+        return None, {"status": "invalid", "path": e.path, "error": e.message}
+    except (TypeError, AttributeError) as e:      # a non-object body (a list, a string, …)
+        return None, {"status": "invalid", "path": "", "error": str(e)}
+    return {"status": "ok", "name": doc["name"], "host": doc.get("host"),
+            "steps": len(doc["steps"]), "capabilities": flow_mod.capabilities(doc),
+            "inputs": sorted(doc.get("inputs") or {})}, None
+
+
+@app.post("/api/flows/validate")
+def flows_validate(doc: dict = Body(...)):
+    """Stateless — no host, nothing stored. The editor's "is this document legal?" check."""
+    ok, err = _validated(doc)
+    return _respond(err if err is not None else ok)
+
+
+@app.post("/api/flows/schema")
+def flows_schema(doc: dict = Body(...)):
+    """Stateless — the document's `inputs` as a JSON Schema (what the run form is built from)."""
+    _ok, err = _validated(doc)
+    if err is not None:
+        return _respond(err)
+    return _respond(flow_mod.json_schema(doc))
+
+
+@app.get("/api/hosts/{host}/flows")
+def host_flows(host: str):
+    err = _resolve_host_token(host)
+    if err is not None:
+        return _respond(err)
+    return {"flows": flow_store.list_flows(host)}
+
+
+@app.post("/api/hosts/{host}/flows")
+def create_host_flow(host: str, doc: dict = Body(...)):
+    err = _resolve_host_token(host)
+    if err is not None:
+        return _respond(err)
+    try:
+        record = flow_store.create(host, doc)
+    except flow_mod.FlowError as e:
+        # 200 + the structured miss — the request was fine, the DOCUMENT wasn't.
+        return _respond({"status": "invalid", "path": e.path, "error": e.message})
+    except flow_store.TooManyFlows:
+        return _respond({"status": "too_many_flows", "max": flow_store.MAX_FLOWS_PER_HOST})
+    return _respond({"status": "ok", **flow_store.summary(record)})
+
+
+@app.get("/api/hosts/{host}/flows/{flow_id}")
+def get_host_flow(host: str, flow_id: str):
+    err = _guard_flow(host, flow_id)
+    if err is not None:
+        return _respond(err)
+    record = flow_store.load(host, flow_id)
+    if record is None:
+        return _respond({"status": "flow_not_found", "flow": flow_id})
+    return _respond(record)          # the FULL record, doc included (the editor needs it)
+
+
+@app.put("/api/hosts/{host}/flows/{flow_id}")
+def update_host_flow(host: str, flow_id: str, doc: dict = Body(...)):
+    err = _guard_flow(host, flow_id)
+    if err is not None:
+        return _respond(err)
+    try:
+        record = flow_store.update(host, flow_id, doc)
+    except flow_mod.FlowError as e:
+        return _respond({"status": "invalid", "path": e.path, "error": e.message})
+    if record is None:
+        return _respond({"status": "flow_not_found", "flow": flow_id})
+    return _respond({"status": "ok", **flow_store.summary(record)})
+
+
+@app.delete("/api/hosts/{host}/flows/{flow_id}")
+def delete_host_flow(host: str, flow_id: str):
+    err = _guard_flow(host, flow_id)
+    if err is not None:
+        return _respond(err)
+    # idempotent — deleting an absent flow is a green {"deleted": false}, never a 404. The
+    # delete CASCADES: the flow's whole run history goes with it.
+    return {"status": "ok", "deleted": flow_store.delete(host, flow_id)}
+
+
+@app.get("/api/hosts/{host}/flows/{flow_id}/schema")
+def host_flow_schema(host: str, flow_id: str):
+    err = _guard_flow(host, flow_id)
+    if err is not None:
+        return _respond(err)
+    record = flow_store.load(host, flow_id)
+    if record is None:
+        return _respond({"status": "flow_not_found", "flow": flow_id})
+    return _respond(flow_mod.json_schema(record["doc"]))
+
+
+@app.get("/api/hosts/{host}/flows/{flow_id}/runs")
+def host_flow_runs(host: str, flow_id: str):
+    err = _guard_flow(host, flow_id)
+    if err is not None:
+        return _respond(err)
+    if flow_store.load(host, flow_id) is None:
+        return _respond({"status": "flow_not_found", "flow": flow_id})
+    return {"runs": flow_store.list_runs(host, flow_id)}
+
+
+@app.get("/api/hosts/{host}/flows/{flow_id}/runs/{run_id}")
+def host_flow_run(host: str, flow_id: str, run_id: str):
+    err = _guard_run(host, flow_id, run_id)
+    if err is not None:
+        return _respond(err)
+    record = flow_store.load_run(host, flow_id, run_id)
+    if record is None:
+        return _respond({"status": "run_not_found", "run": run_id})
+    return _respond(record)          # the FULL run record: steps, artifacts, collected
+
+
+@app.get("/api/hosts/{host}/flows/{flow_id}/artifacts")
+def host_flow_artifacts(host: str, flow_id: str):
+    """The flow's CUMULATIVE artifact ledger — every distinct file it has ever fetched.
+
+    The scope is the flow_id (a uuid4 hex, hence a legal artifact scope), which is also what
+    the run WS passes as `--scope`, so two flows never poison each other's dedupe ledger."""
+    err = _guard_flow(host, flow_id)
+    if err is not None:
+        return _respond(err)
+    if flow_store.load(host, flow_id) is None:
+        return _respond({"status": "flow_not_found", "flow": flow_id})
+    store = artifacts.ArtifactStore(scope=flow_id)
+    return {"artifacts": store.list_artifacts(), "stats": store.stats()}
+
+
+# --- flow run WebSocket (execute a saved flow, stream every step) --------------
+#
+# The SPA's "Run" button sends inputs + a capability grant; we launch
+# `python -m pinchtab_webgraph.flow_cmd run <doc> --jsonl` as a subprocess (see
+# flow_runner.py for WHY a subprocess: SIGTERM on its process group is the ONLY cancellation
+# primitive the flow layer has) and relay its JSONL frames out over this socket.
+#
+# OFF unless PINCHTAB_WEBGRAPH_ENABLE_FLOWS is truthy. This is the most dangerous route in
+# the server: unlike a crawl — which structurally NEVER submits — a flow's `do{submit:true}`
+# or `upload` step CAN write to the real site, whenever the document declares the capability
+# AND the caller grants it. Both must agree; either vetoes.
+
+def _flows_enabled():
+    """Truthy PINCHTAB_WEBGRAPH_ENABLE_FLOWS gates the whole run-a-flow feature."""
+    return (os.environ.get("PINCHTAB_WEBGRAPH_ENABLE_FLOWS") or "").strip().lower() \
+        in ("1", "true", "yes", "on")
+
+
+async def _execute_flow_run(websocket, *, record, host, flow_id, msg):
+    """Run ONE flow execution end-to-end: spawn, relay, cancel, persist, send the terminal.
+
+    Returns True if the socket should stay open for another kickoff, False if it was closed.
+    """
+    doc = record["doc"]
+    dry_run = bool(msg.get("dry_run"))
+    grant = msg.get("grant") or {}
+
+    try:
+        inputs = flow_mod.bind_inputs(doc, msg.get("inputs") or {})
+    except flow_mod.FlowError as e:
+        # A bad input is the user's next keystroke away from being a good one — report it and
+        # KEEP THE SOCKET OPEN so they can just fix the form and press Run again.
+        await websocket.send_json({"type": "error", "status": "invalid_input",
+                                   "detail": e.message, "path": e.path})
+        return True
+
+    steps = []          # accumulated as we relay, so a hard-killed run still persists a trail
+    gone = False        # the client vanished mid-run — persist, then stop touching the socket
+
+    async def relay(frame):
+        if frame.get("type") == "step":
+            steps.append({k: v for k, v in frame.items() if k != "type"})
+        elif frame.get("type") == "result":
+            return      # held back: the ONE terminal frame is sent below, after persisting
+        await websocket.send_json(frame)
+
+    # A DRY run touches no browser, so it neither consumes the bridge nor vetoes a crawl.
+    if not dry_run:
+        if (app.state.live_crawls >= live_crawl.MAX_LIVE_CRAWLS
+                or app.state.live_flow_runs >= flow_runner.MAX_LIVE_FLOW_RUNS):
+            await websocket.send_json({"type": "error", "status": "too_many_sessions",
+                                       "max": flow_runner.MAX_LIVE_FLOW_RUNS})
+            await websocket.close(code=1013)
+            return False
+        # NOTHING that can raise may sit between this line and the `try` that owns the
+        # decrementing `finally` — the pair must be provable. `flow_store.start_run` writes
+        # to disk (and so can raise OSError), which is exactly why it lives INSIDE the try:
+        # a leaked count would wedge every later flow run AND, via the cross-veto, every
+        # later crawl until the process restarts. Mirrors /ws/crawl.
+        app.state.live_flow_runs += 1
+    try:
+        run_id = flow_store.new_run_id()
+        caps = {k: bool(flow_mod.capabilities(doc).get(k) and grant.get(k, v))
+                for k, v in flow_mod.DEFAULT_CAPABILITIES.items()}
+        # The placeholder is written BEFORE anything is spawned: a run that is SIGKILLed, or
+        # that dies with the server, still leaves a discoverable record instead of vanishing.
+        flow_store.start_run(host, flow_id, run_id, dry_run=dry_run, capabilities=caps,
+                             inputs=inputs)
+
+        with flow_runner.staged_flow_doc(doc) as flow_path:
+            async with flow_runner.open_flow_run_session(
+                    flow_path=flow_path, host=host, flow_id=flow_id, run_id=run_id,
+                    inputs=inputs, grant=grant, dry_run=dry_run,
+                    scope=flow_id) as session:
+                await websocket.send_json({"type": "status", "state": "starting",
+                                           "host": host, "flow_id": flow_id,
+                                           "run_id": run_id, "dry_run": dry_run})
+
+                # Frames stream OUT via a background task (subprocess JSONL -> relay). We
+                # concurrently wait for EITHER the process to exit OR a client cancel /
+                # disconnect; whichever happens first, we cancel the session (idempotent) and
+                # send the ONE terminal frame.
+                pump = asyncio.create_task(flow_runner.pump_frames(session, emit=relay))
+                proc_wait = asyncio.create_task(session.process.wait())
+
+                cancelled = False
+                try:
+                    while True:
+                        recv = asyncio.create_task(websocket.receive_json())
+                        done, _pending = await asyncio.wait(
+                            {recv, proc_wait}, return_when=asyncio.FIRST_COMPLETED)
+                        if proc_wait in done:
+                            recv.cancel()
+                            break
+                        try:
+                            client_msg = recv.result()
+                        except WebSocketDisconnect:
+                            cancelled = gone = True   # a disconnect mid-run IS a cancel
+                            break
+                        except Exception:  # noqa: BLE001 — bad frame / closed socket
+                            cancelled = gone = True
+                            break
+                        if isinstance(client_msg, dict) and client_msg.get("type") == "cancel":
+                            cancelled = True
+                            break
+                except WebSocketDisconnect:
+                    cancelled = gone = True
+
+                if not proc_wait.done():
+                    proc_wait.cancel()
+                if cancelled:
+                    await flow_runner.cancel_run_session(session)
+                # let the pump drain whatever the subprocess already wrote, then stop it.
+                result = None
+                try:
+                    result = await asyncio.wait_for(pump, timeout=5.0)
+                except Exception:  # noqa: BLE001 — pump wedged: keep what we already relayed
+                    pump.cancel()
+                rc = session.process.returncode
+    except flow_runner.FlowRunUnavailable as e:
+        await websocket.send_json({"type": "error", "status": "flow_unavailable",
+                                   "reason": e.reason, "detail": e.detail})
+        await websocket.close(code=1013)
+        return False
+    finally:
+        if not dry_run:
+            app.state.live_flow_runs -= 1
+
+    if result is None:
+        # HONEST rather than hanging: the process is gone and it never printed a result, so
+        # say exactly that (the same discipline live_crawl.finish_session practices when a
+        # crawl produced no graph). The steps we DID relay are kept — that trail is the only
+        # evidence of what the flow managed to do before it died.
+        result = {"status": "error", "flow": (doc.get("name")), "dry_run": dry_run,
+                  "detail": "the flow process exited with no result (rc=%s)" % (rc,),
+                  "steps": steps, "artifacts": [], "collected": {}, "stats": {}}
+    else:
+        result = {k: v for k, v in result.items() if k != "type"}
+
+    # PERSIST BEFORE SENDING: the record must exist by the time the client can act on the
+    # frame (e.g. immediately GET the run it was just told about).
+    flow_store.finish_run(host, flow_id, run_id, result, cancelled=cancelled)
+    if gone:
+        return False    # nothing left to send to, and nothing left to receive from
+    try:
+        await websocket.send_json({"type": "result", "run_id": run_id, **result})
+    except Exception:  # noqa: BLE001 — client already gone; the run is persisted regardless
+        return False
+    return True
+
+
+@app.websocket("/ws/flows/run")
+async def flow_run_ws(websocket: WebSocket, host: str = Query(...),
+                      flow_id: str = Query(...)):
+    await websocket.accept()
+
+    if not _flows_enabled():
+        await websocket.send_json({"type": "error", "status": "flow_unavailable",
+                                   "reason": "disabled",
+                                   "detail": flow_runner._DISABLED_HINT})
+        await websocket.close(code=1013)
+        return
+
+    err = _guard_flow(host, flow_id)
+    if err is not None:
+        await websocket.send_json({"type": "error", **err})
+        await websocket.close(code=1008)
+        return
+
+    record = flow_store.load(host, flow_id)
+    if record is None:
+        await websocket.send_json({"type": "error", "status": "flow_not_found",
+                                   "flow": flow_id})
+        await websocket.close(code=1008)
+        return
+
+    # Bootstrap: the client renders the run form (declared inputs + capabilities) from THIS
+    # frame — no second fetch.
+    await websocket.send_json({"type": "flow", **flow_store.summary(record)})
+
+    try:
+        while True:
+            try:
+                msg = await websocket.receive_json()
+            except (WebSocketDisconnect, RuntimeError):
+                return          # RuntimeError: the disconnect was already consumed below
+            if not isinstance(msg, dict) or msg.get("type") != "run":
+                continue
+            if not await _execute_flow_run(websocket, record=record, host=host,
+                                           flow_id=flow_id, msg=msg):
+                return
+    except WebSocketDisconnect:
+        return
+
+
 # Vendor mount — the 6 Cytoscape libs the graph view lazy-loads. Registered BEFORE
 # the catch-all "/" mount because Starlette resolves mounts in REGISTRATION order: the
 # "/" StaticFiles below matches every path, so a /vendor mount registered after it would
@@ -652,9 +1042,13 @@ def main():
               "(spending API credits), launch local headless Chrome, and, worst of "
               "all, make the server drive a REAL browser that CLICKS THROUGH THE WHOLE "
               "TARGET APP and OPENS EVERY CREATE FORM (it never submits) against the "
-              "credential-bearing PinchTab bridge. /ws/crawl is off unless "
-              "PINCHTAB_WEBGRAPH_ENABLE_CRAWL is set, but this is the single strongest "
-              "reason to keep --host 127.0.0.1."
+              "credential-bearing PinchTab bridge — AND the flow-run endpoint "
+              "(/ws/flows/run), which is MORE dangerous still: a crawl structurally never "
+              "submits, but a FLOW's do{submit:true} / upload steps CAN WRITE TO THE REAL "
+              "SITE whenever the saved flow declares the capability and the caller grants "
+              "it. /ws/crawl and /ws/flows/run are off unless "
+              "PINCHTAB_WEBGRAPH_ENABLE_CRAWL / PINCHTAB_WEBGRAPH_ENABLE_FLOWS are set, but "
+              "this is the single strongest reason to keep --host 127.0.0.1."
               % a.host, file=sys.stderr)
 
     import uvicorn

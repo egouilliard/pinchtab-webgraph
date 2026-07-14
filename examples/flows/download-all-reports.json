@@ -1,0 +1,17 @@
+{
+  "name": "download-all-reports",
+  "host": "127.0.0.1",
+  "description": "Walk to the reports list, then page through every page and download every file on it. Re-running only picks up files that are genuinely new.",
+  "capabilities": {"allow_download": true},
+  "steps": [
+    {"op": "goto", "goal": "download report a"},
+
+    {"op": "paginate", "max_pages": 10, "body": [
+      {"op": "log", "message": "--- page ${page} ---"},
+
+      {"op": "for_each", "match": {"kind": "download"}, "as": "item", "body": [
+        {"op": "download", "href": "${item.href}", "name": "${item.text}.pdf"}
+      ]}
+    ]}
+  ]
+}

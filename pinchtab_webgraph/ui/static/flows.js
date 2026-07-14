@@ -1,0 +1,1013 @@
+// pinchtab-webgraph web UI — the Flows view.
+//
+// Loaded EAGERLY (after explore.js) because it has NO vendor deps. It owns the 4th tab:
+// the saved automations for the selected host. A flow is a declarative JSON document
+// (goto/do/click/fill/select/check/upload/download/collect/wait/set/log + for_each /
+// paginate) run by a step VM against a real browser.
+//
+// The whole point of the view is to make the CONTENT-HASH DEDUPE visible: a `download`
+// step frame arrives with status "new" or "dupe", so a re-run of a flow reports the files
+// it already has instead of re-fetching them. We surface that twice —
+//   * LIVE, as a running "N new · M dupe" counter fed by the streaming step frames, and
+//   * CUMULATIVELY, as the flow's all-time artifact ledger (name/size/when/sha).
+//
+// SAFETY DISCIPLINE (kept from explore.js / app.js):
+//   * textContent ONLY for every server-sourced string — createElement, never innerHTML.
+//   * A flow doc is authored by the user but its *echoed* summary (name, error paths,
+//     artifact names, hrefs) is server data — same treatment.
+//   * hrefs/paths are shown as PLAIN TEXT, never a live <a href> (clicking one would
+//     navigate the browser away from the SPA).
+//   * The run is SAFE BY DEFAULT: dry-run is pre-checked, submit/upload grants are NOT,
+//     and a grant checkbox is disabled unless the flow itself DECLARES the capability —
+//     a write only happens when the flow declares it AND the caller grants it.
+//   * setView lives in app.js — flows.js CALLS it, never duplicates socket ownership of
+//     the chat/live panes. The RUN socket is owned here.
+"use strict";
+
+// module state
+let flowsHost = null;         // host the panes were built for
+let flowList = [];            // the host's flow summaries
+let flowId = null;            // the flow currently open in the editor (null = unsaved/new)
+let flowSummary = null;       // the last `flow` bootstrap frame (name/steps/capabilities/inputs)
+let flowWs = null;            // the run socket for the open flow (one at a time)
+let flowRunning = false;      // a run is in flight on flowWs
+let flowValidTimer = null;    // debounce handle for the live validator
+let flowValidSeq = 0;         // guards against an out-of-order validate response
+let flowValid = false;        // last validation verdict (gates Save)
+let flowNewCount = 0;         // live dedupe counters, fed by `download` step frames
+let flowDupeCount = 0;
+let flowWsBootstrapped = false;  // this socket got its `flow` frame — i.e. the server ACCEPTED it
+let flowWsReopenTimer = null;    // pending auto-reopen after an unsolicited drop
+
+const FLOW_CAPS = ["allow_submit", "allow_upload", "allow_download"];
+const FLOW_CAP_IDS = {
+  allow_submit: "flow-cap-submit",
+  allow_upload: "flow-cap-upload",
+  allow_download: "flow-cap-download",
+};
+
+// The doc a "+ New flow" seeds the editor with: minimal, valid, and demonstrating the
+// dedupe story (a download flow) rather than a bare skeleton.
+function flowStarterDoc(host) {
+  return {
+    name: "new-flow",
+    host: host || "",
+    description: "What this automation does.",
+    capabilities: { allow_download: true },
+    steps: [
+      { op: "goto", goal: "reports" },
+      { op: "for_each", match: { kind: "download" }, as: "item", body: [
+        { op: "download", href: "${item.href}", name: "${item.text}" },
+      ] },
+    ],
+  };
+}
+
+// --- small DOM helpers (createElement + textContent only) --------------------
+function flEl(id) { return document.getElementById(id); }
+
+function flBadge(text, cls) {
+  const b = document.createElement("span");
+  b.className = "badge" + (cls ? " " + cls : "");
+  b.textContent = String(text);            // server value — textContent only
+  return b;
+}
+
+function flEmpty(text) {
+  const p = document.createElement("p");
+  p.className = "flow-empty";
+  p.textContent = text;                    // fixed UI copy
+  return p;
+}
+
+function flBytes(n) {
+  if (typeof n !== "number" || n < 0) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+function flWhen(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? String(iso) : d.toLocaleString();
+}
+
+// --- shape normalizers -------------------------------------------------------
+// `capabilities` may arrive as the flow's own object ({allow_download: true}) or as a
+// list of granted names — accept both so the grant checkboxes are right either way.
+function flCapSet(caps) {
+  const out = new Set();
+  if (Array.isArray(caps)) {
+    for (const c of caps) if (FLOW_CAPS.includes(c)) out.add(c);
+  } else if (caps && typeof caps === "object") {
+    for (const k of FLOW_CAPS) if (caps[k]) out.add(k);
+  }
+  return out;
+}
+
+// `inputs` may arrive as the flow's own declaration ({since: {type, required}}), as a
+// JSON Schema ({type:"object", properties:{…}, required:[…]}), or as a list of names.
+// Normalize all three to [{name, type, required, default, description, enum}].
+function flInputSpecs(inputs) {
+  if (!inputs) return [];
+  if (Array.isArray(inputs)) {
+    return inputs.map((n) => ({ name: String(n), type: "string" }));
+  }
+  if (typeof inputs !== "object") return [];
+  let decls = inputs;
+  let required = null;
+  if (inputs.type === "object" && inputs.properties &&
+      typeof inputs.properties === "object") {
+    decls = inputs.properties;                       // a JSON Schema
+    required = Array.isArray(inputs.required) ? inputs.required : [];
+  }
+  const out = [];
+  for (const name of Object.keys(decls)) {
+    const d = decls[name] && typeof decls[name] === "object" ? decls[name] : {};
+    out.push({
+      name,
+      type: d.type || "string",
+      required: required ? required.includes(name) : !!d.required,
+      "default": d["default"],
+      description: d.description || "",
+      "enum": Array.isArray(d["enum"]) ? d["enum"] : null,
+    });
+  }
+  return out;
+}
+
+// --- lifecycle: open / destroy (app.js owns the host-switch calls) -----------
+function openFlowsView(host) {
+  if (host && host === flowsHost) return;    // same host already rendered — no-op
+  flowsHost = host || null;
+  resetFlowEditor();
+  const status = flEl("flows-status");
+  const list = flEl("flow-list");
+  if (list) list.textContent = "";
+  if (!host) {
+    if (status) status.textContent = "Pick a host first.";
+    return;
+  }
+  if (status) status.textContent = "";
+  loadFlowList(host);
+}
+
+// app.js calls this on EVERY host switch (before opening the new one) so a stale host's
+// flows — and its run socket — never bleed into the next. Mirrors destroyExploreView().
+function destroyFlowsView() {
+  closeFlowSocket();
+  flowsHost = null;
+  flowList = [];
+  resetFlowEditor();
+  const list = flEl("flow-list");
+  if (list) list.textContent = "";
+  const status = flEl("flows-status");
+  if (status) status.textContent = "";
+}
+
+function closeFlowSocket() {
+  if (flowWsReopenTimer) { clearTimeout(flowWsReopenTimer); flowWsReopenTimer = null; }
+  if (flowWs) {
+    // null FIRST: `ws.onclose` reads `flowWs !== ws` to tell a deliberate close (this one)
+    // from an unsolicited drop (which auto-reopens). Order is load-bearing.
+    const ws = flowWs;
+    flowWs = null;
+    try { ws.close(); } catch (e) { /* ignore */ }
+  }
+  flowWsBootstrapped = false;
+  flowRunning = false;
+  setFlowRunning(false);
+}
+
+// Clear the editor + every dependent pane back to "nothing open".
+function resetFlowEditor() {
+  flowId = null;
+  flowSummary = null;
+  flowValid = false;
+  if (flowValidTimer) { clearTimeout(flowValidTimer); flowValidTimer = null; }
+  const editor = flEl("flow-editor-text");
+  if (editor) editor.value = "";
+  for (const id of ["flow-validation", "flow-log", "flow-inputs", "flow-runs",
+                    "flow-artifacts", "flow-dedupe"]) {
+    const node = flEl(id);
+    if (node) node.textContent = "";
+  }
+  const summary = flEl("flow-artifacts-summary");
+  if (summary) summary.textContent = "";
+  const msg = flEl("flow-save-msg");
+  if (msg) msg.textContent = "";
+  const runPanel = flEl("flow-run-panel");
+  if (runPanel) runPanel.hidden = true;
+  const results = flEl("flow-results");
+  if (results) results.hidden = true;
+  const del = flEl("flow-delete");
+  if (del) del.hidden = true;
+  const save = flEl("flow-save");
+  if (save) { save.textContent = "Save flow"; save.disabled = true; }
+}
+
+// --- left pane: the host's flow list -----------------------------------------
+async function loadFlowList(host) {
+  const list = flEl("flow-list");
+  if (!list) return;
+  let data;
+  try {
+    const res = await fetch("/api/hosts/" + encodeURIComponent(host) + "/flows");
+    data = await res.json();
+  } catch (err) {
+    if (flowsHost === host) {
+      list.textContent = "";
+      list.appendChild(flEmpty("Could not load flows."));
+    }
+    return;
+  }
+  if (flowsHost !== host) return;             // a newer host switch took over
+  flowList = (data && Array.isArray(data.flows)) ? data.flows : [];
+  renderFlowList();
+}
+
+function renderFlowList() {
+  const list = flEl("flow-list");
+  if (!list) return;
+  list.textContent = "";
+  if (flowList.length === 0) {
+    list.appendChild(flEmpty("No flows yet — “+ New flow” writes the first one."));
+    return;
+  }
+  for (const f of flowList) list.appendChild(buildFlowRow(f));
+}
+
+// The row is a real <button> inside the <li>: focusable, Enter/Space-activatable and
+// exposed to the accessibility tree as a control — a bare <li> with a click handler is
+// none of those. `aria-current` announces which flow is the open one.
+function buildFlowRow(f) {
+  const li = document.createElement("li");
+
+  const btn = document.createElement("button");
+  btn.type = "button";                                // never a form submit
+  const selected = f.id === flowId;
+  btn.className = "flow-row" + (selected ? " selected" : "");
+  if (selected) btn.setAttribute("aria-current", "true");
+
+  const label = document.createElement("span");
+  label.className = "flow-row-name";
+  label.textContent = f.name || "(unnamed flow)";     // server string — textContent only
+  btn.appendChild(label);
+
+  const meta = document.createElement("span");
+  meta.className = "flow-row-meta";
+  const steps = Array.isArray(f.steps) ? f.steps.length : f.steps;
+  if (typeof steps === "number") meta.appendChild(flBadge(steps + " steps"));
+  if (typeof f.run_count === "number") {
+    const runs = document.createElement("span");
+    runs.className = "count";
+    runs.textContent = f.run_count + (f.run_count === 1 ? " run" : " runs");
+    meta.appendChild(runs);
+  }
+  btn.appendChild(meta);
+
+  btn.addEventListener("click", () => openFlow(f.id));
+  li.appendChild(btn);
+  return li;
+}
+
+// --- opening a flow: editor + run socket + history + ledger -------------------
+async function openFlow(id) {
+  const host = flowsHost;
+  if (!host || !id) return;
+  closeFlowSocket();
+  resetFlowEditor();
+  flowId = id;
+  renderFlowList();                            // reflect the selection
+
+  let record;
+  try {
+    const res = await fetch(flowUrl(host, id));
+    record = await res.json();
+  } catch (err) {
+    setFlowsStatus("Could not load that flow.");
+    return;
+  }
+  if (flowsHost !== host || flowId !== id) return;
+
+  const editor = flEl("flow-editor-text");
+  if (editor && record && record.doc) {
+    editor.value = JSON.stringify(record.doc, null, 2);
+  }
+  const del = flEl("flow-delete");
+  if (del) del.hidden = false;
+  const save = flEl("flow-save");
+  if (save) save.textContent = "Update flow";
+  const results = flEl("flow-results");
+  if (results) results.hidden = false;
+
+  validateNow();                               // paint the banner for the loaded doc
+  openRunSocket(host, id);                     // its `flow` frame builds the run form
+  loadRuns(host, id);
+  loadArtifacts(host, id);
+}
+
+function flowUrl(host, id) {
+  let u = "/api/hosts/" + encodeURIComponent(host) + "/flows";
+  if (id) u += "/" + encodeURIComponent(id);
+  return u;
+}
+
+function setFlowsStatus(text) {
+  const status = flEl("flows-status");
+  if (status) status.textContent = text;
+}
+
+function newFlow() {
+  if (!flowsHost) { setFlowsStatus("Pick a host first."); return; }
+  closeFlowSocket();
+  resetFlowEditor();
+  renderFlowList();
+  const editor = flEl("flow-editor-text");
+  if (editor) {
+    editor.value = JSON.stringify(flowStarterDoc(flowsHost), null, 2);
+    editor.focus();
+  }
+  validateNow();
+}
+
+// --- live validation ---------------------------------------------------------
+// Two layers, both offline: JSON.parse locally (a syntax error never leaves the browser),
+// then POST /api/flows/validate for the STRUCTURAL verdict. That endpoint answers 200 with
+// the verdict in the BODY — an invalid flow is not an HTTP error — so the status field is
+// what we branch on, never the HTTP code.
+function scheduleValidate() {
+  if (flowValidTimer) clearTimeout(flowValidTimer);
+  flowValidTimer = setTimeout(validateNow, 300);
+}
+
+function showValidation(cls, text) {
+  const box = flEl("flow-validation");
+  if (!box) return;
+  box.textContent = "";
+  box.className = "flow-validation " + cls;
+  const span = document.createElement("span");
+  span.textContent = text;                     // server error text — textContent only
+  box.appendChild(span);
+}
+
+function setSaveEnabled(on) {
+  const save = flEl("flow-save");
+  if (save) save.disabled = !on;
+}
+
+async function validateNow() {
+  if (flowValidTimer) { clearTimeout(flowValidTimer); flowValidTimer = null; }
+  const editor = flEl("flow-editor-text");
+  const text = editor ? editor.value : "";
+  const seq = ++flowValidSeq;
+  flowValid = false;
+  setSaveEnabled(false);
+
+  if (!text.trim()) {
+    showValidation("", "");
+    return;
+  }
+  let doc;
+  try {
+    doc = JSON.parse(text);                    // local syntax pass — no round trip
+  } catch (err) {
+    showValidation("bad", "not valid JSON — " + (err && err.message ? err.message : "parse error"));
+    return;
+  }
+
+  let data;
+  try {
+    const res = await fetch("/api/flows/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(doc),
+    });
+    data = await res.json();
+  } catch (err) {
+    if (seq !== flowValidSeq) return;
+    showValidation("bad", "could not reach the validator.");
+    return;
+  }
+  if (seq !== flowValidSeq) return;            // a newer keystroke already won
+
+  if (data && data.status === "ok") {
+    flowValid = true;
+    setSaveEnabled(true);
+    showValidation("ok", validSummaryText(data));
+    return;
+  }
+  const path = data && data.path ? String(data.path) + ": " : "";
+  const detail = (data && (data.error || data.detail)) || "invalid flow";
+  showValidation("bad", path + detail);
+}
+
+// "valid — 4 steps · download · inputs: since" — the one-line contract of the document.
+function validSummaryText(data) {
+  const steps = Array.isArray(data.steps) ? data.steps.length : data.steps;
+  const parts = ["valid"];
+  if (typeof steps === "number") parts.push(steps + (steps === 1 ? " step" : " steps"));
+  const caps = Array.from(flCapSet(data.capabilities)).map((c) => c.replace("allow_", ""));
+  parts.push(caps.length ? "capabilities: " + caps.join(", ") : "no capabilities");
+  const names = flInputSpecs(data.inputs).map((i) => i.name);
+  parts.push(names.length ? "inputs: " + names.join(", ") : "no inputs");
+  return parts[0] + " — " + parts.slice(1).join(" · ");
+}
+
+// --- save / update / delete --------------------------------------------------
+async function saveFlow() {
+  const host = flowsHost;
+  const editor = flEl("flow-editor-text");
+  const msg = flEl("flow-save-msg");
+  if (!host || !editor) return;
+  let doc;
+  try {
+    doc = JSON.parse(editor.value);
+  } catch (err) {
+    if (msg) msg.textContent = "fix the JSON first.";
+    return;
+  }
+  if (msg) msg.textContent = "saving…";
+  const editing = !!flowId;
+  let data;
+  try {
+    const res = await fetch(flowUrl(host, flowId), {
+      method: editing ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(doc),
+    });
+    data = await res.json();
+  } catch (err) {
+    if (msg) msg.textContent = "save request failed.";
+    return;
+  }
+  if (flowsHost !== host) return;
+
+  if (!data || data.status !== "ok") {
+    // a structural miss comes back 200 with the verdict in the body (see validateNow).
+    if (data && data.status === "too_many_flows") {
+      if (msg) msg.textContent = "too many flows (max " + (data.max || "?") + ").";
+    } else if (msg) {
+      msg.textContent = "not saved: " + ((data && data.path) ? data.path + ": " : "") +
+        ((data && (data.error || data.status)) || "invalid flow");
+    }
+    return;
+  }
+  if (msg) msg.textContent = editing ? "updated." : "saved.";
+  await loadFlowList(host);
+  // A fresh POST mints an id server-side; find it by name so the new flow opens directly.
+  if (!editing) {
+    const created = flowList.find((f) => f.name === doc.name);
+    if (created) { await openFlow(created.id); return; }
+  }
+  if (flowId) {
+    renderFlowList();
+    closeFlowSocket();
+    openRunSocket(host, flowId);               // refresh the bootstrap summary
+    loadRuns(host, flowId);
+  }
+}
+
+async function deleteFlow() {
+  const host = flowsHost;
+  const id = flowId;
+  const del = flEl("flow-delete");
+  if (!host || !id || !del) return;
+  // first click arms, a second confirms — the same pattern the chat chips use.
+  if (!del.classList.contains("confirm")) {
+    del.classList.add("confirm");
+    del.textContent = "delete?";
+    setTimeout(() => {
+      del.classList.remove("confirm");
+      del.textContent = "Delete";
+    }, 2000);
+    return;
+  }
+  del.classList.remove("confirm");
+  del.textContent = "Delete";
+  try {
+    await fetch(flowUrl(host, id), { method: "DELETE" });
+  } catch (err) { /* the reload below reflects whatever stuck */ }
+  if (flowsHost !== host) return;
+  closeFlowSocket();
+  resetFlowEditor();
+  await loadFlowList(host);
+}
+
+// --- the run socket ----------------------------------------------------------
+// Opened when a saved flow is opened and kept open: a kickoff is REPEATABLE (a rejected
+// one does not close the socket), so the same socket serves run after run.
+function openRunSocket(host, id) {
+  const ws = new WebSocket(wsUrl("/ws/flows/run?host=" + encodeURIComponent(host) +
+    "&flow_id=" + encodeURIComponent(id)));
+  flowWs = ws;
+
+  ws.onclose = () => {
+    if (flowWs !== ws) return;      // deliberate close (closeFlowSocket nulled flowWs first)
+    flowWs = null;
+    if (flowRunning) {
+      // The server treats a client disconnect as an implicit CANCEL, so the run really did
+      // stop. Say so: without this the log just trails off after the last step and the run
+      // reads as if it finished (or hung) — the one thing the user must not be misled about.
+      flowRunning = false;
+      setFlowRunning(false);
+      logAddLine("✗ run socket dropped — the run was cancelled", "error");
+      setFlowsStatus("the run socket dropped; the run was cancelled. Reconnecting…");
+    }
+    // An UNSOLICITED drop (seen in the wild as a 1006 after a completed run). Without this
+    // the socket is never rebuilt, so every later Run click dead-ends on "run socket is not
+    // connected." with no recovery but switching flows — breaking the invariant this socket
+    // is built on: a kickoff is REPEATABLE, the same socket serves run after run.
+    // Only reopen a socket the server had ACCEPTED (`flow` frame seen): a rejected one
+    // (flow_not_found / disabled / bad host) closes before bootstrap, and reopening THAT
+    // would be a hot reconnect loop against a server that will just refuse again.
+    if (!flowWsBootstrapped || !flowsHost || !flowId) return;
+    flowWsBootstrapped = false;
+    const host = flowsHost;
+    const id = flowId;
+    flowWsReopenTimer = setTimeout(() => {           // cooldown: never a tight respawn loop
+      flowWsReopenTimer = null;
+      if (flowsHost === host && flowId === id && !flowWs) openRunSocket(host, id);
+    }, 1000);
+  };
+  ws.onerror = () => {
+    if (flowWs === ws) setFlowsStatus("run socket error.");
+  };
+  ws.onmessage = (ev) => {
+    if (flowWs !== ws) return;
+    let data;
+    try { data = JSON.parse(ev.data); } catch (e) { return; }
+    switch (data.type) {
+      case "flow":
+        // bootstrap: the run form is built from THIS — no second fetch. Reaching here is
+        // also the server's ACCEPT, which is what licenses an auto-reopen in `onclose`.
+        flowWsBootstrapped = true;
+        flowSummary = data;
+        renderRunPanel(data);
+        break;
+      case "status":
+        logAddLine("· run " + (data.run_id || "") +
+          (data.dry_run ? " (dry run)" : "") + " — " + (data.state || "starting"), "info");
+        break;
+      case "step":
+        logAddStep(data);
+        countDedupe(data);
+        break;
+      case "log":
+        logAddLine(String(data.line != null ? data.line : ""), "info");
+        break;
+      case "result":
+        flowRunning = false;
+        setFlowRunning(false);
+        logAddResult(data);
+        applyStats(data.stats);
+        if (flowsHost && flowId) {
+          loadRuns(flowsHost, flowId);
+          loadArtifacts(flowsHost, flowId);    // the ledger grew — refresh it
+          // …and so did the run count in the left pane, which is otherwise only fetched
+          // when the view opens — it would sit at "0 runs" forever. Re-render keeps the
+          // selection (renderFlowList reads flowId) and touches neither editor nor log.
+          loadFlowList(flowsHost);
+        }
+        break;
+      case "error":
+        flowRunning = false;
+        setFlowRunning(false);
+        logAddLine("error: " + (data.status || "unknown") +
+          (data.detail ? " — " + data.detail : ""), "error");
+        break;
+      default:
+        break;
+    }
+  };
+}
+
+// --- run panel: inputs + the grant checkboxes --------------------------------
+function renderRunPanel(summary) {
+  const panel = flEl("flow-run-panel");
+  if (panel) panel.hidden = false;
+
+  const box = flEl("flow-inputs");
+  if (box) {
+    box.textContent = "";
+    const specs = flInputSpecs(summary ? summary.inputs : null);
+    if (specs.length === 0) {
+      box.appendChild(flEmpty("This flow takes no inputs."));
+    } else {
+      for (const spec of specs) box.appendChild(buildInputField(spec));
+    }
+  }
+
+  // A grant checkbox is DISABLED unless the flow DECLARES that capability: a write only
+  // happens when the flow declares it AND the caller grants it. Download is granted by
+  // default (it is the read-only, dedupe-friendly one); submit + upload never are.
+  const declared = flCapSet(summary ? summary.capabilities : null);
+  for (const cap of FLOW_CAPS) {
+    const cb = flEl(FLOW_CAP_IDS[cap]);
+    if (!cb) continue;
+    const allowed = declared.has(cap);
+    cb.disabled = !allowed;
+    cb.checked = allowed && cap === "allow_download";
+    const label = cb.closest("label");
+    if (label) {
+      label.classList.toggle("undeclared", !allowed);
+      label.title = allowed ? "" : "the flow does not declare this capability";
+    }
+  }
+  const dry = flEl("flow-dry-run");
+  if (dry) dry.checked = true;                 // safety: re-armed for every opened flow
+}
+
+function buildInputField(spec) {
+  const label = document.createElement("label");
+  label.className = "flow-input";
+
+  const name = document.createElement("span");
+  name.className = "flow-input-name";
+  name.textContent = spec.name + (spec.required ? " *" : "");   // server string
+  label.appendChild(name);
+
+  let field;
+  if (spec.type === "boolean") {
+    field = document.createElement("input");
+    field.type = "checkbox";
+    if (spec["default"] === true) field.checked = true;
+  } else if (spec["enum"] && spec["enum"].length) {
+    field = document.createElement("select");
+    for (const opt of spec["enum"]) {
+      const o = document.createElement("option");
+      o.value = String(opt);
+      o.textContent = String(opt);             // server string — textContent only
+      field.appendChild(o);
+    }
+    if (spec["default"] != null) field.value = String(spec["default"]);
+  } else {
+    field = document.createElement("input");
+    field.type = (spec.type === "number" || spec.type === "integer") ? "number" : "text";
+    if (spec["default"] != null) field.value = String(spec["default"]);
+    if (spec.description) field.placeholder = spec.description;   // server string, but a
+                                                                  // placeholder is inert text
+  }
+  field.dataset.inputName = spec.name;
+  field.dataset.inputType = spec.type;
+  label.appendChild(field);
+  return label;
+}
+
+// Collect the run inputs. An untouched optional text field is OMITTED rather than sent as
+// "" — the server would coerce an empty string into a real value and shadow the default.
+function collectInputs() {
+  const box = flEl("flow-inputs");
+  const values = {};
+  if (!box) return values;
+  for (const field of box.querySelectorAll("[data-input-name]")) {
+    const name = field.dataset.inputName;
+    const type = field.dataset.inputType;
+    if (type === "boolean") {
+      values[name] = !!field.checked;
+      continue;
+    }
+    const raw = field.value;
+    if (raw === "" || raw == null) continue;
+    if (type === "number" || type === "integer") {
+      const n = Number(raw);
+      if (!isNaN(n)) values[name] = n;
+    } else {
+      values[name] = raw;
+    }
+  }
+  return values;
+}
+
+function setFlowRunning(on) {
+  const run = flEl("flow-run");
+  const cancel = flEl("flow-cancel");
+  if (run) run.disabled = on;
+  if (cancel) cancel.hidden = !on;
+}
+
+function runFlow() {
+  if (!flowWs || flowWs.readyState !== WebSocket.OPEN) {
+    logAddLine("run socket is not connected.", "error");
+    return;
+  }
+  const grant = {};
+  for (const cap of FLOW_CAPS) {
+    const cb = flEl(FLOW_CAP_IDS[cap]);
+    grant[cap] = !!(cb && !cb.disabled && cb.checked);
+  }
+  const dry = flEl("flow-dry-run");
+  const dryRun = !!(dry && dry.checked);
+
+  const log = flEl("flow-log");
+  if (log) log.textContent = "";
+  flowNewCount = 0;
+  flowDupeCount = 0;
+  renderDedupe();
+  flowRunning = true;
+  setFlowRunning(true);
+
+  flowWs.send(JSON.stringify({
+    type: "run",
+    inputs: collectInputs(),
+    dry_run: dryRun,
+    grant,
+  }));
+}
+
+function cancelFlowRun() {
+  if (flowWs && flowWs.readyState === WebSocket.OPEN) {
+    flowWs.send(JSON.stringify({ type: "cancel" }));
+    logAddLine("cancelling…", "info");
+  }
+}
+
+// --- the run log (shared by the live stream AND the history replay) -----------
+function logAddLine(text, cls) {
+  const log = flEl("flow-log");
+  if (!log) return;
+  const div = document.createElement("div");
+  div.className = "flow-log-line" + (cls ? " flow-" + cls : "");
+  div.textContent = text;                      // server line — textContent only
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+// One line per `step` frame. The op-specific fields are the interesting part — a download
+// carries name/size/sha/via and a status of new|dupe, which is the dedupe signal itself.
+function logAddStep(step) {
+  const log = flEl("flow-log");
+  if (!log) return;
+  const op = step.op || "?";
+  const status = step.status || "";
+
+  const div = document.createElement("div");
+  div.className = "flow-log-line";
+
+  const st = document.createElement("span");
+  st.className = "flow-step-status st-" + String(status).replace(/[^a-z-]/gi, "");
+  st.textContent = status;                     // server status — textContent only
+  div.appendChild(st);
+
+  const opEl = document.createElement("span");
+  opEl.className = "flow-step-op";
+  opEl.textContent = op;                       // server op — textContent only
+  div.appendChild(opEl);
+
+  const detail = document.createElement("span");
+  detail.className = "flow-step-detail";
+  detail.textContent = stepDetail(step);       // server strings — textContent only
+  div.appendChild(detail);
+
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+// A compact, op-aware one-liner. Unknown ops fall back to the fields the VM always sets,
+// so a new op added server-side still logs something useful instead of a bare status.
+function stepDetail(step) {
+  const parts = [];
+  switch (step.op) {
+    case "download":
+      if (step.name) parts.push(String(step.name));
+      if (typeof step.size === "number") parts.push(flBytes(step.size));
+      if (step.via) parts.push("via " + String(step.via));
+      if (step.sha256) parts.push("sha " + String(step.sha256).slice(0, 12));
+      if (step.href && !step.name) parts.push(String(step.href));
+      break;
+    case "goto":
+      if (step.goal) parts.push("goal “" + String(step.goal) + "”");
+      if (step.target) parts.push("→ " + String(step.target));
+      if (typeof step.clicks === "number") parts.push(step.clicks + " clicks");
+      break;
+    case "for_each":
+      if (step.match) {
+        parts.push(typeof step.match === "string" ? step.match : JSON.stringify(step.match));
+      }
+      if (typeof step.found === "number") parts.push("found " + step.found);
+      break;
+    case "paginate":
+      if (typeof step.page === "number") {
+        parts.push("page " + step.page + (typeof step.pages === "number" ? "/" + step.pages : ""));
+      }
+      if (step.reason) parts.push(String(step.reason));
+      break;
+    default:
+      for (const key of ["label", "selector", "value", "var", "into", "message",
+                         "target", "url", "name", "count"]) {
+        if (step[key] != null && step[key] !== "") parts.push(String(step[key]));
+      }
+      break;
+  }
+  if (step.error) parts.push(String(step.error));
+  return parts.join("  ·  ");
+}
+
+function logAddResult(result) {
+  const status = result.status || "?";
+  const stats = result.stats || {};
+  const bits = ["run " + status];
+  if (typeof result.duration_s === "number") bits.push(result.duration_s.toFixed(1) + "s");
+  if (typeof stats.steps_executed === "number") bits.push(stats.steps_executed + " steps");
+  if (typeof stats.artifacts_new === "number") bits.push(stats.artifacts_new + " new");
+  if (typeof stats.artifacts_dupe === "number") bits.push(stats.artifacts_dupe + " dupe");
+  logAddLine("✓ " + bits.join(" · "), status === "ok" ? "ok" : "error");
+}
+
+// --- the dedupe counter (the differentiator, made visible DURING the run) -----
+function countDedupe(step) {
+  if (step.op !== "download") return;
+  if (step.status === "new") flowNewCount++;
+  else if (step.status === "dupe") flowDupeCount++;
+  else return;
+  renderDedupe();
+}
+
+function renderDedupe() {
+  const box = flEl("flow-dedupe");
+  if (!box) return;
+  box.textContent = "";
+  if (flowNewCount === 0 && flowDupeCount === 0) return;
+  const n = document.createElement("span");
+  n.className = "flow-dedupe-new";
+  n.textContent = flowNewCount + " new";
+  box.appendChild(n);
+  const sep = document.createElement("span");
+  sep.className = "flow-dedupe-sep";
+  sep.textContent = " · ";
+  box.appendChild(sep);
+  const d = document.createElement("span");
+  d.className = "flow-dedupe-dupe";
+  d.textContent = flowDupeCount + " dupe";
+  box.appendChild(d);
+}
+
+// The terminal `result` frame carries the authoritative counts — trust them over the
+// ones we accumulated from the stream (a frame could have been missed on reconnect).
+function applyStats(stats) {
+  if (!stats) return;
+  if (typeof stats.artifacts_new === "number") flowNewCount = stats.artifacts_new;
+  if (typeof stats.artifacts_dupe === "number") flowDupeCount = stats.artifacts_dupe;
+  renderDedupe();
+}
+
+// --- history: past runs, replayed read-only through the same log renderer -----
+async function loadRuns(host, id) {
+  const list = flEl("flow-runs");
+  if (!list) return;
+  let data;
+  try {
+    const res = await fetch(flowUrl(host, id) + "/runs");
+    data = await res.json();
+  } catch (err) {
+    if (flowsHost === host) {
+      list.textContent = "";
+      list.appendChild(flEmpty("Could not load run history."));
+    }
+    return;
+  }
+  if (flowsHost !== host || flowId !== id) return;
+  list.textContent = "";
+  const runs = (data && Array.isArray(data.runs)) ? data.runs : [];
+  if (runs.length === 0) {
+    list.appendChild(flEmpty("No runs yet."));
+    return;
+  }
+  for (const r of runs) list.appendChild(buildRunRow(host, id, r));
+}
+
+function buildRunRow(host, id, r) {
+  const li = document.createElement("li");
+  li.className = "flow-run-row";
+
+  const head = document.createElement("div");
+  head.className = "flow-run-head";
+  head.appendChild(flBadge(r.status || "?", r.status === "ok" ? "ok" : "warn"));
+  if (r.dry_run) head.appendChild(flBadge("dry run"));
+  const when = document.createElement("span");
+  when.className = "flow-run-when";
+  when.textContent = flWhen(r.started_at);
+  head.appendChild(when);
+  li.appendChild(head);
+
+  const stats = r.stats || {};
+  const line = document.createElement("div");
+  line.className = "flow-run-stats";
+  const bits = [];
+  if (typeof stats.steps_executed === "number") bits.push(stats.steps_executed + " steps");
+  if (typeof stats.artifacts_new === "number") bits.push(stats.artifacts_new + " new");
+  if (typeof stats.artifacts_dupe === "number") bits.push(stats.artifacts_dupe + " dupe");
+  line.textContent = bits.join("  ·  ");
+  li.appendChild(line);
+
+  li.addEventListener("click", () => replayRun(host, id, r.run_id));
+  return li;
+}
+
+// Load one stored run and replay its steps through logAddStep — the SAME renderer the
+// live stream uses, so a historical run reads exactly like a fresh one (read-only: no
+// socket is touched, and the Run button stays as it was).
+async function replayRun(host, id, runId) {
+  const log = flEl("flow-log");
+  if (!log || !runId) return;
+  log.textContent = "";
+  let record;
+  try {
+    const res = await fetch(flowUrl(host, id) + "/runs/" + encodeURIComponent(runId));
+    record = await res.json();
+  } catch (err) {
+    logAddLine("could not load that run.", "error");
+    return;
+  }
+  if (flowsHost !== host || flowId !== id) return;
+  flowNewCount = 0;
+  flowDupeCount = 0;
+  logAddLine("— replaying run " + runId + (record && record.dry_run ? " (dry run)" : "") +
+    " —", "info");
+  for (const step of (record && record.steps) || []) {
+    logAddStep(step);
+    countDedupe(step);
+  }
+  logAddResult(record || {});
+  applyStats(record && record.stats);
+}
+
+// --- artifacts: the flow's all-time ledger (dedupe ACROSS runs) ---------------
+async function loadArtifacts(host, id) {
+  const list = flEl("flow-artifacts");
+  const summary = flEl("flow-artifacts-summary");
+  if (!list) return;
+  let data;
+  try {
+    const res = await fetch(flowUrl(host, id) + "/artifacts");
+    data = await res.json();
+  } catch (err) {
+    if (flowsHost === host) {
+      list.textContent = "";
+      list.appendChild(flEmpty("Could not load artifacts."));
+    }
+    return;
+  }
+  if (flowsHost !== host || flowId !== id) return;
+
+  list.textContent = "";
+  const rows = (data && Array.isArray(data.artifacts)) ? data.artifacts : [];
+  const stats = (data && data.stats) || {};   // server nests the ledger stats under `stats`
+  if (summary) {
+    summary.textContent = rows.length
+      ? (stats.count != null ? stats.count : rows.length) + " files · " +
+        flBytes(stats.bytes || 0) + (stats.root ? "  ·  " + stats.root : "")
+      : "";
+  }
+  if (rows.length === 0) {
+    list.appendChild(flEmpty("No files downloaded yet — a run with “Allow download” fills this."));
+    return;
+  }
+  for (const a of rows) list.appendChild(buildArtifactRow(a));
+}
+
+function buildArtifactRow(a) {
+  const li = document.createElement("li");
+  li.className = "flow-artifact";
+
+  const name = document.createElement("span");
+  name.className = "flow-artifact-name";
+  name.textContent = a.name || "(file)";        // server string — textContent only
+  li.appendChild(name);
+
+  const size = document.createElement("span");
+  size.className = "flow-artifact-size";
+  size.textContent = flBytes(a.size);
+  li.appendChild(size);
+
+  const when = document.createElement("span");
+  when.className = "flow-artifact-when";
+  when.textContent = flWhen(a.seen_at);
+  li.appendChild(when);
+
+  const sha = document.createElement("span");
+  sha.className = "flow-artifact-sha";
+  sha.textContent = a.sha256 ? String(a.sha256).slice(0, 12) : "";
+  sha.title = a.sha256 ? String(a.sha256) : "";
+  li.appendChild(sha);
+
+  return li;
+}
+
+// --- wiring (flows.js loads exactly once, so top-level listeners are safe) ----
+(function wireFlows() {
+  const editor = flEl("flow-editor-text");
+  if (editor) editor.addEventListener("input", scheduleValidate);
+
+  const nw = flEl("flow-new");
+  if (nw) nw.addEventListener("click", newFlow);
+  const save = flEl("flow-save");
+  if (save) save.addEventListener("click", saveFlow);
+  const del = flEl("flow-delete");
+  if (del) del.addEventListener("click", deleteFlow);
+  const run = flEl("flow-run");
+  if (run) run.addEventListener("click", runFlow);
+  const cancel = flEl("flow-cancel");
+  if (cancel) cancel.addEventListener("click", cancelFlowRun);
+})();

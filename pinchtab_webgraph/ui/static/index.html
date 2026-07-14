@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="graph.css" />
   <link rel="stylesheet" href="explore.css" />
+  <link rel="stylesheet" href="flows.css" />
   <!-- Apply the saved theme BEFORE first paint so there's no light/dark flash.
        Falls through to the CSS prefers-color-scheme default when nothing is saved. -->
   <script>try{var t=localStorage.getItem("pwg-theme");if(t==="dark"||t==="light")document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
@@ -86,6 +87,7 @@
           <button type="button" id="tab-workspace" class="view-tab on">Workspace</button>
           <button type="button" id="tab-graph" class="view-tab">Graph</button>
           <button type="button" id="tab-explore" class="view-tab">Explore</button>
+          <button type="button" id="tab-flows" class="view-tab">Flows</button>
         </div>
       </div>
       <p class="placeholder muted" id="placeholder">
@@ -197,6 +199,81 @@
           <ul id="explore-content-list" class="explore-list"></ul>
         </div>
       </div>
+
+      <!-- FLOWS view: the host's saved automations. A flow is a declarative JSON
+           document run by a step VM against a real browser. Left: the flow list.
+           Right: a plain-<textarea> JSON editor with LIVE validation, a run panel
+           (inputs + the three capability grants + a dry-run switch), the streaming
+           run log with a live "N new · M dupe" counter, the run history, and the
+           flow's all-time artifact ledger. flows.js drives it (loaded eagerly, no
+           vendor deps) and owns ONLY the run socket. Every server string is rendered
+           via textContent; hrefs/paths are plain text, never a live <a href>.
+
+           SAFETY: dry-run is checked by default, submit/upload grants are not, and a
+           grant is DISABLED unless the flow itself declares that capability — a write
+           happens only if the flow DECLARES it and the caller GRANTS it. -->
+      <div class="flows-view" id="flows-view" hidden>
+        <div class="flows-body">
+          <aside class="flows-sidebar">
+            <div class="flows-sidebar-head">
+              <h2>Flows</h2>
+              <button type="button" id="flow-new" class="flow-new-btn">+ New flow</button>
+            </div>
+            <ul id="flow-list" class="flow-list"></ul>
+          </aside>
+
+          <section class="flows-main">
+            <div class="flows-toolbar">
+              <span id="flows-status" class="muted"></span>
+            </div>
+
+            <!-- JSON editor + the live validation banner (JSON.parse locally, then
+                 POST /api/flows/validate — debounced, so it feels instant) -->
+            <textarea id="flow-editor-text" spellcheck="false" autocomplete="off"
+                      aria-label="Flow document (JSON)"
+                      placeholder="Pick a flow on the left, or “+ New flow” to write one."></textarea>
+            <div id="flow-validation" class="flow-validation"></div>
+            <div class="flow-editor-actions">
+              <button type="button" id="flow-save" disabled>Save flow</button>
+              <button type="button" id="flow-delete" class="flow-delete-btn" hidden>Delete</button>
+              <span id="flow-save-msg" class="muted"></span>
+            </div>
+
+            <!-- run panel: built from the run socket's `flow` bootstrap frame -->
+            <div class="flow-run" id="flow-run-panel" hidden>
+              <h3>Run</h3>
+              <div id="flow-inputs" class="flow-inputs"></div>
+              <div class="flow-grants" id="flow-grants">
+                <label><input type="checkbox" id="flow-cap-submit" /> Allow submit</label>
+                <label><input type="checkbox" id="flow-cap-upload" /> Allow upload</label>
+                <label><input type="checkbox" id="flow-cap-download" /> Allow download</label>
+              </div>
+              <label class="flow-dry">
+                <input type="checkbox" id="flow-dry-run" checked /> Dry run (no writes)
+              </label>
+              <div class="flow-run-actions">
+                <button type="button" id="flow-run">Run flow</button>
+                <button type="button" id="flow-cancel" class="flow-cancel-btn" hidden>Cancel</button>
+                <span id="flow-dedupe" class="flow-dedupe"></span>
+              </div>
+              <div id="flow-log" class="flow-log" aria-live="polite"></div>
+            </div>
+
+            <!-- history (click a run to replay it read-only) + the all-time ledger -->
+            <div class="flow-results" id="flow-results" hidden>
+              <div class="flow-results-col">
+                <h3>History</h3>
+                <ul id="flow-runs" class="flow-runs"></ul>
+              </div>
+              <div class="flow-results-col">
+                <h3>Artifacts</h3>
+                <p id="flow-artifacts-summary" class="muted"></p>
+                <ul id="flow-artifacts" class="flow-artifacts"></ul>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
     </main>
   </div>
 
@@ -278,5 +355,6 @@
 
   <script src="app.js"></script>
   <script src="explore.js"></script>
+  <script src="flows.js"></script>
 </body>
 </html>

@@ -298,3 +298,60 @@ def test_no_op_is_a_usage_error(monkeypatch, capsys):
 def test_flow_is_registered_in_the_cli():
     from pinchtab_webgraph import cli
     assert cli.SUBS["flow"][0] == "pinchtab_webgraph.flow_cmd"
+
+
+# --- --jsonl (the streaming wire format the web UI consumes) -------------------
+
+def _jsonl(out):
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+def test_jsonl_emits_one_step_per_event_then_exactly_one_result(monkeypatch, capsys,
+                                                                tmp_path):
+    doc = {"name": "streamer",
+           "steps": [{"op": "log", "message": "one"}, {"op": "log", "message": "two"}]}
+    code, _p, out, _err = _cli(monkeypatch, capsys,
+                               ["run", _write(tmp_path, doc), "--jsonl", "--dry-run"])
+    assert code == 0
+    frames = _jsonl(out)
+    assert all(f["type"] in ("step", "result") for f in frames)
+    steps = [f for f in frames if f["type"] == "step"]
+    results = [f for f in frames if f["type"] == "result"]
+    assert len(results) == 1                     # EXACTLY ONE terminal frame…
+    assert frames[-1]["type"] == "result"        # …and it is LAST
+    assert any(s.get("message") == "two" for s in steps)
+    assert results[0]["status"] == "ok" and results[0]["dry_run"] is True
+    assert "steps" in results[0] and "stats" in results[0]
+    # the human banner must never corrupt the machine-readable stream.
+    assert "=== FLOW" not in out
+
+
+def test_jsonl_suppresses_the_human_banner_and_summary(monkeypatch, capsys, tmp_path):
+    doc = {"name": "quiet", "steps": [{"op": "log", "message": "x"}]}
+    _code, _p, out, _err = _cli(monkeypatch, capsys,
+                                ["run", _write(tmp_path, doc), "--jsonl", "--dry-run"])
+    assert "--- ok:" not in out and "=== FLOW" not in out
+    for line in out.splitlines():
+        if line.strip():
+            json.loads(line)                     # EVERY line is a JSON object
+
+
+def test_jsonl_rejection_is_still_the_one_terminal_result_frame(monkeypatch, capsys,
+                                                                tmp_path):
+    # A doc that fails validation still produces exactly one `result` line, so a supervising
+    # process never has to special-case "it died before it started".
+    bad = _write(tmp_path, {"name": "x", "steps": []})
+    code, _p, out, _err = _cli(monkeypatch, capsys, ["run", bad, "--jsonl", "--dry-run"])
+    assert code == 1
+    frames = _jsonl(out)
+    assert len(frames) == 1
+    assert frames[0]["type"] == "result" and frames[0]["status"] == "invalid"
+
+
+def test_human_and_json_modes_are_unchanged(monkeypatch, capsys, tmp_path):
+    doc = {"name": "plain", "steps": [{"op": "log", "message": "x"}]}
+    path = _write(tmp_path, doc)
+    _code, _p, out, _err = _cli(monkeypatch, capsys, ["run", path, "--dry-run"])
+    assert "=== FLOW: PLAIN ===" in out                 # the banner still prints
+    _code, parsed, _out, _err = _cli(monkeypatch, capsys, ["run", path, "--dry-run", "--json"])
+    assert parsed["status"] == "ok" and "type" not in parsed   # --json is NOT wrapped

@@ -115,6 +115,10 @@ def _build_parser():
     p.add_argument("--config", default=os.environ.get("PINCHTAB_CONFIG", "crawl-config.json"),
                    help="crawl-config.json — read the bridge token from it")
     p.add_argument("--json", action="store_true", help="emit the full run record as JSON")
+    p.add_argument("--jsonl", action="store_true",
+                   help="STREAM the run as JSON Lines: one {\"type\":\"step\",…} object per "
+                        "emitted event, then exactly one {\"type\":\"result\",…}. For a "
+                        "supervising process (the web UI) that wants progress as it happens.")
     return ap
 
 
@@ -151,16 +155,35 @@ def _op_schema(a):
     return 0
 
 
+# --- streaming (--jsonl) -------------------------------------------------------
+#
+# One JSON object per line, flushed EVERY line. The flush is mandatory, not hygiene: stdout
+# to a PIPE is block-buffered, so without it a supervising process (the web UI) would see
+# nothing at all for the whole run and then a single burst at exit — which is precisely the
+# opposite of streaming, and would make a 10-minute paginate loop look like a hang.
+
+def _emit_jsonl(frame):
+    print(json.dumps(frame), flush=True)
+
+
+def _reject(a, path, error):
+    """The ONE rejection printer. In --jsonl mode a rejection is still the run's single
+    terminal `result` frame, so a supervisor never has to special-case "it died before it
+    started" — it reads exactly one result line either way. Exit code is unchanged (1)."""
+    if a.jsonl:
+        _emit_jsonl({"type": "result", "status": "invalid", "path": path, "error": error})
+    else:
+        print(json.dumps({"status": "invalid", "path": path, "error": error}, indent=2))
+    return 1
+
+
 def _op_run(a):
     try:
         doc = flow_mod.load(a.path)
     except flow_mod.FlowError as exc:
-        print(json.dumps({"status": "invalid", "path": exc.path, "error": exc.message},
-                         indent=2))
-        return 1
+        return _reject(a, exc.path, exc.message)
     except OSError as exc:
-        print(json.dumps({"status": "invalid", "path": a.path, "error": str(exc)}, indent=2))
-        return 1
+        return _reject(a, a.path, str(exc))
 
     graph_path, err = _resolve_graph(a)
     if err:
@@ -170,9 +193,7 @@ def _op_run(a):
     try:
         inputs = flow_mod.bind_inputs(doc, perform._parse_set(a.input))
     except flow_mod.FlowError as exc:
-        print(json.dumps({"status": "invalid", "path": exc.path, "error": exc.message},
-                         indent=2))
-        return 1
+        return _reject(a, exc.path, exc.message)
 
     # The CALLER's grant. The runner ANDs it with what the flow declares — either side vetoes.
     grant = {"allow_submit": a.allow_submit, "allow_upload": a.allow_upload,
@@ -194,15 +215,24 @@ def _op_run(a):
             print(str(exc), file=sys.stderr)
             return 2
 
-    emit = None if a.json else (lambda ev: print(_describe(ev)))
-    if not a.json:
+    if a.jsonl:
+        emit = lambda ev: _emit_jsonl({"type": "step", **ev})  # noqa: E731
+    elif a.json:
+        emit = None
+    else:
+        emit = lambda ev: print(_describe(ev))                 # noqa: E731
+    # the human banner would corrupt both machine-readable modes.
+    if not a.json and not a.jsonl:
         print("=== FLOW: %s ===  (%s)"
               % (doc["name"].upper(), "WOULD run" if a.dry_run else "live"))
 
     result = runner.execute(doc, browser=live, graph_path=graph_path, store=store,
                             inputs=inputs, emit=emit, dry_run=a.dry_run, grant=grant)
 
-    if a.json:
+    if a.jsonl:
+        # EXACTLY ONE terminal frame, flushed — the supervisor's cue that the run is over.
+        _emit_jsonl({"type": "result", **result})
+    elif a.json:
         print(json.dumps(result, indent=2))
     else:
         stats = result["stats"]

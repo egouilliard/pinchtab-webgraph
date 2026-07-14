@@ -201,13 +201,24 @@
       </div>
 
       <!-- FLOWS view: the host's saved automations. A flow is a declarative JSON
-           document run by a step VM against a real browser. Left: the flow list.
-           Right: a plain-<textarea> JSON editor with LIVE validation, a run panel
-           (inputs + the three capability grants + a dry-run switch), the streaming
-           run log with a live "N new · M dupe" counter, the run history, and the
-           flow's all-time artifact ledger. flows.js drives it (loaded eagerly, no
-           vendor deps) and owns ONLY the run socket. Every server string is rendered
-           via textContent; hrefs/paths are plain text, never a live <a href>.
+           document run by a step VM against a real browser.
+
+           ONE flow doc, THREE synchronized views of it — because authoring a flow should
+           be a CONVERSATION you can see:
+             * the CHAT pane (left)   — an agent edits the doc live (`mode=flow`),
+             * the CANVAS (middle)    — a vertical flow diagram whose containers visibly
+                                        WRAP their child steps; editable,
+             * the JSON pane (right)  — the raw document; editable.
+           Any one of them mutates the doc; the other two re-render and the whole thing is
+           re-validated (flows.js `setDoc`). An invalid verdict carries a path in flow.py's
+           grammar, which is exactly a canvas box's `data-path` — so the bad box lights up.
+
+           Below the workbench: the run panel (inputs + the three capability grants + a
+           dry-run switch), the streaming run log with its live "N new · M dupe" counter,
+           the run history, and the flow's all-time artifact ledger. flows.js drives it all
+           (loaded eagerly, no vendor deps; flow_canvas.js first) and owns ONLY the run
+           socket. Every server/model string is rendered via textContent; hrefs/paths are
+           plain text, never a live <a href>.
 
            SAFETY: dry-run is checked by default, submit/upload grants are not, and a
            grant is DISABLED unless the flow itself declares that capability — a write
@@ -227,11 +238,49 @@
               <span id="flows-status" class="muted"></span>
             </div>
 
-            <!-- JSON editor + the live validation banner (JSON.parse locally, then
-                 POST /api/flows/validate — debounced, so it feels instant) -->
-            <textarea id="flow-editor-text" spellcheck="false" autocomplete="off"
-                      aria-label="Flow document (JSON)"
-                      placeholder="Pick a flow on the left, or “+ New flow” to write one."></textarea>
+            <!-- the workbench: chat | canvas | JSON. All three edit the SAME doc. -->
+            <div class="flow-workbench">
+
+              <!-- the flow-authoring chat: the SAME pane component as the Workspace tab
+                   (createChatPane in app.js), mounted with mode=flow. -->
+              <section class="flow-col flow-chat-col">
+                <div class="flow-col-head">
+                  <h3>Agent</h3>
+                  <span class="pane-status muted" id="flow-chat-status">pick a host to start.</span>
+                </div>
+                <div id="flow-chat-sessions" class="chat-sessions" hidden>
+                  <button type="button" id="flow-chat-session-new" class="chat-session-new">+ New</button>
+                  <div id="flow-chat-session-list" class="chat-session-list" role="tablist"></div>
+                </div>
+                <div id="flow-chat-log" class="chat-log flow-chat-log" aria-live="polite"></div>
+                <form id="flow-chat-form" class="chat-form" autocomplete="off">
+                  <input id="flow-chat-input" type="text"
+                         placeholder="download every invoice from this month" disabled />
+                  <button type="submit" disabled>Send</button>
+                </form>
+              </section>
+
+              <!-- the visual canvas: rendered + mutated by flow_canvas.js -->
+              <section class="flow-col flow-canvas-col">
+                <div class="flow-col-head">
+                  <h3>Canvas</h3>
+                  <span class="muted flow-col-hint">click a box to edit it</span>
+                </div>
+                <div id="flow-canvas" class="flow-canvas"></div>
+              </section>
+
+              <!-- the raw document: a plain <textarea>, LIVE-validated (JSON.parse
+                   locally, then POST /api/flows/validate — debounced, so it feels instant) -->
+              <section class="flow-col flow-json-col">
+                <div class="flow-col-head">
+                  <h3>JSON</h3>
+                </div>
+                <textarea id="flow-editor-text" spellcheck="false" autocomplete="off"
+                          aria-label="Flow document (JSON)"
+                          placeholder="Pick a flow on the left, or “+ New flow” to write one."></textarea>
+              </section>
+            </div>
+
             <div id="flow-validation" class="flow-validation"></div>
             <div class="flow-editor-actions">
               <button type="button" id="flow-save" disabled>Save flow</button>
@@ -355,6 +404,9 @@
 
   <script src="app.js"></script>
   <script src="explore.js"></script>
+  <!-- flow_canvas.js is pure DOM + path logic (no network, no vendor deps) and must be
+       parsed BEFORE flows.js, which calls renderCanvasFromDoc/highlightPath from it. -->
+  <script src="flow_canvas.js"></script>
   <script src="flows.js"></script>
 </body>
 </html>

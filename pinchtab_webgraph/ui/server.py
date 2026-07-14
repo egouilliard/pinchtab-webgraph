@@ -28,8 +28,10 @@ from fastapi import Body, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import api, artifacts, cache_store, flow as flow_mod, __version__
-from . import chat_backend, chat_store, flow_runner, flow_store, live_crawl, screencast, vault
+from .. import (api, artifacts, cache_store, flow as flow_mod,
+                flow_resolve, __version__)
+from . import (chat, chat_backend, chat_store, flow_runner, flow_store, live_crawl,
+               screencast, vault)
 
 app = FastAPI(title="pinchtab-webgraph UI", version=__version__)
 
@@ -295,11 +297,20 @@ def _guard_session(host, session_id):
 
 
 @app.get("/api/hosts/{host}/sessions")
-def host_sessions(host: str):
+def host_sessions(host: str, mode: str | None = Query(None)):
+    """Every session for a host, optionally filtered to one ``mode`` — so the Chat tab
+    lists workspace chats and the Flows tab lists flow chats from the same store."""
     err = _resolve_host_token(host)
     if err is not None:
         return _respond(err)
-    return {"sessions": chat_store.list_sessions(host)}
+    return {"sessions": chat_store.list_sessions(host, mode=mode)}
+
+
+def _mode(value):
+    """Normalize a caller-supplied chat mode. Anything unknown FAILS CLOSED to the
+    read-only "workspace" mode — an unrecognized token must never be the one that grants
+    a tool (chat.effective_tool_names fails closed the same way)."""
+    return value if value in chat.MODES else "workspace"
 
 
 @app.post("/api/hosts/{host}/sessions")
@@ -309,6 +320,7 @@ def create_host_session(host: str, payload: dict | None = Body(default=None)):
         return _respond(err)
     try:
         record = chat_store.create(host, backend=chat_backend.resolve_backend_name(),
+                                   mode=_mode((payload or {}).get("mode")),
                                    title=(payload or {}).get("title"))
     except chat_store.TooManySessions:
         return _respond({"status": "too_many_sessions",
@@ -362,7 +374,11 @@ def delete_host_session(host: str, session_id: str):
 
 @app.websocket("/ws/chat")
 async def chat_ws(websocket: WebSocket, host: str = Query(...),
-                  session: str | None = Query(None)):
+                  session: str | None = Query(None),
+                  mode: str | None = Query(None)):
+    """``mode`` ("workspace" | "flow") applies to a NEW session only. A RESUMED session
+    ignores it entirely — the mode comes from the record, exactly as the backend does, so
+    a workspace chat can never be re-opened with the flow tool attached."""
     await websocket.accept()
     try:
         cache_store.validate_host(host)
@@ -390,10 +406,15 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...),
     else:
         record = None
     try:
-        async with chat_backend.open_chat_session(host, record=record) as session_obj:
+        # A resumed session passes mode=None: open_chat_session then reads the record's
+        # own mode. Only a brand-new session takes the query param.
+        async with chat_backend.open_chat_session(
+                host, mode=(_mode(mode) if record is None else None),
+                record=record) as session_obj:
             # Bootstrap FIRST: the SPA replays this frame's transcript to restore the log
-            # (a brand-new chat carries an empty transcript). Carries the summary so the
-            # client learns the session id it is now bound to.
+            # (a brand-new chat carries an empty transcript). Carries the summary — which
+            # includes the session's pinned `mode` — so the client learns the session id it
+            # is now bound to and which UI it should render.
             await websocket.send_json({
                 "type": "session", **chat_store.summary(session_obj.record),
                 "transcript": session_obj.record.get("transcript", [])})
@@ -406,6 +427,7 @@ async def chat_ws(websocket: WebSocket, host: str = Query(...),
                     continue
                 await session_obj.handle(msg.get("text", ""),
                                          live_url=msg.get("live_url"),
+                                         draft=msg.get("draft"),
                                          emit=websocket.send_json)
     except chat_backend.ChatUnavailable as e:
         await websocket.send_json({"type": "error", "status": "chat_unavailable",
@@ -678,22 +700,66 @@ def _guard_run(host, flow_id, run_id):
 def _validated(doc):
     """flow.validate a caller-supplied document -> (ok_dict, None) | (None, invalid_dict).
 
-    The ok shape mirrors `flow_cmd validate`'s printed JSON exactly, so the CLI and the HTTP
-    surface answer the same question with the same words."""
+    A thin (ok, err) SPLIT of flow.validate_report — which owns the verdict shape, so the
+    CLI, this HTTP surface and the chat agent's `propose_flow` tool all answer the same
+    question with the same words. The tuple form is kept because every caller here branches
+    on it.
+
+    Plus the ONE thing flow.validate_report structurally cannot know: whether the document's
+    `goal`s RESOLVE against the host's crawled graph (flow_resolve). That check needs a graph
+    off disk, which is why it lives here and not in the pure validator — but it is exactly the
+    error the authoring loop most needs, so the HTTP surface (which the editor calls on every
+    keystroke) is where it has to land."""
+    report = flow_mod.validate_report(doc)
+    if report["status"] != "ok":
+        return None, report
+    return dict(report, warnings=_resolvability_warnings(doc)), None
+
+
+def _resolvability_warnings(doc):
+    """Never let the resolvability check fail a request: it is ADVISORY. A missing/stale/
+    corrupt cache yields no warnings, not a 500 — the document is still perfectly savable."""
     try:
-        flow_mod.validate(doc)
-    except flow_mod.FlowError as e:
-        return None, {"status": "invalid", "path": e.path, "error": e.message}
-    except (TypeError, AttributeError) as e:      # a non-object body (a list, a string, …)
-        return None, {"status": "invalid", "path": "", "error": str(e)}
-    return {"status": "ok", "name": doc["name"], "host": doc.get("host"),
-            "steps": len(doc["steps"]), "capabilities": flow_mod.capabilities(doc),
-            "inputs": sorted(doc.get("inputs") or {})}, None
+        return flow_resolve.warnings_for_doc(doc)
+    except Exception:                    # noqa: BLE001 — advisory only; see the docstring
+        return []
+
+
+@app.get("/api/flows/op_schema")
+def flows_op_schema():
+    """Stateless — the flow VOCABULARY itself, straight from flow.py's tables.
+
+    The ONLY serialization of the op set anywhere: the canvas derives its edit forms from
+    this (which keys an op takes, which are exclusive, which capability a write needs), so
+    the editor cannot fall out of step with the validator. Nothing here is hand-listed —
+    add an op to flow.LEAF_OPS and it appears in the UI.
+    """
+    return {
+        "leaf_ops": {op: {k: list(v) for k, v in spec.items()}
+                     for op, spec in flow_mod.LEAF_OPS.items()},
+        "body_ops": {op: {k: list(v) for k, v in spec.items()}
+                     for op, spec in flow_mod.BODY_OPS.items()},
+        "capabilities": dict(flow_mod.DEFAULT_CAPABILITIES),
+        "write_ops": sorted(flow_mod.WRITE_OPS),
+        "body_vars": {op: sorted(v) for op, v in flow_mod.BODY_VARS.items()},
+        "max_depth": flow_mod.MAX_DEPTH,
+        "max_steps": flow_mod.MAX_STEPS,
+    }
 
 
 @app.post("/api/flows/validate")
 def flows_validate(doc: dict = Body(...)):
-    """Stateless — no host, nothing stored. The editor's "is this document legal?" check."""
+    """The editor's "is this document legal?" check — nothing is stored, no browser is leased.
+
+    Two verdicts in one answer, and the difference matters:
+      * `status` — STRUCTURAL. invalid = the document is wrong; Save is blocked.
+      * `warnings` — RESOLVABILITY. The doc is fine, but a `goal` doesn't match anything in
+        the host's crawled graph, so the run WILL abort on that step. Advisory: `status` stays
+        "ok" and the flow stays savable (the graph may simply be older than the flow), but the
+        user must SEE it here rather than discover it mid-run. Each warning carries the step's
+        `path` in flow.py's grammar, so the canvas lights up the exact box, plus the candidate
+        labels the site really has.
+    """
     ok, err = _validated(doc)
     return _respond(err if err is not None else ok)
 
@@ -727,7 +793,10 @@ def create_host_flow(host: str, doc: dict = Body(...)):
         return _respond({"status": "invalid", "path": e.path, "error": e.message})
     except flow_store.TooManyFlows:
         return _respond({"status": "too_many_flows", "max": flow_store.MAX_FLOWS_PER_HOST})
-    return _respond({"status": "ok", **flow_store.summary(record)})
+    # SAVED, and still `ok` — a resolvability warning is advisory, never a blocker (the flow
+    # may be authored before the crawl). It rides along so the editor can say so.
+    return _respond({"status": "ok", **flow_store.summary(record),
+                     "warnings": _resolvability_warnings(doc)})
 
 
 @app.get("/api/hosts/{host}/flows/{flow_id}")
@@ -752,7 +821,8 @@ def update_host_flow(host: str, flow_id: str, doc: dict = Body(...)):
         return _respond({"status": "invalid", "path": e.path, "error": e.message})
     if record is None:
         return _respond({"status": "flow_not_found", "flow": flow_id})
-    return _respond({"status": "ok", **flow_store.summary(record)})
+    return _respond({"status": "ok", **flow_store.summary(record),
+                     "warnings": _resolvability_warnings(doc)})
 
 
 @app.delete("/api/hosts/{host}/flows/{flow_id}")

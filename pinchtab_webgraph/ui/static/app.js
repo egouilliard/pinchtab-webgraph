@@ -44,16 +44,18 @@ const cmdkInputEl = el("cmdk-input");
 const cmdkResultsEl = el("cmdk-results");
 const themeToggleEl = el("theme-toggle");
 
-const chatLogEl = el("chat-log");
-const chatStatusEl = el("chat-status");
-const chatFormEl = el("chat-form");
-const chatInputEl = el("chat-input");
-const chatSendEl = chatFormEl ? chatFormEl.querySelector("button") : null;
-
-// per-host chat sessions (chips + "+ New")
-const chatSessionsEl = el("chat-sessions");
-const chatSessionNewEl = el("chat-session-new");
-const chatSessionListEl = el("chat-session-list");
+// The Workspace chat pane's element ids. The pane itself is built by createChatPane()
+// below — the SAME factory the Flows tab mounts a second time with its own ids — so the
+// handles live in a config object rather than in a dozen module globals.
+const WORKSPACE_CHAT_IDS = {
+  log: "chat-log",
+  status: "chat-status",
+  form: "chat-form",
+  input: "chat-input",
+  sessions: "chat-sessions",
+  sessionList: "chat-session-list",
+  sessionNew: "chat-session-new",
+};
 
 const liveViewEl = el("live-view");
 const liveStatusEl = el("live-status");
@@ -92,17 +94,13 @@ const crawlMaxDepthEl = el("crawl-max-depth");
 const crawlProgressEl = el("crawl-progress");
 
 // --- shared socket / selection state -----------------------------------------
-let chatWs = null;
 let liveWs = null;
 let crawlWs = null;              // the live-crawl progress socket (one at a time)
 let selectedHost = null;
-let chatSessions = [];           // the selected host's session summaries (updated_at desc)
-let activeSessionId = null;      // the session id the chat socket is currently bound to
 let currentView = "workspace";   // "workspace" | "graph" — flips ONLY the `hidden` panes
 let vendorPromise = null;        // memoized sequential load of the Cytoscape libs + graph.js
 let selectedGraphKind = null;    // the selected host's graph_kind, for the Graph view
 let currentLiveUrl = null; // the live pane's current page, tracked from `location` frames
-let currentBubble = null; // the assistant bubble currently streaming
 
 // --- guided-tour ("Show me How") state ---------------------------------------
 let lastTour = null;            // most recent tour payload from the chat socket
@@ -166,11 +164,16 @@ const EXPLORE_VIEW_IDS = ["explore-tab-search", "explore-search-input",
   "explore-content-list"];
 
 // The Flows view's DOM lives in index.html and is DRIVEN by flows.js (loaded eagerly after
-// explore.js). Same discipline as GRAPH_VIEW_IDS / EXPLORE_VIEW_IDS.
+// explore.js, with flow_canvas.js before it). Same discipline as GRAPH_VIEW_IDS /
+// EXPLORE_VIEW_IDS. The three synchronized views of the ONE flow doc are all listed here:
+// the chat pane (flow-chat-*), the visual canvas (flow-canvas) and the JSON textarea.
 const FLOWS_VIEW_IDS = ["flow-list", "flow-new", "flow-editor-text", "flow-validation",
   "flow-save", "flow-run-panel", "flow-inputs", "flow-cap-submit", "flow-cap-upload",
   "flow-cap-download", "flow-dry-run", "flow-run", "flow-cancel", "flow-dedupe",
-  "flow-log", "flow-runs", "flow-artifacts"];
+  "flow-log", "flow-runs", "flow-artifacts",
+  "flow-canvas",
+  "flow-chat-log", "flow-chat-form", "flow-chat-input", "flow-chat-sessions",
+  "flow-chat-session-new", "flow-chat-session-list", "flow-chat-status"];
 
 // Four-way view switcher: Workspace (chat + live) | Graph (Cytoscape) | Explore (a
 // read-only browser over the cache) | Flows (the host's saved automations). Toggling ONLY
@@ -238,14 +241,6 @@ async function ensureGraphView() {
         (err && err.message ? err.message : "unknown error");
     }
   }
-}
-
-// graph.js keeps chat-input ownership here (app.js): its "Ask in chat" button calls
-// this to prefill the chat box without reaching into the chat socket itself.
-function prefillChat(text) {
-  if (!chatInputEl) return;
-  chatInputEl.value = text;
-  chatInputEl.focus();
 }
 
 // --- sidebar: list of crawled graphs -----------------------------------------
@@ -316,9 +311,6 @@ function buildHostRow(h) {
 async function selectHost(h) {
   const host = h.host;
   selectedHost = host;
-  // a host switch drops the prior host's session set — loadChatSessions repopulates it.
-  chatSessions = [];
-  activeSessionId = null;
 
   // A host switch always returns to the Workspace view and tears down any prior
   // graph render (destroyGraphView is defined in the lazily-loaded graph.js, so it may
@@ -360,9 +352,9 @@ async function selectHost(h) {
     }
   } catch (err) { /* keep the index summary */ }
 
-  // loadChatSessions lists (or mints) this host's chats, renders the chips, and opens
-  // the most-recent one on the chat socket (openChat owns the socket lifecycle).
-  await loadChatSessions(host);
+  // The chat pane lists (or mints) this host's chats, renders the chips, and opens the
+  // most-recent one — it owns its own socket lifecycle end to end.
+  await workspaceChat.selectHost(host);
   openLiveView(host);
 }
 
@@ -381,19 +373,15 @@ function renderHostHeader(host, summary, error) {
 }
 
 // --- chat pane ---------------------------------------------------------------
-function chatSetEnabled(on) {
-  if (chatInputEl) chatInputEl.disabled = !on;
-  if (chatSendEl) chatSendEl.disabled = !on;
-}
-
-function chatAddLine(cls, text) {
-  const div = document.createElement("div");
-  div.className = "msg " + cls;
-  div.textContent = text;
-  chatLogEl.appendChild(div);
-  chatLogEl.scrollTop = chatLogEl.scrollHeight;
-  return div;
-}
+// ONE implementation, TWO mounts (createChatPane, below). The Workspace tab mounts the
+// general host chat; the Flows tab mounts the SAME pane with `mode=flow`, which ships the
+// live flow doc as `draft` on every message and feeds `flow_draft` frames back into the
+// flow editor. A second copy of this code would drift the first time the frame protocol
+// moves — so there is exactly one.
+//
+// The renderers below (escapeHtml / renderMarkdown / mountMarkdown) are shared by both
+// mounts: chat content is LLM-echoed crawled-site text, i.e. untrusted, so it is escaped
+// BEFORE any markup is produced.
 
 function escapeHtml(s) {
   // Escape quotes too, not just <>&: the markdown renderer injects text into an
@@ -460,108 +448,515 @@ function renderMarkdown(raw) {
   return out.join("");
 }
 
-// Close the streaming assistant bubble, rendering its accumulated raw text as markdown.
-function finalizeBubble() {
-  if (currentBubble && currentBubble._md) {
-    currentBubble.innerHTML = renderMarkdown(currentBubble._md);
-    chatLogEl.scrollTop = chatLogEl.scrollHeight;
-  }
-  currentBubble = null;
+// The ONE place markup is mounted from text. renderMarkdown() escaped the raw string
+// first, so the only tags in `html` are the fixed set it injects — no model/server text
+// can inject HTML here. Everything else in this app is createElement + textContent.
+function mountMarkdown(node, raw) {
+  node.innerHTML = renderMarkdown(raw);
 }
 
-function openChat(host, sessionId) {
-  endTour();                         // drop any active tour on host switch
-  if (chatWs) {
-    try { chatWs.close(); } catch (e) { /* ignore */ }
-    chatWs = null;
+// The chat pane factory. Owns ONE chat socket + ONE session chip bar, both scoped to the
+// ids it is given, so two panes can live in the same page without touching each other.
+//
+// opts:
+//   ids        {log, status, form, input, sessions, sessionList, sessionNew}
+//   mode       null | "flow"  — appended to the sessions API and the chat socket, so the
+//              Flows tab lists ONLY flow chats and gets the flow-authoring agent.
+//   readyText  the status line shown once the socket is open.
+//   extra()    merged into every outgoing user_message (Workspace: the live browser URL).
+//   getDraft() the CURRENT flow doc, sent as `draft` on every user_message — always the
+//              live one, never the agent's stale copy (the human may have edited the
+//              canvas between turns).
+//   onFlowDraft(frame, pane, meta)  a `flow_draft` frame arrived (Flows). `meta.live` says
+//              WHERE it came from: true = the agent produced it during the CURRENT turn;
+//              false = it is a replayed transcript entry, i.e. HISTORY. Only a live draft
+//              may touch the editor — a replayed one is rendered, never applied (a stored
+//              draft landing after a socket bootstrap would otherwise silently overwrite
+//              the flow the user just clicked).
+//   onTour(tour, pane)        a `tour` payload arrived (Workspace).
+//   onOpen()                  called before a socket is (re)opened.
+function createChatPane(opts) {
+  const ids = (opts && opts.ids) || {};
+  const logEl = el(ids.log);
+  const statusEl = el(ids.status);
+  const formEl = el(ids.form);
+  const inputEl = el(ids.input);
+  const sessionsEl = el(ids.sessions);
+  const sessionListEl = el(ids.sessionList);
+  const sessionNewEl = el(ids.sessionNew);
+  const sendEl = formEl ? formEl.querySelector("button") : null;
+  const mode = (opts && opts.mode) || null;
+  const readyText = (opts && opts.readyText) || "ready.";
+
+  const pane = {
+    host: null,             // the host this pane is bound to
+    ws: null,               // its chat socket
+    sessions: [],           // the host's session summaries (updated_at desc)
+    activeSessionId: null,  // the session the socket is bound to
+    bubble: null,           // the assistant bubble currently streaming
+  };
+
+  function setEnabled(on) {
+    if (inputEl) inputEl.disabled = !on;
+    if (sendEl) sendEl.disabled = !on;
   }
-  currentBubble = null;
-  chatLogEl.textContent = "";
-  chatSetEnabled(false);
-  chatStatusEl.textContent = "connecting…";
-
-  // The session id (when known) binds the socket to a persisted chat so its transcript
-  // is restored via the leading `session` frame; without it the server mints a new chat.
-  let q = "/ws/chat?host=" + encodeURIComponent(host);
-  if (sessionId) q += "&session=" + encodeURIComponent(sessionId);
-  const ws = new WebSocket(wsUrl(q));
-  chatWs = ws;
-
-  ws.onopen = () => {
-    if (chatWs !== ws) return;
-    chatStatusEl.textContent = "ready — ask where to go.";
-    chatSetEnabled(true);
-  };
-  ws.onclose = () => {
-    if (chatWs === ws) {
-      chatStatusEl.textContent = "chat closed.";
-      chatSetEnabled(false);
+  function setStatus(text) {
+    if (statusEl) statusEl.textContent = text;   // fixed UI copy / server reason string
+  }
+  function addLine(cls, text) {
+    if (!logEl) return null;
+    const div = document.createElement("div");
+    div.className = "msg " + cls;
+    div.textContent = text;                      // server string — textContent only
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+    return div;
+  }
+  // Append a caller-built node (a tour offer, a flow-draft chip) to this pane's log.
+  function appendNode(node) {
+    if (!logEl || !node) return;
+    logEl.appendChild(node);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  // Close the streaming assistant bubble, rendering its accumulated raw text as markdown.
+  function finalizeBubble() {
+    if (pane.bubble && pane.bubble._md) {
+      mountMarkdown(pane.bubble, pane.bubble._md);
+      if (logEl) logEl.scrollTop = logEl.scrollHeight;
     }
-  };
-  ws.onerror = () => {
-    if (chatWs === ws) chatStatusEl.textContent = "chat connection error.";
-  };
-  ws.onmessage = (ev) => {
-    if (chatWs !== ws) return;
-    let data;
-    try { data = JSON.parse(ev.data); } catch (e) { return; }
-    switch (data.type) {
-      case "session":
-        // leading bootstrap frame: bind to this session + replay its stored transcript.
-        activeSessionId = data.id;
-        highlightActiveChip();
-        currentBubble = null;
-        chatLogEl.textContent = "";
-        if (Array.isArray(data.transcript)) {
-          for (const entry of data.transcript) renderTranscriptEntry(entry);
-        }
-        maybeShowRestoreNote(data);
+    pane.bubble = null;
+  }
+  pane.addLine = addLine;
+  pane.appendNode = appendNode;
+
+  // --- the sessions API (chips: one persisted chat each) ---------------------
+  function sessionUrl(host, id) {
+    let u = "/api/hosts/" + encodeURIComponent(host) + "/sessions";
+    if (id) u += "/" + encodeURIComponent(id);
+    // ALWAYS send the mode, defaulting to "workspace". Sending it only when `mode` was
+    // truthy meant the Workspace pane (mode: null) listed sessions UNFILTERED — so the
+    // Flows tab's flow-authoring chats showed up in the Workspace chip bar, and the
+    // most-recent-session auto-open below restored a flow transcript into the Workspace
+    // pane. The two panes must each see only their own mode's sessions.
+    u += "?mode=" + encodeURIComponent(mode || "workspace");
+    return u;
+  }
+  function createBody() {
+    return JSON.stringify(mode ? { mode: mode } : {});
+  }
+
+  // Replay ONE stored transcript entry. Reuses the SAME safe renderers the live stream
+  // uses — addLine (textContent) and mountMarkdown (escapes first) — so restored
+  // (untrusted) content never reaches a raw-innerHTML path.
+  function renderTranscriptEntry(entry) {
+    if (!entry || typeof entry !== "object") return;
+    switch (entry.type) {
+      case "user":
+        addLine("msg-user", entry.text || "");
         break;
-      case "text":
-        if (!currentBubble) { currentBubble = chatAddLine("msg-assistant", ""); currentBubble._md = ""; }
-        currentBubble._md += (data.delta || "");
-        currentBubble.textContent = currentBubble._md; // plaintext while streaming
-        chatLogEl.scrollTop = chatLogEl.scrollHeight;
+      case "text": {
+        const bubble = addLine("msg-assistant", "");
+        if (bubble) mountMarkdown(bubble, entry.text || "");
+        if (logEl) logEl.scrollTop = logEl.scrollHeight;
         break;
+      }
       case "tool_use":
-        finalizeBubble();
-        chatAddLine("msg-tool", "→ " + (data.name || "tool"));
+        addLine("msg-tool", "→ " + (entry.name || "tool"));
         break;
       case "tool_result":
-        chatAddLine("msg-tool", "✓ " + (data.name || "tool") + " · " +
-          (data.status || "?"));
-        break;
-      case "error":
-        finalizeBubble();
-        if (data.status === "chat_unavailable") {
-          // graceful no-key (or missing-dep) case — the rest of the UI still works.
-          chatSetEnabled(false);
-          chatStatusEl.textContent = "chat unavailable (" + (data.reason || "?") + ")";
-        }
-        chatAddLine("msg-error", "chat unavailable: " +
-          (data.reason || data.status || "unknown") +
-          (data.detail ? " — " + data.detail : ""));
-        refreshChatSessions();          // an error can still have auto-titled the chat
+        addLine("msg-tool", "✓ " + (entry.name || "tool") + " · " + (entry.status || "?"));
         break;
       case "tour":
-        finalizeBubble();
-        addTourOffer(data.data);
+        if (opts.onTour) opts.onTour(entry.data, pane);
         break;
-      case "done":
-        finalizeBubble();
-        // a completed turn may have auto-titled the chat + bumped its recency — refresh
-        // the chips (fire-and-forget) without touching the live socket.
-        refreshChatSessions();
+      case "flow_draft":
+        // a stored draft edit — replayed so a reopened flow chat reads as the history of
+        // edits it was. `live: false`: it is HISTORY, and history does not get to rewrite
+        // the document you are working on. The handler renders it as a chip with a
+        // "Restore this draft" button; applying it is then a deliberate human act.
+        if (opts.onFlowDraft) opts.onFlowDraft(entry, pane, { live: false });
+        break;
+      case "error":
+        addLine("msg-error", "chat unavailable: " +
+          (entry.reason || entry.status || "unknown") +
+          (entry.detail ? " — " + entry.detail : ""));
         break;
       default:
         break;
     }
+  }
+
+  // The Claude Code backend restores the transcript for DISPLAY only (v1) — it won't
+  // recall earlier turns yet, so flag a restored view so the user isn't surprised.
+  function maybeShowRestoreNote(data) {
+    if (data.backend === "claude_code" && Array.isArray(data.transcript) &&
+        data.transcript.length > 0) {
+      setStatus("restored view — this backend won't recall earlier turns yet");
+    }
+  }
+
+  function openSocket(host, sessionId) {
+    if (opts.onOpen) opts.onOpen();
+    if (pane.ws) {
+      try { pane.ws.close(); } catch (e) { /* ignore */ }
+      pane.ws = null;
+    }
+    pane.bubble = null;
+    if (logEl) logEl.textContent = "";
+    setEnabled(false);
+    setStatus("connecting…");
+
+    // The session id (when known) binds the socket to a persisted chat so its transcript
+    // is restored via the leading `session` frame; without it the server mints a new chat.
+    let q = "/ws/chat?host=" + encodeURIComponent(host);
+    if (sessionId) q += "&session=" + encodeURIComponent(sessionId);
+    if (mode) q += "&mode=" + encodeURIComponent(mode);
+    const ws = new WebSocket(wsUrl(q));
+    pane.ws = ws;
+
+    ws.onopen = () => {
+      if (pane.ws !== ws) return;
+      setStatus(readyText);
+      setEnabled(true);
+    };
+    ws.onclose = () => {
+      if (pane.ws !== ws) return;
+      setStatus("chat closed.");
+      setEnabled(false);
+    };
+    ws.onerror = () => {
+      if (pane.ws === ws) setStatus("chat connection error.");
+    };
+    ws.onmessage = (ev) => {
+      if (pane.ws !== ws) return;
+      let data;
+      try { data = JSON.parse(ev.data); } catch (e) { return; }
+      switch (data.type) {
+        case "session":
+          // leading bootstrap frame: bind to this session + replay its stored transcript.
+          pane.activeSessionId = data.id;
+          highlightActiveChip();
+          pane.bubble = null;
+          if (logEl) logEl.textContent = "";
+          if (Array.isArray(data.transcript)) {
+            for (const entry of data.transcript) renderTranscriptEntry(entry);
+          }
+          maybeShowRestoreNote(data);
+          break;
+        case "text":
+          if (!pane.bubble) {
+            pane.bubble = addLine("msg-assistant", "");
+            if (pane.bubble) pane.bubble._md = "";
+          }
+          if (pane.bubble) {
+            pane.bubble._md += (data.delta || "");
+            pane.bubble.textContent = pane.bubble._md;   // plaintext while streaming
+            if (logEl) logEl.scrollTop = logEl.scrollHeight;
+          }
+          break;
+        case "tool_use":
+          finalizeBubble();
+          addLine("msg-tool", "→ " + (data.name || "tool"));
+          break;
+        case "tool_result":
+          addLine("msg-tool", "✓ " + (data.name || "tool") + " · " + (data.status || "?"));
+          break;
+        case "flow_draft":
+          // The agent rewrote the doc, HERE, on this turn — `live: true`, the only path
+          // allowed to apply a draft to the editor. It is applied EVEN WHEN
+          // status === "invalid": the human must SEE what was proposed and where it's
+          // wrong (the canvas highlights the offending box) rather than have it silently
+          // withheld.
+          finalizeBubble();
+          if (opts.onFlowDraft) opts.onFlowDraft(data, pane, { live: true });
+          break;
+        case "error":
+          finalizeBubble();
+          if (data.status === "chat_unavailable") {
+            // graceful no-key (or missing-dep) case — the rest of the UI still works.
+            setEnabled(false);
+            setStatus("chat unavailable (" + (data.reason || "?") + ")");
+          }
+          addLine("msg-error", "chat unavailable: " +
+            (data.reason || data.status || "unknown") +
+            (data.detail ? " — " + data.detail : ""));
+          refreshSessions();          // an error can still have auto-titled the chat
+          break;
+        case "tour":
+          finalizeBubble();
+          if (opts.onTour) opts.onTour(data.data, pane);
+          break;
+        case "done":
+          finalizeBubble();
+          // a completed turn may have auto-titled the chat + bumped its recency — refresh
+          // the chips (fire-and-forget) without touching the live socket.
+          refreshSessions();
+          break;
+        default:
+          break;
+      }
+    };
+  }
+
+  // List (or, when a host has none yet, mint) this host's chats, render the chips, and
+  // open the most-recent one. Guards against a host switch racing the awaits.
+  async function loadSessions(host) {
+    pane.activeSessionId = null;
+    pane.sessions = [];
+    let sessions = [];
+    try {
+      const res = await fetch(sessionUrl(host));
+      const data = await res.json();
+      sessions = data.sessions || [];
+    } catch (err) { sessions = []; }
+    if (sessions.length === 0) {
+      try {
+        const res = await fetch(sessionUrl(host), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: createBody(),
+        });
+        const created = await res.json();
+        if (created && created.id) sessions = [created];
+      } catch (err) { sessions = []; }
+    }
+    if (pane.host !== host) return;      // a newer host switch already took over
+    pane.sessions = sessions;
+    renderChips();
+    if (sessions.length) openSocket(host, sessions[0].id);   // most recent (updated_at desc)
+  }
+
+  // Fire-and-forget re-list to keep chip titles + recency order fresh WITHOUT reconnecting
+  // the socket. Never disturbs the active socket.
+  async function refreshSessions() {
+    const host = pane.host;
+    if (!host) return;
+    try {
+      const res = await fetch(sessionUrl(host));
+      const data = await res.json();
+      if (pane.host !== host) return;
+      pane.sessions = data.sessions || [];
+      renderChips();
+    } catch (err) { /* keep the current chips */ }
+  }
+
+  function renderChips() {
+    if (!sessionListEl) return;
+    sessionListEl.textContent = "";
+    for (const s of pane.sessions) sessionListEl.appendChild(buildSessionChip(s));
+    if (sessionsEl) sessionsEl.hidden = pane.sessions.length === 0;
+  }
+
+  function highlightActiveChip() {
+    if (!sessionListEl) return;
+    for (const chip of sessionListEl.children) {
+      chip.classList.toggle("on", chip.dataset.sessionId === pane.activeSessionId);
+    }
+  }
+
+  function buildSessionChip(s) {
+    const chip = document.createElement("div");
+    chip.className = "chat-session-chip" + (s.id === pane.activeSessionId ? " on" : "");
+    chip.dataset.sessionId = s.id;
+    chip.setAttribute("role", "tab");
+
+    const title = document.createElement("span");
+    title.className = "chat-session-title";
+    title.textContent = s.title || "Untitled chat";   // server string -> textContent
+    chip.appendChild(title);
+
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "chat-session-del";
+    del.textContent = "×";                             // fixed glyph, not server data
+    del.title = "Delete chat";
+    chip.appendChild(del);
+
+    // click a different chip -> reconnect the socket to it (openSocket closes the old one).
+    chip.addEventListener("click", (e) => {
+      if (e.target === del) return;
+      if (chip.querySelector(".chat-session-rename")) return;   // mid-rename
+      if (s.id === pane.activeSessionId) return;
+      if (pane.host) openSocket(pane.host, s.id);
+    });
+
+    // dbl-click the title -> inline rename input.
+    title.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      beginRenameChip(chip, s);
+    });
+
+    // × -> first click arms (.confirm, auto-disarms ~2s); a second click deletes.
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (del.classList.contains("confirm")) {
+        deleteSession(s.id);
+      } else {
+        del.classList.add("confirm");
+        del.textContent = "delete?";
+        setTimeout(() => {
+          del.classList.remove("confirm");
+          del.textContent = "×";
+        }, 2000);
+      }
+    });
+
+    return chip;
+  }
+
+  function beginRenameChip(chip, s) {
+    const titleEl = chip.querySelector(".chat-session-title");
+    if (!titleEl) return;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "chat-session-rename";
+    input.value = s.title || "";
+    chip.replaceChild(input, titleEl);
+    input.focus();
+    input.select();
+
+    let settled = false;
+    const commit = (save) => {
+      if (settled) return;
+      settled = true;
+      const next = input.value.trim();
+      if (save && next && next !== (s.title || "")) {
+        renameSession(s.id, next);       // renameSession re-renders the chips
+      } else {
+        renderChips();                   // restore the chip unchanged
+        highlightActiveChip();
+      }
+    };
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("dblclick", (e) => e.stopPropagation());
+    input.addEventListener("blur", () => commit(true));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); commit(true); }
+      else if (e.key === "Escape") { e.preventDefault(); commit(false); }
+    });
+  }
+
+  async function renameSession(id, title) {
+    const host = pane.host;
+    if (!host) return;
+    try {
+      await fetch(sessionUrl(host, id), {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+    } catch (err) { /* ignore — the refresh below reflects whatever stuck */ }
+    await refreshSessions();
+    highlightActiveChip();
+  }
+
+  async function deleteSession(id) {
+    const host = pane.host;
+    if (!host) return;
+    try {
+      await fetch(sessionUrl(host, id), { method: "DELETE" });
+    } catch (err) { /* ignore */ }
+    if (id === pane.activeSessionId) {
+      // deleting the open chat: reload the set (loadSessions auto-creates + opens a
+      // replacement when none are left) so the pane never ends up bound to nothing.
+      pane.activeSessionId = null;
+      await loadSessions(host);
+    } else {
+      await refreshSessions();
+      highlightActiveChip();
+    }
+  }
+
+  // --- the pane's public surface ---------------------------------------------
+  pane.selectHost = async (host) => {
+    pane.host = host || null;
+    pane.sessions = [];
+    pane.activeSessionId = null;
+    if (!host) { pane.destroy(); return; }
+    await loadSessions(host);
   };
+
+  pane.destroy = () => {
+    if (pane.ws) {
+      try { pane.ws.close(); } catch (e) { /* ignore */ }
+      pane.ws = null;
+    }
+    pane.host = null;
+    pane.sessions = [];
+    pane.activeSessionId = null;
+    pane.bubble = null;
+    if (logEl) logEl.textContent = "";
+    if (sessionListEl) sessionListEl.textContent = "";
+    if (sessionsEl) sessionsEl.hidden = true;
+    setEnabled(false);
+  };
+
+  pane.newChat = async () => {
+    const host = pane.host;
+    if (!host) return;
+    try {
+      const res = await fetch(sessionUrl(host), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: createBody(),
+      });
+      const created = await res.json();
+      if (created && created.id) {
+        await refreshSessions();
+        if (pane.host === host) openSocket(host, created.id);
+      }
+    } catch (err) { /* ignore */ }
+  };
+
+  pane.prefill = (text) => {
+    if (!inputEl) return;
+    inputEl.value = text;
+    inputEl.focus();
+  };
+
+  if (formEl) {
+    formEl.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = inputEl ? inputEl.value.trim() : "";
+      if (!text || !pane.ws || pane.ws.readyState !== WebSocket.OPEN) return;
+      addLine("msg-user", text);
+      pane.bubble = null;
+      const frame = { type: "user_message", text: text };
+      if (opts.extra) Object.assign(frame, opts.extra());
+      // ALWAYS the current doc — the human may have edited the canvas or the JSON since
+      // the agent's last turn, and the agent must edit the LIVE version, not its own copy.
+      if (opts.getDraft) frame.draft = opts.getDraft();
+      pane.ws.send(JSON.stringify(frame));
+      inputEl.value = "";
+    });
+  }
+  if (sessionNewEl) sessionNewEl.addEventListener("click", () => pane.newChat());
+
+  return pane;
+}
+
+// The Workspace tab's mount. `live_url` rides along on every message so the agent knows
+// where the live browser currently is; a `tour` payload becomes a "Show me How" button.
+const workspaceChat = createChatPane({
+  ids: WORKSPACE_CHAT_IDS,
+  mode: null,
+  readyText: "ready — ask where to go.",
+  extra: () => ({ live_url: currentLiveUrl }),
+  onTour: (tour, pane) => addTourOffer(tour, pane),
+  onOpen: () => endTour(),           // a reconnect invalidates any tour in flight
+});
+
+// graph.js keeps chat-input ownership here (app.js): its "Ask in chat" button calls this
+// to prefill the chat box without reaching into the chat socket itself.
+function prefillChat(text) {
+  workspaceChat.prefill(text);
+}
+
+// the command palette's "New chat" action.
+function newChat() {
+  workspaceChat.newChat();
 }
 
 // Append a "Show me How" button to the chat log for a captured tour payload.
 // Each button closes over ITS OWN tour so older offers keep working.
-function addTourOffer(tour) {
+function addTourOffer(tour, pane) {
   lastTour = tour;
   const line = document.createElement("div");
   line.className = "msg msg-assistant tour-offer";
@@ -581,266 +976,8 @@ function addTourOffer(tour) {
   });
   line.appendChild(btn);
   line.appendChild(note);
-  chatLogEl.appendChild(line);
-  chatLogEl.scrollTop = chatLogEl.scrollHeight;
+  if (pane) pane.appendNode(line);
 }
-
-if (chatFormEl) {
-  chatFormEl.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const text = chatInputEl.value.trim();
-    if (!text || !chatWs || chatWs.readyState !== WebSocket.OPEN) return;
-    chatAddLine("msg-user", text);
-    currentBubble = null;
-    chatWs.send(JSON.stringify({ type: "user_message", text, live_url: currentLiveUrl }));
-    chatInputEl.value = "";
-  });
-}
-
-// --- chat sessions (chips: one persisted chat each; "+ New" mints another) ---
-// The chip bar lists /api/hosts/{host}/sessions. Clicking a chip reconnects the chat
-// socket to that session (its transcript is restored via the leading `session` frame);
-// "+ New" POSTs a session; dbl-click a title renames (PATCH); the trailing × confirms
-// then DELETEs. All server strings go through textContent (chips) or renderMarkdown
-// (restored assistant text, which escapes first) — never a raw-innerHTML path.
-
-function sessionUrl(host, id) {
-  let u = "/api/hosts/" + encodeURIComponent(host) + "/sessions";
-  if (id) u += "/" + encodeURIComponent(id);
-  return u;
-}
-
-// List (or, when a host has none yet, mint) this host's chats, render the chips, and
-// open the most-recent one. Guards against a host switch racing the awaits.
-async function loadChatSessions(host) {
-  activeSessionId = null;
-  chatSessions = [];
-  let sessions = [];
-  try {
-    const res = await fetch(sessionUrl(host));
-    const data = await res.json();
-    sessions = data.sessions || [];
-  } catch (err) { sessions = []; }
-  if (sessions.length === 0) {
-    try {
-      const res = await fetch(sessionUrl(host), {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const created = await res.json();
-      if (created && created.id) sessions = [created];
-    } catch (err) { sessions = []; }
-  }
-  if (selectedHost !== host) return;   // a newer host switch already took over
-  chatSessions = sessions;
-  renderChatChips();
-  if (sessions.length) openChat(host, sessions[0].id);   // most recent (updated_at desc)
-}
-
-// Fire-and-forget re-list to keep chip titles + recency order fresh WITHOUT reconnecting
-// the socket (called after each done/error frame, and after rename/delete of a non-active
-// chat). Never disturbs the active socket.
-async function refreshChatSessions() {
-  const host = selectedHost;
-  if (!host) return;
-  try {
-    const res = await fetch(sessionUrl(host));
-    const data = await res.json();
-    if (selectedHost !== host) return;
-    chatSessions = data.sessions || [];
-    renderChatChips();
-  } catch (err) { /* keep the current chips */ }
-}
-
-function renderChatChips() {
-  if (!chatSessionListEl) return;
-  chatSessionListEl.textContent = "";
-  for (const s of chatSessions) chatSessionListEl.appendChild(buildSessionChip(s));
-  if (chatSessionsEl) chatSessionsEl.hidden = chatSessions.length === 0;
-}
-
-function highlightActiveChip() {
-  if (!chatSessionListEl) return;
-  for (const chip of chatSessionListEl.children) {
-    chip.classList.toggle("on", chip.dataset.sessionId === activeSessionId);
-  }
-}
-
-function buildSessionChip(s) {
-  const chip = document.createElement("div");
-  chip.className = "chat-session-chip" + (s.id === activeSessionId ? " on" : "");
-  chip.dataset.sessionId = s.id;
-  chip.setAttribute("role", "tab");
-
-  const title = document.createElement("span");
-  title.className = "chat-session-title";
-  title.textContent = s.title || "Untitled chat";   // server string -> textContent
-  chip.appendChild(title);
-
-  const del = document.createElement("button");
-  del.type = "button";
-  del.className = "chat-session-del";
-  del.textContent = "×";                             // fixed glyph, not server data
-  del.title = "Delete chat";
-  chip.appendChild(del);
-
-  // click a different chip -> reconnect the socket to it (openChat closes the old one).
-  chip.addEventListener("click", (e) => {
-    if (e.target === del) return;
-    if (chip.querySelector(".chat-session-rename")) return;   // mid-rename
-    if (s.id === activeSessionId) return;
-    openChat(selectedHost, s.id);
-  });
-
-  // dbl-click the title -> inline rename input.
-  title.addEventListener("dblclick", (e) => {
-    e.stopPropagation();
-    beginRenameChip(chip, s);
-  });
-
-  // × -> first click arms (.confirm, auto-disarms ~2s); a second click deletes.
-  del.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (del.classList.contains("confirm")) {
-      deleteSession(s.id);
-    } else {
-      del.classList.add("confirm");
-      del.textContent = "delete?";
-      setTimeout(() => {
-        del.classList.remove("confirm");
-        del.textContent = "×";
-      }, 2000);
-    }
-  });
-
-  return chip;
-}
-
-function beginRenameChip(chip, s) {
-  const titleEl = chip.querySelector(".chat-session-title");
-  if (!titleEl) return;
-  const input = document.createElement("input");
-  input.type = "text";
-  input.className = "chat-session-rename";
-  input.value = s.title || "";
-  chip.replaceChild(input, titleEl);
-  input.focus();
-  input.select();
-
-  let settled = false;
-  const commit = (save) => {
-    if (settled) return;
-    settled = true;
-    const next = input.value.trim();
-    if (save && next && next !== (s.title || "")) {
-      renameSession(s.id, next);       // renameSession re-renders the chips
-    } else {
-      renderChatChips();               // restore the chip unchanged
-      highlightActiveChip();
-    }
-  };
-  input.addEventListener("click", (e) => e.stopPropagation());
-  input.addEventListener("dblclick", (e) => e.stopPropagation());
-  input.addEventListener("blur", () => commit(true));
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); commit(true); }
-    else if (e.key === "Escape") { e.preventDefault(); commit(false); }
-  });
-}
-
-async function renameSession(id, title) {
-  const host = selectedHost;
-  if (!host) return;
-  try {
-    await fetch(sessionUrl(host, id), {
-      method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title }),
-    });
-  } catch (err) { /* ignore — the refresh below reflects whatever stuck */ }
-  await refreshChatSessions();
-  highlightActiveChip();
-}
-
-async function deleteSession(id) {
-  const host = selectedHost;
-  if (!host) return;
-  try {
-    await fetch(sessionUrl(host, id), { method: "DELETE" });
-  } catch (err) { /* ignore */ }
-  if (id === activeSessionId) {
-    // deleting the open chat: reload the set (loadChatSessions auto-creates + opens a
-    // replacement when none are left) so the pane never ends up bound to nothing.
-    activeSessionId = null;
-    await loadChatSessions(host);
-  } else {
-    await refreshChatSessions();
-    highlightActiveChip();
-  }
-}
-
-async function newChat() {
-  const host = selectedHost;
-  if (!host) return;
-  try {
-    const res = await fetch(sessionUrl(host), {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    const created = await res.json();
-    if (created && created.id) {
-      await refreshChatSessions();
-      openChat(host, created.id);
-    }
-  } catch (err) { /* ignore */ }
-}
-
-// Replay ONE stored transcript entry into the chat log. Reuses the SAME safe renderers
-// the live stream uses — chatAddLine (textContent), renderMarkdown (escapes first), and
-// addTourOffer — so restored (untrusted) content never hits a raw-innerHTML path.
-function renderTranscriptEntry(entry) {
-  if (!entry || typeof entry !== "object") return;
-  switch (entry.type) {
-    case "user":
-      chatAddLine("msg-user", entry.text || "");
-      break;
-    case "text": {
-      const bubble = chatAddLine("msg-assistant", "");
-      bubble.innerHTML = renderMarkdown(entry.text || "");   // renderMarkdown escapes raw
-      chatLogEl.scrollTop = chatLogEl.scrollHeight;
-      break;
-    }
-    case "tool_use":
-      chatAddLine("msg-tool", "→ " + (entry.name || "tool"));
-      break;
-    case "tool_result":
-      chatAddLine("msg-tool", "✓ " + (entry.name || "tool") + " · " +
-        (entry.status || "?"));
-      break;
-    case "tour":
-      addTourOffer(entry.data);
-      break;
-    case "error":
-      chatAddLine("msg-error", "chat unavailable: " +
-        (entry.reason || entry.status || "unknown") +
-        (entry.detail ? " — " + entry.detail : ""));
-      break;
-    default:
-      break;
-  }
-}
-
-// The Claude Code backend restores the transcript for DISPLAY only (v1) — it won't recall
-// earlier turns yet, so flag a restored view so the user isn't surprised.
-function maybeShowRestoreNote(data) {
-  if (!chatStatusEl) return;
-  if (data.backend === "claude_code" && Array.isArray(data.transcript) &&
-      data.transcript.length > 0) {
-    chatStatusEl.textContent =
-      "restored view — this backend won't recall earlier turns yet";
-  }
-}
-
-if (chatSessionNewEl) chatSessionNewEl.addEventListener("click", newChat);
 
 // --- live browser pane -------------------------------------------------------
 function openLiveView(host) {

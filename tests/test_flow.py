@@ -267,3 +267,30 @@ def test_load_rejects_bad_json(tmp_path):
 def test_loads_validates():
     with pytest.raises(flow.FlowError):
         flow.loads(json.dumps({"name": "f", "steps": [{"op": "bogus"}]}))
+
+
+# --- validate_report: the ONE doc -> verdict function -------------------------
+
+def test_validate_report_ok_shape():
+    report = flow.validate_report(_flow(host="x.test",
+                                        inputs={"since": {"type": "string"}}))
+    assert report == {"status": "ok", "name": "f", "host": "x.test", "steps": 1,
+                      "capabilities": {"allow_submit": False, "allow_download": True,
+                                       "allow_upload": False},
+                      "inputs": ["since"]}
+
+
+def test_validate_report_invalid_carries_path_and_error():
+    report = flow.validate_report({"name": "f", "steps": [{"op": "bogus"}]})
+    assert report["status"] == "invalid"
+    assert report["path"] == "steps[0]"
+    assert "bogus" in report["error"]
+
+
+def test_validate_report_never_raises_on_garbage():
+    # a non-object body (a list, a string, None) is a structured miss, NOT an exception —
+    # this is what lets an HTTP handler and an MCP tool call it on untrusted input.
+    for junk in ([], "nope", None, 7, {"steps": []}):
+        report = flow.validate_report(junk)
+        assert report["status"] == "invalid"
+        assert set(report) == {"status", "path", "error"}

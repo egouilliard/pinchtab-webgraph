@@ -534,7 +534,7 @@ def test_ws_chat_streams_scripted_frames(isolated_cache_home, monkeypatch):
     session = FakeMCPSession(result=FakeCallToolResult(structuredContent={"status": "ok"}))
 
     @asynccontextmanager
-    async def fake_open(host, *, backend_name=None, record=None):
+    async def fake_open(host, *, backend_name=None, mode=None, record=None):
         state = chat.ChatState(host=host, messages=[], mcp_session=session,
                                anthropic_client=client, tools=[])
         yield chat_backend._ApiSession(state=state,
@@ -717,3 +717,184 @@ def test_trim_wire_messages_keeps_trailing_turns_and_never_splits_tool_pairs():
 def test_trim_wire_messages_under_cap_is_identity():
     messages = [{"role": "user", "content": "only one"}]
     assert chat.trim_wire_messages(messages, max_turns=100) == messages
+
+
+# --- FLOW MODE: the tool fence, the prompt, the draft frame -------------------
+#
+# The safety shape: the base browsing fence (OFFLINE_TOOL_NAMES) is NEVER widened —
+# flow mode only ADDS the one PURE tool (propose_flow), which cannot save or run.
+
+def test_offline_fence_is_still_exactly_six_names():
+    # A regression guard on the fence itself: flow mode must not have leaked into it.
+    assert chat.OFFLINE_TOOL_NAMES == frozenset({
+        "graph_summary", "howto", "find_content", "list_content", "list_forms",
+        "link_paths"})
+    assert len(chat.OFFLINE_TOOL_NAMES) == 6
+    assert "propose_flow" not in chat.OFFLINE_TOOL_NAMES
+
+
+def test_effective_tool_names_workspace_is_the_base_fence():
+    assert chat.effective_tool_names("workspace") == chat.OFFLINE_TOOL_NAMES
+    assert chat.effective_tool_names() == chat.OFFLINE_TOOL_NAMES
+
+
+def test_effective_tool_names_flow_adds_exactly_propose_flow():
+    assert chat.effective_tool_names("flow") == chat.OFFLINE_TOOL_NAMES | {"propose_flow"}
+    assert len(chat.effective_tool_names("flow")) == 7
+
+
+def test_effective_tool_names_unknown_mode_fails_closed():
+    # an unrecognized token must never be the thing that grants a tool.
+    assert chat.effective_tool_names("bogus") == chat.OFFLINE_TOOL_NAMES
+    assert chat.effective_tool_names(None) == chat.OFFLINE_TOOL_NAMES
+
+
+def test_list_allowed_tools_flow_mode_includes_propose_flow():
+    tools = [FakeTool(n, "d", {"type": "object"}) for n in
+             ("graph_summary", "howto", "find_content", "list_content", "list_forms",
+              "link_paths", "propose_flow", "crawl", "ask_howto", "perform")]
+    session = FakeMCPSession(tools=tools)
+
+    workspace = {t["name"] for t in asyncio.run(chat.list_allowed_tools(session))}
+    assert workspace == set(chat.OFFLINE_TOOL_NAMES)      # NO propose_flow in workspace
+
+    flow_names = {t["name"] for t in asyncio.run(chat.list_allowed_tools(session, "flow"))}
+    assert flow_names == set(chat.OFFLINE_TOOL_NAMES) | {"propose_flow"}
+    # the LIVE tools are in NEITHER set.
+    for live in ("crawl", "ask_howto", "perform"):
+        assert live not in workspace and live not in flow_names
+
+
+def test_flow_system_prompt_is_generated_from_the_flow_tables():
+    from pinchtab_webgraph import flow as flow_mod
+    prompt = chat.build_flow_system_prompt("site.test")
+    assert "site.test" in prompt
+    # every op the validator knows is named in the prompt — the reference is DERIVED, so
+    # adding an op to flow.py cannot leave the prompt behind.
+    for op in list(flow_mod.LEAF_OPS) + list(flow_mod.BODY_OPS):
+        assert op in prompt
+    for cap in flow_mod.DEFAULT_CAPABILITIES:
+        assert cap in prompt
+    assert str(flow_mod.MAX_STEPS) in prompt and str(flow_mod.MAX_DEPTH) in prompt
+    # the authority rule + the grounding rule are stated explicitly.
+    assert "only PROPOSE" in prompt
+    assert "propose_flow" in prompt
+    assert "Save/Run buttons" in prompt
+    assert "Never invent a selector" in prompt
+
+
+def test_system_prompt_for_picks_by_mode():
+    assert chat.system_prompt_for("h", "workspace") == chat.build_system_prompt("h")
+    assert chat.system_prompt_for("h") == chat.build_system_prompt("h")
+    assert chat.system_prompt_for("h", "flow") == chat.build_flow_system_prompt("h")
+
+
+# --- _extract_flow_draft (the exact twin of _extract_tour) --------------------
+
+def _propose_ok_payload():
+    doc = {"name": "invoices", "host": "x.test",
+           "steps": [{"op": "goto", "url": "https://x.test/invoices"}]}
+    return {"status": "ok", "name": "invoices", "host": "x.test", "steps": 1,
+            "capabilities": {}, "inputs": [], "doc": doc, "note": "first draft"}
+
+
+def test_extract_flow_draft_from_ok_payload():
+    draft = chat._extract_flow_draft(_propose_ok_payload())
+    assert draft["status"] == "ok"
+    assert draft["name"] == "invoices"
+    assert draft["note"] == "first draft"
+    assert draft["doc"]["steps"][0]["op"] == "goto"
+
+
+def test_extract_flow_draft_invalid_still_yields_a_frame():
+    # an INVALID draft still carries the doc + path/error — the human must see the broken
+    # document and the reason, not nothing.
+    draft = chat._extract_flow_draft(
+        {"status": "invalid", "path": "steps[0]", "error": "unknown op 'nope'",
+         "doc": {"name": "x", "steps": [{"op": "nope"}]}, "note": None})
+    assert draft["status"] == "invalid"
+    assert draft["path"] == "steps[0]" and "nope" in draft["error"]
+    assert draft["doc"] == {"name": "x", "steps": [{"op": "nope"}]}
+
+
+def test_extract_flow_draft_none_without_a_document():
+    assert chat._extract_flow_draft({"status": "ok"}) is None
+    assert chat._extract_flow_draft({"status": "ok", "doc": "not a dict"}) is None
+    assert chat._extract_flow_draft("not a dict") is None
+    assert chat._extract_flow_draft(None) is None
+
+
+def test_run_conversation_turn_emits_flow_draft_frame():
+    payload = _propose_ok_payload()
+    stream1 = FakeStream(
+        events=[],
+        final=FakeFinalMessage(
+            "tool_use", [FakeToolUseBlock("t1", "propose_flow", {"doc": payload["doc"]})]))
+    stream2 = FakeStream(events=[FakeTextEvent("Here is the draft.")],
+                         final=FakeFinalMessage("end_turn", [FakeTextBlock("done")]))
+    client = FakeAnthropic([stream1, stream2])
+    session = FakeMCPSession(result=FakeCallToolResult(structuredContent=payload))
+    state = chat.ChatState(host="x.test", messages=[{"role": "user", "content": "build it"}],
+                           mcp_session=session, anthropic_client=client, tools=[],
+                           mode="flow")
+    frames = []
+
+    async def emit(frame):
+        frames.append(frame)
+
+    _run(chat.run_conversation_turn(state, emit=emit))
+
+    assert [f["type"] for f in frames] == ["tool_use", "tool_result", "flow_draft",
+                                           "text", "done"]
+    draft = next(f for f in frames if f["type"] == "flow_draft")
+    # THE FROZEN CONTRACT: a FLAT frame (not nested under "data").
+    assert draft == {"type": "flow_draft", **chat._extract_flow_draft(payload)}
+    assert draft["doc"] == payload["doc"]
+
+
+def test_run_conversation_turn_flow_mode_uses_the_flow_prompt():
+    stream = FakeStream(events=[], final=FakeFinalMessage("end_turn", [FakeTextBlock("x")]))
+    client = FakeAnthropic([stream])
+    state = chat.ChatState(host="x.test", messages=[{"role": "user", "content": "hi"}],
+                           mcp_session=FakeMCPSession(), anthropic_client=client, tools=[],
+                           mode="flow")
+
+    async def emit(frame):
+        pass
+
+    _run(chat.run_conversation_turn(state, emit=emit))
+    assert client.messages.calls[0]["system"] == chat.build_flow_system_prompt("x.test")
+    assert client.messages.calls[0]["system"] != chat.build_system_prompt("x.test")
+
+
+# --- augment_with_flow_draft (the sibling of augment_with_location) -----------
+
+def test_augment_with_flow_draft_none_returns_text_unchanged():
+    assert chat.augment_with_flow_draft("hello", None) == "hello"
+    assert chat.augment_with_flow_draft("hello", {}) == "hello"
+
+
+def test_augment_with_flow_draft_prefixes_the_live_document():
+    doc = {"name": "invoices", "steps": [{"op": "goto", "url": "https://x.test/i"}]}
+    out = chat.augment_with_flow_draft("add pagination", doc)
+    assert '"name": "invoices"' in out                 # the CURRENT doc is inlined
+    assert "propose_flow" in out                       # …and resent WHOLE
+    assert out.endswith("add pagination")
+
+
+def test_handle_user_message_folds_both_live_url_and_draft():
+    async def fake_turn(state, *, emit):
+        pass
+
+    from unittest import mock
+    doc = {"name": "f", "steps": []}
+    state = chat.ChatState(host="site.test", mode="flow")
+    with mock.patch.object(chat, "run_conversation_turn", side_effect=fake_turn):
+        asyncio.run(chat.handle_user_message(state, "rename it",
+                                             emit=lambda f: None,
+                                             live_url="https://site.test/x",
+                                             draft=doc))
+    content = state.messages[-1]["content"]
+    assert "https://site.test/x" in content            # augment_with_location
+    assert '"name": "f"' in content                    # augment_with_flow_draft
+    assert content.endswith("rename it")

@@ -434,3 +434,95 @@ def test_real_claude_code_end_to_end(populated_cache_home):
     for f in frames:
         if f["type"] == "tool_use":
             assert f["name"] in chat.OFFLINE_TOOL_NAMES, f
+
+
+# --- FLOW MODE: the fence widens by EXACTLY one pure tool ---------------------
+
+def test_build_options_flow_mode_lockdown_shape():
+    # The twin of test_build_options_lockdown_shape, for flow mode. EVERY other field of
+    # the fence is unchanged; the ONLY difference is one extra auto-approved tool —
+    # propose_flow, which writes nothing and runs nothing (and the MCP surface has no
+    # save/run flow tool at all, so the agent still cannot persist or execute a flow).
+    sdk = pytest.importorskip("claude_agent_sdk")
+    opts = chat_claude_code._build_options(sdk, "example.test", model=None, cwd="/tmp/cc",
+                                           mode="flow")
+
+    assert opts.tools == []                      # still: NO built-in tools
+    assert opts.setting_sources == []
+    assert opts.strict_mcp_config is True
+    assert opts.permission_mode == "default"
+    assert opts.disallowed_tools == [chat_claude_code._qualified("crawl"),
+                                     chat_claude_code._qualified("ask_howto")]
+    assert set(opts.mcp_servers.keys()) == {"pinchtab-webgraph"}
+
+    expected = [chat_claude_code._qualified(n)
+                for n in sorted(chat.OFFLINE_TOOL_NAMES | {"propose_flow"})]
+    assert opts.allowed_tools == expected
+    assert len(expected) == 7                    # the 6 offline tools + propose_flow
+    # …and the base fence itself was NOT widened.
+    workspace = chat_claude_code._build_options(sdk, "example.test", mode="workspace")
+    assert len(workspace.allowed_tools) == 6
+    assert chat_claude_code._qualified("propose_flow") not in workspace.allowed_tools
+    # the flow prompt, not the navigation one.
+    assert opts.system_prompt == chat.build_flow_system_prompt("example.test")
+
+
+def test_flow_mode_deny_backstop_still_denies_everything_else():
+    sdk = pytest.importorskip("claude_agent_sdk")
+    cb = chat_claude_code._build_options(sdk, "h", mode="flow").can_use_tool
+
+    allow = _run(cb(chat_claude_code._qualified("propose_flow"), {}, None))
+    assert isinstance(allow, sdk.PermissionResultAllow)
+    for denied in ("Bash", "Write", chat_claude_code._qualified("crawl"),
+                   chat_claude_code._qualified("perform"),
+                   chat_claude_code._qualified("ask_howto")):
+        assert isinstance(_run(cb(denied, {}, None)), sdk.PermissionResultDeny)
+
+
+def test_workspace_mode_denies_propose_flow():
+    # a workspace session must NOT be able to call the flow tool even if it names it.
+    sdk = pytest.importorskip("claude_agent_sdk")
+    cb = chat_claude_code._build_options(sdk, "h", mode="workspace").can_use_tool
+    result = _run(cb(chat_claude_code._qualified("propose_flow"), {}, None))
+    assert isinstance(result, sdk.PermissionResultDeny)
+
+
+def test_frame_mapping_emits_flow_draft_frame():
+    # The SDK delivers the propose_flow result as JSON TEXT; the frame must be IDENTICAL
+    # to the API backend's (both go through chat._extract_flow_draft).
+    qpf = chat_claude_code._qualified("propose_flow")
+    doc = {"name": "invoices", "steps": [{"op": "goto", "url": "https://x.test/i"}]}
+    payload = {"status": "ok", "name": "invoices", "host": None, "steps": 1,
+               "capabilities": {}, "inputs": [], "doc": doc, "note": "first draft"}
+    messages = [
+        AssistantMessage([ToolUseBlock("t1", qpf, {"doc": doc})]),
+        UserMessage([ToolResultBlock("t1", content=json.dumps(payload), is_error=False)]),
+        ResultMessage(is_error=False),
+    ]
+    frames = []
+
+    async def emit(f):
+        frames.append(f)
+
+    _run(chat_claude_code.run_conversation_turn(FakeClient(messages), "build it", emit=emit))
+
+    assert [f["type"] for f in frames] == ["tool_use", "tool_result", "flow_draft", "done"]
+    draft = next(f for f in frames if f["type"] == "flow_draft")
+    assert draft == {"type": "flow_draft", **chat._extract_flow_draft(payload)}
+    assert draft["doc"] == doc and draft["note"] == "first draft"
+
+
+def test_handle_user_message_folds_draft_and_live_url(monkeypatch):
+    seen = {}
+
+    async def fake_turn(client, text, *, emit, on_sdk_session_id=None):
+        seen["text"] = text
+
+    monkeypatch.setattr(chat_claude_code, "run_conversation_turn", fake_turn)
+    doc = {"name": "f", "steps": []}
+    _run(chat_claude_code.handle_user_message(
+        object(), "rename it", emit=lambda f: None,
+        live_url="https://x.test/p", draft=doc))
+    assert "https://x.test/p" in seen["text"]      # chat.augment_with_location
+    assert '"name": "f"' in seen["text"]           # chat.augment_with_flow_draft
+    assert seen["text"].endswith("rename it")

@@ -228,6 +228,29 @@ def validate(flow):
     return flow
 
 
+def validate_report(doc):
+    """validate() as a REPORT instead of an exception — pure, and it never raises.
+
+    The one place a candidate document becomes a verdict:
+      ok      -> {"status":"ok","name","host","steps","capabilities","inputs"}
+      invalid -> {"status":"invalid","path","error"}
+
+    The ok shape is exactly what `flow_cmd validate` prints and what the HTTP
+    /api/flows/validate route returns, so the CLI, the API and the chat agent's
+    `propose_flow` tool all answer the same question with the same words. Derived in
+    one place on purpose — three hand-written copies of this dict WOULD drift.
+    """
+    try:
+        validate(doc)
+    except FlowError as e:
+        return {"status": "invalid", "path": e.path, "error": e.message}
+    except (TypeError, AttributeError) as e:   # a non-object doc (a list, a string, …)
+        return {"status": "invalid", "path": "", "error": str(e)}
+    return {"status": "ok", "name": doc["name"], "host": doc.get("host"),
+            "steps": len(doc["steps"]), "capabilities": capabilities(doc),
+            "inputs": sorted(doc.get("inputs") or {})}
+
+
 # Variables the runner injects GLOBALLY; a flow may reference these anywhere without
 # declaring them. `page` and `index` are deliberately NOT here — they only exist inside a
 # `paginate` / `for_each` body, and the runner only ever puts them in scope there. Letting
@@ -268,6 +291,59 @@ def _check_references(flow):
                 walk(step["body"], scope | BODY_VARS["paginate"], here + ".body")
 
     walk(flow["steps"], declared | BUILTIN_VARS, "steps")
+
+
+# --- graph-resolved targets ----------------------------------------------------
+# validate() proves the document's SHAPE. It cannot prove that `{"op":"goto","goal":"reports"}`
+# names anything on the actual site — that needs the crawled graph, which this module must
+# never read (see the header: pure, stdlib-only, safe to call before a browser is leased).
+#
+# So the split is: flow.py enumerates WHICH steps resolve against the graph and WHERE they
+# live (in the one path grammar this module owns — `steps[1].body[0]`), and flow_resolve.py
+# does the graph read. That keeps `mcp_server.propose_flow` — which calls validate_report —
+# provably free of disk I/O, while still letting the HTTP validator warn a human.
+
+RESOLVING_OPS = ("goto", "do")     # the ops whose target the runner resolves via the graph
+
+
+def goal_targets(flow):
+    """Every step the runner will RESOLVE AGAINST THE GRAPH, in document order.
+
+    Pure: a walk of the document, no graph, no disk. Returns
+    `[{"path","op","goal","match","start","index"}, …]` where `path` is this module's own
+    grammar (`steps[1].body[0]`) — the same string validate() puts in a FlowError and the
+    same string the canvas uses as a box's `data-path`.
+
+    Skipped on purpose:
+      * `goto` with a `url` — the runner short-circuits to the URL and never consults the graph.
+      * a goal/match carrying `${…}` — it is only known at run time, so there is nothing to
+        check now; warning about it would be noise, not signal.
+    """
+    out = []
+
+    def walk(steps, path):
+        if not isinstance(steps, list):
+            return
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            here = "%s[%d]" % (path, i)
+            op = step.get("op")
+            if op in RESOLVING_OPS and not step.get("url"):
+                goal = step.get("goal") if isinstance(step.get("goal"), str) else None
+                match = step.get("match") if isinstance(step.get("match"), str) else None
+                if (goal or match) and not _VAR_RE.search(" ".join(
+                        x for x in (goal, match) if x)):
+                    out.append({
+                        "path": here, "op": op, "goal": goal, "match": match,
+                        "start": step["start"] if isinstance(step.get("start"), str) else None,
+                        "index": step["index"] if isinstance(step.get("index"), int) else 0,
+                    })
+            if op in BODY_OPS:
+                walk(step.get("body"), here + ".body")
+
+    walk(flow.get("steps") if isinstance(flow, dict) else None, "steps")
+    return out
 
 
 def _check_capabilities(flow):

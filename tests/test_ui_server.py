@@ -471,7 +471,7 @@ def test_ws_chat_restores_transcript_on_bootstrap(isolated_cache_home, monkeypat
     sid = rec["id"]
 
     @asynccontextmanager
-    async def fake_open(host, *, backend_name=None, record=None):
+    async def fake_open(host, *, backend_name=None, mode=None, record=None):
         # the route loads the record from disk and passes it in; echo it back.
         yield SimpleNamespace(record=record)
 
@@ -483,6 +483,7 @@ def test_ws_chat_restores_transcript_on_bootstrap(isolated_cache_home, monkeypat
         assert boot["type"] == "session"
         assert boot["id"] == sid
         assert boot["title"] == "restored chat"
+        assert boot["mode"] == "workspace"
         texts = [e.get("text") for e in boot["transcript"]]
         assert "how do I add a role?" in texts and "Go to Team." in texts
 
@@ -490,6 +491,73 @@ def test_ws_chat_restores_transcript_on_bootstrap(isolated_cache_home, monkeypat
 def test_session_routes_reject_invalid_host(isolated_cache_home):
     r = client.get("/api/hosts/%s/sessions" % "bad%20host")
     assert r.status_code == 400 and r.json()["status"] == "invalid_host"
+
+
+# --- chat MODE: created new, PINNED on resume, filterable --------------------
+
+def test_create_session_with_flow_mode_and_list_filter(isolated_cache_home):
+    r = client.post("/api/hosts/%s/sessions" % SESS_HOST, json={"mode": "flow"})
+    assert r.status_code == 200 and r.json()["mode"] == "flow"
+    fid = r.json()["id"]
+
+    r = client.post("/api/hosts/%s/sessions" % SESS_HOST, json={})
+    assert r.json()["mode"] == "workspace"                  # the default
+    wid = r.json()["id"]
+
+    # an unknown mode token FAILS CLOSED to workspace — it must never grant a tool.
+    r = client.post("/api/hosts/%s/sessions" % SESS_HOST, json={"mode": "wide-open"})
+    assert r.json()["mode"] == "workspace"
+
+    listed = client.get("/api/hosts/%s/sessions?mode=flow" % SESS_HOST).json()["sessions"]
+    assert [s["id"] for s in listed] == [fid]
+    ws_ids = {s["id"] for s in
+              client.get("/api/hosts/%s/sessions?mode=workspace" % SESS_HOST)
+              .json()["sessions"]}
+    assert wid in ws_ids and fid not in ws_ids
+    # unfiltered: everything
+    assert len(client.get("/api/hosts/%s/sessions" % SESS_HOST).json()["sessions"]) == 3
+
+
+def test_ws_chat_new_session_takes_the_mode_query_param(isolated_cache_home, monkeypatch):
+    seen = {}
+
+    @asynccontextmanager
+    async def fake_open(host, *, backend_name=None, mode=None, record=None):
+        seen["mode"] = mode
+        rec = chat_store.create(host, backend="api", mode=mode or "workspace")
+        yield SimpleNamespace(record=rec)
+
+    monkeypatch.setattr(ui_server.chat_backend, "open_chat_session", fake_open)
+
+    with client.websocket_connect("/ws/chat?host=%s&mode=flow" % SESS_HOST) as ws:
+        boot = ws.receive_json()
+        assert boot["type"] == "session" and boot["mode"] == "flow"
+    assert seen["mode"] == "flow"
+
+
+def test_ws_chat_resumed_session_ignores_the_mode_query_param(isolated_cache_home,
+                                                              monkeypatch):
+    # THE SAFETY REGRESSION at the route level: reconnecting to an EXISTING workspace
+    # session with ?mode=flow must NOT pass a mode through — the mode comes from the
+    # record, mirroring the backend pin. Otherwise a stale session id + a crafted query
+    # would hand a read-only chat the propose_flow tool.
+    rec = chat_store.create(SESS_HOST, backend="api")           # workspace
+    seen = {}
+
+    @asynccontextmanager
+    async def fake_open(host, *, backend_name=None, mode=None, record=None):
+        seen["mode"] = mode
+        seen["record_mode"] = (record or {}).get("mode")
+        yield SimpleNamespace(record=record)
+
+    monkeypatch.setattr(ui_server.chat_backend, "open_chat_session", fake_open)
+
+    with client.websocket_connect(
+            "/ws/chat?host=%s&session=%s&mode=flow" % (SESS_HOST, rec["id"])) as ws:
+        boot = ws.receive_json()
+        assert boot["mode"] == "workspace"                      # NOT flow
+    assert seen["mode"] is None                                 # the param never travelled
+    assert seen["record_mode"] == "workspace"
 
 
 # --- SPA static page: index.html <-> app.js element-id contract --------------
@@ -812,11 +880,87 @@ def test_flows_validate_stateless():
     assert body == {"status": "ok", "name": "v", "host": "h.test", "steps": 1,
                     "capabilities": {"allow_submit": False, "allow_download": True,
                                      "allow_upload": False},
-                    "inputs": []}
+                    "inputs": [],
+                    "warnings": []}             # h.test has no cache -> nothing to resolve
 
     r = client.post("/api/flows/validate", json={"name": "x", "steps": []})
     assert r.status_code == 200                 # a structural miss stays a 200
     assert r.json()["status"] == "invalid" and r.json()["path"] == "steps"
+
+
+# --- resolvability warnings (the goal that validates green and aborts at run time) ---
+
+def _goal_doc(goal, host=HOST):
+    return {"name": "g", "host": host,
+            "steps": [{"op": "goto", "url": "https://%s/x" % host},
+                      {"op": "paginate", "max_pages": 2,
+                       "body": [{"op": "do", "goal": goal}]}]}
+
+
+def test_flows_validate_warns_when_a_goal_does_not_resolve(populated_cache_home):
+    # THE papercut: structurally perfect, and the run WILL abort on `reports` (the crawled
+    # example.test graph only has “Add Report”). Still 200, still `ok`, still SAVABLE — but
+    # the warning names the step and the control the site really has.
+    r = client.post("/api/flows/validate", json=_goal_doc("reports"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"                        # NOT an error — advisory only
+    assert len(body["warnings"]) == 1
+    w = body["warnings"][0]
+    assert w["path"] == "steps[1].body[0]"              # the NESTED path — flow.py's grammar
+    assert w["op"] == "do" and w["goal"] == "reports"
+    assert "reports" in w["message"] and HOST in w["message"]
+    assert w["candidates"] == ["Add Report"]
+
+    # the same document with the goal the graph actually answers: no warnings at all.
+    ok = client.post("/api/flows/validate", json=_goal_doc("report")).json()
+    assert ok["status"] == "ok" and ok["warnings"] == []
+
+
+def test_flows_validate_never_warns_for_an_uncrawled_host(isolated_cache_home):
+    # A flow may be authored BEFORE the crawl. "Not crawled" must never become "not valid".
+    body = client.post("/api/flows/validate", json=_goal_doc("reports")).json()
+    assert body["status"] == "ok" and body["warnings"] == []
+
+
+def test_a_flow_with_a_warning_still_saves(populated_cache_home):
+    # Savable is the point: the warning rides along on the create response, and the document
+    # is really persisted (a warning is not a blocker).
+    r = client.post("/api/hosts/%s/flows" % HOST, json=_goal_doc("reports"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert [w["path"] for w in body["warnings"]] == ["steps[1].body[0]"]
+    fid = body["id"]
+    assert client.get("/api/hosts/%s/flows/%s" % (HOST, fid)).json()["doc"]["name"] == "g"
+
+    # …and an UPDATE that fixes the goal drops the warning.
+    r = client.put("/api/hosts/%s/flows/%s" % (HOST, fid), json=_goal_doc("report"))
+    assert r.status_code == 200 and r.json()["status"] == "ok"
+    assert r.json()["warnings"] == []
+
+
+def test_flows_op_schema_is_the_real_tables():
+    # The ONLY serialization of the op vocabulary — the canvas builds its edit forms from
+    # it. Asserted against flow.py's tables themselves, so the route CANNOT drift from the
+    # validator (add an op and this keeps passing; hand-list one and it fails).
+    from pinchtab_webgraph import flow as flow_mod
+
+    r = client.get("/api/flows/op_schema")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert set(body["leaf_ops"]) == set(flow_mod.LEAF_OPS)
+    assert set(body["body_ops"]) == set(flow_mod.BODY_OPS)
+    for op, spec in flow_mod.LEAF_OPS.items():
+        assert body["leaf_ops"][op] == {k: list(v) for k, v in spec.items()}
+    for op, spec in flow_mod.BODY_OPS.items():
+        assert body["body_ops"][op] == {k: list(v) for k, v in spec.items()}
+    assert body["capabilities"] == flow_mod.DEFAULT_CAPABILITIES
+    assert body["write_ops"] == sorted(flow_mod.WRITE_OPS)
+    assert body["body_vars"] == {op: sorted(v) for op, v in flow_mod.BODY_VARS.items()}
+    assert body["max_depth"] == flow_mod.MAX_DEPTH
+    assert body["max_steps"] == flow_mod.MAX_STEPS
 
 
 def test_flows_schema_stateless():

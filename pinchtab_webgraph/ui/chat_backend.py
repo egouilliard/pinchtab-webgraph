@@ -53,22 +53,23 @@ def resolve_backend_name(*, env=None, has_api_key=None, claude_cli_available=Non
 
 
 @asynccontextmanager
-async def _open_api_session(host, *, record=None):
+async def _open_api_session(host, *, record=None, mode="workspace"):
     """Yield a ready ChatState for the Anthropic-API backend (chat.py).
 
     This body is the verbatim logic moved out of server.py's old ``_open_chat_session``
     — key -> anthropic client -> MCP session -> tools — so the API backend behaviour is
     byte-identical. When ``record`` carries persisted ``wire_messages`` (a resumed
-    session), the ChatState is SEEDED with them so the model recalls prior turns. Raises
+    session), the ChatState is SEEDED with them so the model recalls prior turns. ``mode``
+    selects the prompt and the tool fence (chat.effective_tool_names). Raises
     chat.ChatUnavailable when a dep/key is missing.
     """
     chat.require_api_key()
     client = chat.build_anthropic_client()
     seed = chat.deserialize_messages((record or {}).get("wire_messages") or [])
     async with chat.mcp_client_session() as session:
-        tools = await chat.list_allowed_tools(session)
+        tools = await chat.list_allowed_tools(session, mode)
         yield chat.ChatState(host=host, messages=seed, mcp_session=session,
-                             anthropic_client=client, tools=tools)
+                             anthropic_client=client, tools=tools, mode=mode)
 
 
 @dataclass
@@ -78,13 +79,14 @@ class _ApiSession:
     record: dict = None
     host: str = None
 
-    async def handle(self, text, *, emit, live_url=None):
+    async def handle(self, text, *, emit, live_url=None, draft=None):
         # Record the user turn (never emitted — the client already showed it), wrap emit so
         # every streamed frame is folded into the transcript, run the turn, then persist
         # both the display transcript and the authoritative wire history for resume.
         chat_store.append_display_frame(self.record, {"type": "user", "text": text})
         sink = chat_store.TranscriptSink(self.record, emit)
-        await chat.handle_user_message(self.state, text, emit=sink, live_url=live_url)
+        await chat.handle_user_message(self.state, text, emit=sink, live_url=live_url,
+                                       draft=draft)
         self.record["wire_messages"] = chat.serialize_messages(self.state.messages)
         chat_store.save(self.record)
 
@@ -96,7 +98,7 @@ class _ClaudeCodeSession:
     record: dict = None
     host: str = None
 
-    async def handle(self, text, *, emit, live_url=None):
+    async def handle(self, text, *, emit, live_url=None, draft=None):
         chat_store.append_display_frame(self.record, {"type": "user", "text": text})
         sink = chat_store.TranscriptSink(self.record, emit)
 
@@ -106,28 +108,33 @@ class _ClaudeCodeSession:
                 self.record["sdk_session_id"] = sid
 
         await chat_claude_code.handle_user_message(
-            self.client, text, emit=sink, live_url=live_url,
+            self.client, text, emit=sink, live_url=live_url, draft=draft,
             on_sdk_session_id=on_sdk_session_id)
         chat_store.save(self.record)
 
 
 @asynccontextmanager
-async def open_chat_session(host, *, backend_name=None, record=None):
+async def open_chat_session(host, *, backend_name=None, mode=None, record=None):
     """Open the selected backend and yield a uniform session with ``handle()``.
 
     A brand-new chat (``record is None``) mints one via chat_store.create with the
-    resolved (or overridden) backend. A RESUMED chat carries its record — and the backend
-    is PINNED to ``record["backend"]``, never re-resolved, so a session opened under the
-    API backend never silently continues under Claude Code (or vice-versa). ``backend_name``
-    overrides selection only for a brand-new chat (tests pass it explicitly).
+    resolved (or overridden) backend and the requested ``mode``. A RESUMED chat carries its
+    record — and BOTH the backend and the mode are PINNED to the record, never re-resolved:
+    a session opened under the API backend never silently continues under Claude Code, and
+    a WORKSPACE session can never be resumed into flow mode (which would hand it the
+    `propose_flow` tool it was never granted). ``backend_name``/``mode`` therefore apply
+    only to a brand-new chat.
     """
     if record is None:
-        record = chat_store.create(host, backend=(backend_name or resolve_backend_name()))
+        record = chat_store.create(host, backend=(backend_name or resolve_backend_name()),
+                                   mode=(mode or "workspace"))
     name = record["backend"]
+    # PINNED from the record — the query param is irrelevant once a session exists.
+    session_mode = record.get("mode") or "workspace"
 
     if name == "claude_code":
-        async with chat_claude_code.open_client(host) as client:
+        async with chat_claude_code.open_client(host, mode=session_mode) as client:
             yield _ClaudeCodeSession(client=client, record=record, host=host)
     else:
-        async with _open_api_session(host, record=record) as state:
+        async with _open_api_session(host, record=record, mode=session_mode) as state:
             yield _ApiSession(state=state, record=record, host=host)

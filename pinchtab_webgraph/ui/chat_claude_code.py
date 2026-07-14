@@ -97,7 +97,7 @@ def resolve_model():
     return os.environ.get("PINCHTAB_UI_CLAUDE_CODE_MODEL") or None
 
 
-def _build_options(claude_agent_sdk, host, *, model=None, cwd=None):
+def _build_options(claude_agent_sdk, host, *, model=None, cwd=None, mode="workspace"):
     """Build the FULLY-LOCKED-DOWN ClaudeAgentOptions — the safety fence.
 
     Every field here is load-bearing for safety; ``test_build_options_lockdown_shape``
@@ -108,17 +108,21 @@ def _build_options(claude_agent_sdk, host, *, model=None, cwd=None):
       * mcp_servers={...stdio...} -> the ONLY tool source: our own MCP server, spawned
                                      as `python -m pinchtab_webgraph.mcp_server`.
       * strict_mcp_config=True    -> ignore any project .mcp.json.
-      * allowed_tools=<6 offline> -> auto-approve exactly the offline graph tools.
+      * allowed_tools=<mode set>  -> auto-approve exactly chat.effective_tool_names(mode):
+                                     the 6 offline graph tools, plus — in flow mode only —
+                                     the PURE `propose_flow` (no disk, no browser, no
+                                     subprocess; the MCP surface has no save/run tool at
+                                     all, so the agent still cannot persist or execute).
       * disallowed_tools=<2 live> -> strip crawl/ask_howto (they drive a live browser).
       * setting_sources=[]        -> no ~/.claude / CLAUDE.md / settings leak in.
       * permission_mode="default" -> so can_use_tool IS consulted (NOT bypassPermissions).
       * can_use_tool=<closure>    -> deny-by-default backstop (allow iff allow-listed).
-      * system_prompt=<host>      -> the same offline-navigation prompt as chat.py.
+      * system_prompt=<mode>      -> the same prompt chat.py drives this mode with.
       * include_partial_messages  -> StreamEvent text deltas for streaming.
       * model / cwd               -> account default unless overridden / an isolated,
                                      per-session temp cwd removed on close.
     """
-    allowed = [_qualified(n) for n in sorted(chat.OFFLINE_TOOL_NAMES)]
+    allowed = [_qualified(n) for n in sorted(chat.effective_tool_names(mode))]
 
     async def can_use_tool(tool_name, tool_input, context):
         if _is_allowed(tool_name, allowed):
@@ -152,7 +156,7 @@ def _build_options(claude_agent_sdk, host, *, model=None, cwd=None):
         setting_sources=[],
         permission_mode="default",
         can_use_tool=can_use_tool,
-        system_prompt=chat.build_system_prompt(host),
+        system_prompt=chat.system_prompt_for(host, mode),
         include_partial_messages=True,
         model=model,
         cwd=cwd,
@@ -193,12 +197,13 @@ async def _await_mcp_ready(client, *, attempts=50, delay=0.2):
 
 
 @asynccontextmanager
-async def open_client(host, *, model=None):
+async def open_client(host, *, model=None, mode="workspace"):
     """Yield a connected, locked-down ClaudeSDKClient. NEVER leaks a stray subprocess.
 
     Fails fast on a missing CLI (no SDK import), then lazily imports the SDK -> a
     structured ChatUnavailable on ImportError. The client runs in a fresh per-session
-    temp cwd, removed on close. The SDK terminates the child ``claude`` process itself
+    temp cwd, removed on close. ``mode`` selects the prompt + the tool fence and is fixed
+    for the life of the client. The SDK terminates the child ``claude`` process itself
     on __aexit__ (disconnect -> transport.close(): graceful wait -> SIGTERM -> SIGKILL,
     plus an atexit backstop), so no explicit process teardown is needed here.
     """
@@ -213,7 +218,7 @@ async def open_client(host, *, model=None):
 
     cwd = tempfile.mkdtemp(prefix="pinchtab-webgraph-cc-")
     try:
-        options = _build_options(claude_agent_sdk, host, model=model, cwd=cwd)
+        options = _build_options(claude_agent_sdk, host, model=model, cwd=cwd, mode=mode)
         client = claude_agent_sdk.ClaudeSDKClient(options)
         try:
             async with client:
@@ -318,6 +323,14 @@ async def run_conversation_turn(client, text, *, emit, on_sdk_session_id=None):
                                 tour = chat._extract_tour(payload)
                                 if tour is not None:
                                     await emit({"type": "tour", "data": tour})
+                        if name == "propose_flow" and status == "ok":
+                            # The SAME extractor the API backend uses (chat._extract_flow_draft)
+                            # — one definition of the frame, so both backends can never drift.
+                            payload = _parse_tool_payload(block.content)
+                            if payload is not None:
+                                draft = chat._extract_flow_draft(payload)
+                                if draft is not None:
+                                    await emit({"type": "flow_draft", **draft})
             continue
 
         if kind == "ResultMessage":
@@ -343,18 +356,23 @@ async def run_conversation_turn(client, text, *, emit, on_sdk_session_id=None):
         # SystemMessage task/hook subclasses and anything else: no-op.
 
 
-async def handle_user_message(client, text, *, emit, live_url=None, on_sdk_session_id=None):
+async def handle_user_message(client, text, *, emit, live_url=None, draft=None,
+                              on_sdk_session_id=None):
     """Run one turn. NEVER raises into the WebSocket; the client survives for reuse.
 
     Mirrors chat.handle_user_message: any ChatUnavailable / SDK / transport error is
     reported as a single structured {"type":"error", ...} frame. ``live_url`` (the live
-    pane's current page) is folded in via the SHARED ``chat.augment_with_location`` so
-    both backends learn the user's position identically. ``on_sdk_session_id`` is threaded
-    to run_conversation_turn to capture the SDK session id for a future resume.
+    pane's current page) and ``draft`` (the flow document on screen) are folded in via the
+    SHARED ``chat.augment_with_location`` / ``chat.augment_with_flow_draft`` so both
+    backends learn the user's position and the live draft identically.
+    ``on_sdk_session_id`` is threaded to run_conversation_turn to capture the SDK session
+    id for a future resume.
     """
+    prompt = chat.augment_with_flow_draft(
+        chat.augment_with_location(text, live_url), draft)
     try:
-        await run_conversation_turn(client, chat.augment_with_location(text, live_url),
-                                    emit=emit, on_sdk_session_id=on_sdk_session_id)
+        await run_conversation_turn(client, prompt, emit=emit,
+                                    on_sdk_session_id=on_sdk_session_id)
     except chat.ChatUnavailable as e:
         await emit({"type": "error", "status": "chat_unavailable",
                     "reason": e.reason, "detail": e.detail})

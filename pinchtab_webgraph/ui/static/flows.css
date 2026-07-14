@@ -102,10 +102,296 @@
 #flows-status { font-size: 0.78rem; }
 .flows-main h3 { margin: 0 0 0.4rem; font-size: 0.82rem; }
 
+/* the workbench: chat | canvas | JSON, side by side ------------------------- */
+/* All three are views of the SAME doc and all three are ALWAYS visible — the point of the
+   feature is watching an edit in one land in the other two. They only stack (below) when
+   the viewport genuinely can't hold three columns. */
+.flow-workbench {
+  display: flex;
+  gap: 0.9rem;
+  align-items: stretch;
+  min-height: 320px;
+}
+.flow-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+  min-height: 0;
+}
+.flow-chat-col { flex: 1 1 260px; }
+.flow-canvas-col { flex: 1.4 1 340px; }
+.flow-json-col { flex: 1 1 280px; }
+.flow-col-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.flow-col-head h3 { margin: 0; font-size: 0.82rem; }
+.flow-col-hint { font-size: 0.72rem; }
+
+/* the flow-authoring chat pane (the shared chat component, mounted with mode=flow) */
+.flow-chat-col .chat-log,
+.flow-chat-log {
+  flex: 1 1 auto;
+  min-height: 220px;
+  max-height: 460px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.5rem 0.6rem;
+}
+/* one chip per flow_draft frame — the conversation reads as a history of EDITS */
+.flow-draft-chip {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0.3rem 0.5rem;
+  margin: 0.3rem 0;
+  font-size: 0.76rem;
+}
+.flow-draft-chip.ok { border-color: var(--ok-fg); background: var(--ok-bg); color: var(--ok-fg); }
+.flow-draft-chip.bad { border-color: var(--warn-fg); background: var(--warn-bg); color: var(--warn-fg); }
+.flow-draft-dot { font-weight: 700; }
+.flow-draft-note { flex: 1 1 auto; min-width: 0; word-break: break-word; }
+/* replayed drafts only: history reaches the editor ONLY through this button */
+.flow-draft-restore {
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  padding: 0.1rem 0.5rem;
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.flow-draft-restore:hover { background: var(--panel); }
+.flow-draft-err {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  word-break: break-word;
+}
+
+/* the canvas: a VERTICAL flow diagram whose containers WRAP their children -- */
+.flow-canvas {
+  flex: 1 1 auto;
+  min-height: 240px;
+  max-height: 460px;
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--panel-2);
+  padding: 0.6rem;
+}
+.flow-node-list { display: flex; flex-direction: column; }
+
+/* the box */
+.flow-node {
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.flow-node-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.5rem;
+  flex-wrap: wrap;
+}
+.flow-node-op {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+.flow-node-write {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.05rem 0.3rem;
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+.flow-node-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.74rem;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+/* a body op (for_each / paginate) is a CONTAINER: the doubled border + the indented,
+   accent-railed body are the visible promise that these steps run INSIDE it. */
+.flow-node-container { border-width: 2px; border-color: var(--accent); }
+.flow-node-container > .flow-node-head { border-bottom: 1px dashed var(--border-strong); }
+.flow-node-body {
+  margin: 0.4rem 0.5rem 0.5rem 1rem;
+  padding-left: 0.7rem;
+  border-left: 3px solid var(--accent);
+}
+
+/* the connector between two consecutive boxes */
+.flow-connector {
+  width: 0;
+  height: 14px;
+  margin-left: 1.3rem;
+  border-left: 2px solid var(--border-strong);
+}
+
+/* the offending box, as reported by flow.validate()'s error path */
+.flow-node-error {
+  border-color: var(--err-fg);
+  box-shadow: 0 0 0 2px var(--err-bg);
+}
+
+/* AMBER, not red: the box is structurally FINE — its `goal` just doesn't resolve against the
+   crawled graph, so the run would abort here. Advisory (Save stays enabled), which is exactly
+   why it must not wear the same colour as an invalid document. */
+.flow-node-warn {
+  border-color: var(--warn-fg);
+  box-shadow: 0 0 0 2px var(--warn-bg);
+}
+.flow-node-warning {
+  margin: 0.35rem 0 0;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 0.74rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+.flow-node-warning-icon { margin-right: 0.35rem; }
+.flow-node-warning-cands {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.3rem;
+}
+.flow-node-warning-lead { opacity: 0.8; }
+.flow-node-cand {
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--warn-fg);
+  border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+}
+
+/* per-node toolbar */
+.flow-node-toolbar { display: flex; gap: 0.15rem; margin-left: auto; }
+.flow-node-btn {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.74rem;
+  line-height: 1;
+  padding: 0.2rem 0.35rem;
+  cursor: pointer;
+}
+.flow-node-btn:hover { background: var(--panel-2); color: var(--text); border-color: var(--border); }
+.flow-node-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.flow-node-del.confirm { color: var(--warn-fg); border-color: var(--warn-fg); }
+
+/* the per-op edit form — every field derived from GET /api/flows/op_schema */
+.flow-node-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.45rem 0.55rem 0.55rem;
+  border-top: 1px solid var(--border);
+  background: var(--panel-2);
+  border-radius: 0 0 9px 9px;
+}
+.flow-field { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.flow-field-label {
+  flex: 0 0 5.5rem;
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.flow-field-input { flex: 1 1 8rem; min-width: 0; display: flex; }
+.flow-field input[type="text"],
+.flow-field input[type="number"],
+.flow-field select,
+.flow-field-json,
+.flow-op-picker select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.76rem;
+}
+.flow-field-json {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+}
+.flow-field-oneof > select { flex: 0 0 auto; width: auto; }
+.flow-field-err { margin: 0; font-size: 0.72rem; color: var(--warn-fg); }
+.flow-field-hint { margin: 0; font-size: 0.72rem; color: var(--muted); }
+.flow-field-actions { display: flex; gap: 0.4rem; }
+.flow-node-save {
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 0.76rem;
+  padding: 0.25rem 0.7rem;
+  cursor: pointer;
+}
+.flow-node-save:hover { background: var(--accent-hover); }
+
+/* the op picker + the [+ add step] row */
+.flow-add-row { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; padding: 0.35rem 0 0 1rem; }
+.flow-add-btn,
+.flow-op-add,
+.flow-op-cancel {
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+}
+.flow-op-add { border-style: solid; }
+.flow-op-cancel { color: var(--muted); border-style: solid; }
+.flow-add-btn:hover,
+.flow-op-add:hover { background: var(--accent-soft); }
+.flow-op-picker,
+.flow-node-picker,
+.flow-node-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  padding: 0.35rem 0.5rem;
+}
+.flow-op-picker select { flex: 0 1 12rem; width: auto; }
+.flow-node-empty { margin: 0; padding: 0.35rem 0; font-size: 0.76rem; color: var(--muted); }
+
 /* JSON editor: a plain <textarea>, no editor library ----------------------- */
 #flow-editor-text {
   width: 100%;
-  min-height: 260px;
+  flex: 1 1 auto;
+  min-height: 240px;
+  max-height: 460px;
   resize: vertical;
   box-sizing: border-box;
   padding: 0.6rem 0.7rem;
@@ -137,6 +423,12 @@
   padding: 0.35rem 0.6rem;
 }
 .flow-validation.bad {
+  background: var(--err-bg);
+  color: var(--err-fg);
+  padding: 0.35rem 0.6rem;
+}
+/* the THIRD state: valid + savable, but a goal doesn't resolve against the crawled graph. */
+.flow-validation.warn {
   background: var(--warn-bg);
   color: var(--warn-fg);
   padding: 0.35rem 0.6rem;
@@ -302,9 +594,18 @@
 
 .flow-empty { font-size: 0.82rem; color: var(--muted); padding: 0.4rem 0; margin: 0; }
 
-/* responsive: stack the two panes on a narrow viewport ---------------------- */
+/* responsive: stack the panes on a narrow viewport -------------------------- */
+/* The workbench folds before the sidebar does: three columns need real width, but the
+   canvas and the JSON must stay side by side for as long as they possibly can — seeing an
+   edit land in the other view IS the feature. */
+@media (max-width: 1180px) {
+  .flow-workbench { flex-wrap: wrap; }
+  .flow-chat-col { flex: 1 1 100%; }
+}
 @media (max-width: 860px) {
   .flows-body { flex-direction: column; }
+  .flow-workbench { flex-direction: column; }
+  .flow-canvas, .flow-chat-log, #flow-editor-text { max-height: 320px; }
   .flows-sidebar {
     flex: 0 0 auto;
     border-right: 0;

@@ -592,3 +592,70 @@ def test_perform_no_match_returns_before_bridge(tmp_path):
     p.write_text(json.dumps(_PERFORM_GRAPH))
     result = asyncio.run(mcp_server.perform(goal="frobnicate", graph=str(p)))
     assert result["status"] == "no_match"
+
+
+# --- propose_flow: the flow-authoring agent's ONLY verb (and it is PURE) ------
+
+def _registered_tool_names():
+    return sorted(t.name for t in asyncio.run(mcp_server.mcp.list_tools()))
+
+
+def test_propose_flow_ok_echoes_doc_and_verdict():
+    doc = {"name": "invoices", "host": "app.test",
+           "steps": [{"op": "goto", "url": "https://app.test/invoices"}]}
+    out = mcp_server.propose_flow(doc, note="first draft")
+    assert out["status"] == "ok"
+    assert out["name"] == "invoices" and out["steps"] == 1
+    assert out["capabilities"] == {"allow_submit": False, "allow_download": True,
+                                   "allow_upload": False}
+    assert out["doc"] == doc              # the WHOLE document is echoed back
+    assert out["note"] == "first draft"
+
+
+def test_propose_flow_invalid_still_echoes_the_doc():
+    # an invalid draft must still come back with the document + the reason, so the UI can
+    # render the broken doc and the model can fix the reported path.
+    out = mcp_server.propose_flow({"name": "x", "steps": [{"op": "nope"}]})
+    assert out["status"] == "invalid"
+    assert out["path"] == "steps[0]" and "nope" in out["error"]
+    assert out["doc"] == {"name": "x", "steps": [{"op": "nope"}]}
+    assert out["note"] is None
+
+
+def test_propose_flow_is_pure_no_disk_no_subprocess(monkeypatch, isolated_cache_home):
+    # SAFETY: propose_flow validates and echoes — it must touch NOTHING. Poison every I/O
+    # primitive it could reach; a single filesystem write or subprocess spawn fails here.
+    import builtins
+    import subprocess as _sp
+
+    def boom(*a, **k):
+        raise AssertionError("propose_flow performed I/O: %r %r" % (a, k))
+
+    monkeypatch.setattr(builtins, "open", boom)
+    monkeypatch.setattr(os, "replace", boom)
+    monkeypatch.setattr(os, "makedirs", boom)
+    monkeypatch.setattr(os, "remove", boom)
+    monkeypatch.setattr(_sp, "Popen", boom)
+    monkeypatch.setattr(_sp, "run", boom)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
+
+    out = mcp_server.propose_flow(
+        {"name": "f", "steps": [{"op": "goto", "url": "https://x.test/"}]}, note="n")
+    assert out["status"] == "ok"
+
+    # …and nothing landed in the (isolated) home dir.
+    assert not any(os.scandir(str(isolated_cache_home)))
+
+
+def test_no_flow_save_or_run_tool_exists_anywhere():
+    # THE authority invariant: the MCP surface exposes exactly ONE flow verb, and it is
+    # the pure proposer. There is deliberately no save/update/delete/run flow tool, so the
+    # chat agent has NO code path to persist or execute a flow — only the human's Save/Run
+    # buttons can. If a new flow tool is ever added, this test must be the thing that
+    # stops it.
+    names = _registered_tool_names()
+    flow_tools = [n for n in names if "flow" in n]
+    assert flow_tools == ["propose_flow"]
+    for forbidden in ("save_flow", "create_flow", "update_flow", "delete_flow",
+                      "run_flow", "flow_run", "execute_flow"):
+        assert forbidden not in names

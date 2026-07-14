@@ -268,6 +268,13 @@ warranted: a crawl *structurally never submits*, where a flow's `do{submit:true}
   `flow.validate()`: pure, no browser, no graph. A typo'd `${itm.href}` is caught **as you type**,
   named together with its exact path in the document, and **Save stays disabled** until the document
   is legal. A bad document can never be saved, let alone scheduled.
+- **Resolvability warnings (amber).** The same call re-resolves every `goto`/`do` **`goal`** against
+  the host's *crawled graph*. A goal that matches nothing (`"reports"` on a site that only has
+  “Add Report”) is a valid document that would abort at run time — so the banner turns amber
+  (`valid — 3 steps · ⚠ 1 step may not resolve`), the offending canvas box goes amber
+  (`.flow-node-warn`, distinct from the red `.flow-node-error`), and the box prints the message plus
+  the *candidate labels the site actually has*. **Save stays enabled** — it is a warning, not a
+  blocker (the flow may predate the crawl), and an uncrawled host produces no warnings at all.
 - **The safety model is visible, not just enforced.** The **Allow-submit** / **Allow-upload**
   toggles are **disabled unless the flow document itself declares that capability**, and **Dry run
   is checked by default**. That makes *"a write happens only if the flow **declares** it **and** the

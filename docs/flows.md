@@ -421,6 +421,15 @@ still author and validate a flow on a server that is not allowed to run one.
   browser, no graph. A typo'd `${itm.href}` turns the bar red and names both the variable *and its
   path in the document* (`steps[1].body[0].body[0].href`) before a browser is ever leased. **Save
   is disabled while the document is invalid.**
+- **Resolvability warnings** (amber) — the one thing `flow.validate()` structurally *cannot* know:
+  whether a step's `goal` names anything on the actual site. `{"op":"goto","goal":"reports"}` on a
+  site whose only trigger is “Add Report” is a *perfectly valid document* that aborts the moment it
+  runs. So the route ALSO re-resolves every `goto`/`do` goal through `api.resolve_action` against the
+  host's cached graph (`flow_resolve.py`) and returns a `warnings` list: the step's `path` (same
+  grammar, so the canvas paints the box amber), the message, and the **candidate labels the site
+  really has** — *did you mean “Add Report”?*. These are **warnings, not errors**: the verdict stays
+  `ok` and **Save stays enabled**, because a flow may legitimately be authored before the crawl. A
+  host with no cache (or no `host` at all) simply yields no warnings.
 - **Run panel** — built from the flow's own declared `inputs` (one field per input, typed and
   marked required) and its declared `capabilities`. See below.
 - **Run log** — the streaming step feed, plus a live **`N new · M dupe`** counter fed by the
@@ -511,7 +520,7 @@ CRUD + audit. All of it works with the env gate **off**; only `/ws/flows/run` is
 
 | Method · Path | Does |
 | --- | --- |
-| `POST /api/flows/validate` | Stateless `flow.validate()` on a posted document → `{"status":"ok", name, host, steps, capabilities, inputs}` or `{"status":"invalid", path, error}`. The editor's live check. |
+| `POST /api/flows/validate` | `flow.validate()` on a posted document → `{"status":"ok", name, host, steps, capabilities, inputs, warnings}` or `{"status":"invalid", path, error}`. The editor's live check. `warnings` is the **resolvability** pass (`flow_resolve.py`): `[{"path":"steps[0]", "op":"goto", "goal":"reports", "match":null, "message":"no trigger matches “reports” in the example.test graph", "candidates":["Add Report"]}]` — advisory, still `ok`, still savable, and empty when the host has no cache. `POST`/`PUT` of a flow return it too. |
 | `POST /api/flows/schema` | Stateless — the document's `inputs` as a JSON Schema (what the run form is built from). |
 | `GET /api/hosts/{host}/flows` | `{"flows":[…]}` — the host's flow **summaries** (id, name, steps, capabilities, inputs, `run_count`, timestamps; **no** doc). |
 | `POST /api/hosts/{host}/flows` | Create. Validates first. `429 too_many_flows` at the cap. |

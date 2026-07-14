@@ -38,7 +38,7 @@ from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP, Context
 
-from . import api, cache_store
+from . import api, cache_store, flow as flow_mod
 
 mcp = FastMCP("pinchtab-webgraph")
 
@@ -173,6 +173,33 @@ def link_paths(frm: str, to: str, host: str | None = None, graph: str | None = N
     """
     return _call(api.link_paths, host, graph, frm=frm, to=to, structural=structural,
                  all=all, max_len=max_len, max_paths=max_paths)
+
+
+# --- flow drafting (PURE: no disk, no browser, no subprocess) ----------------
+#
+# The flow-authoring agent's ONLY write-shaped verb — and it does not write. It exists
+# so the model can HAND a candidate document to the UI: the chat layer intercepts every
+# call and turns it into a `flow_draft` frame, so the canvas/JSON pane re-renders live
+# as the conversation refines the draft. Deliberately there is NO save/update/delete/run
+# flow tool anywhere in this module: the agent has no code path to persist or execute a
+# flow, so the human's Save/Run buttons remain the ONLY authority. Keep it that way.
+
+@mcp.tool()
+def propose_flow(doc: dict, note: str | None = None) -> dict:
+    """Validate a candidate flow document and hand it to the UI as the current draft.
+
+    Performs NO disk write and NO browser action — it runs flow.validate_report(doc) and
+    echoes `doc` back with the verdict. The chat layer intercepts every call and emits a
+    `flow_draft` frame so the UI's canvas/JSON re-renders. Nothing here can save or execute
+    a flow. Call it every time you want to show or update the draft — always the WHOLE
+    document, never a diff. `note` = a short description of what changed.
+
+    Returns `{"status":"ok","name","host","steps","capabilities","inputs","doc","note"}`
+    or `{"status":"invalid","path","error","doc","note"}` — an invalid draft is still
+    echoed back so you can see (and fix) exactly what you sent.
+    """
+    report = flow_mod.validate_report(doc)
+    return {**report, "doc": doc, "note": note}
 
 
 # --- resources (interaction-graph cache) -------------------------------------

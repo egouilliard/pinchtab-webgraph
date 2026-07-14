@@ -1,9 +1,22 @@
 // pinchtab-webgraph web UI — the Flows view.
 //
-// Loaded EAGERLY (after explore.js) because it has NO vendor deps. It owns the 4th tab:
-// the saved automations for the selected host. A flow is a declarative JSON document
-// (goto/do/click/fill/select/check/upload/download/collect/wait/set/log + for_each /
-// paginate) run by a step VM against a real browser.
+// Loaded EAGERLY (after explore.js, with flow_canvas.js before it) because it has NO
+// vendor deps. It owns the 4th tab: the saved automations for the selected host. A flow is
+// a declarative JSON document (goto/do/click/fill/select/check/upload/download/collect/
+// wait/set/log + for_each / paginate) run by a step VM against a real browser.
+//
+// ONE FLOW DOC, THREE SYNCHRONIZED VIEWS — this is the shape of the whole file:
+//
+//     chat agent  ──┐                    ┌──> the JSON textarea
+//                   ├──>  flowDoc  ──────┤
+//     the canvas  ──┘   (the ONE truth)  └──> the visual canvas (flow_canvas.js)
+//
+// Every view can MUTATE the doc; setDoc() then re-renders the OTHER two and re-validates.
+// The `source` argument is what stops the loop: a view is never re-rendered from its own
+// edit (that would fight the caret in the textarea, and pointlessly repaint the canvas,
+// which repaints itself). Validation runs on EVERY change, and an invalid verdict carries
+// a path in flow.py's grammar — which is exactly a canvas box's `data-path`, so the bad
+// box lights up instead of the user hunting for it.
 //
 // The whole point of the view is to make the CONTENT-HASH DEDUPE visible: a `download`
 // step frame arrives with status "new" or "dupe", so a re-run of a flow reports the files
@@ -38,6 +51,13 @@ let flowNewCount = 0;         // live dedupe counters, fed by `download` step fr
 let flowDupeCount = 0;
 let flowWsBootstrapped = false;  // this socket got its `flow` frame — i.e. the server ACCEPTED it
 let flowWsReopenTimer = null;    // pending auto-reopen after an unsolicited drop
+
+// the ONE flow doc + the machinery the three views share
+let flowDoc = null;              // the single source of truth (chat, canvas and JSON edit THIS)
+let flowDocGen = 0;              // monotonic doc generation — the anti-clobber guard (setDoc)
+let opSchema = null;             // GET /api/flows/op_schema — the REAL per-op key tables
+let opSchemaPromise = null;      // memoized in-flight fetch
+let flowChat = null;             // the flow-mode chat pane (createChatPane, from app.js)
 
 const FLOW_CAPS = ["allow_submit", "allow_upload", "allow_download"];
 const FLOW_CAP_IDS = {
@@ -137,6 +157,58 @@ function flInputSpecs(inputs) {
   return out;
 }
 
+// --- the op schema: the ONLY description of what a step may contain ----------
+// Fetched once and memoized. Every per-op edit form on the canvas is derived from it, so
+// there is no second copy of the DSL in JS to drift when an op is added server-side.
+function ensureOpSchema() {
+  if (opSchema) return Promise.resolve(opSchema);
+  if (!opSchemaPromise) {
+    opSchemaPromise = fetch("/api/flows/op_schema")
+      .then((res) => res.json())
+      .then((data) => {
+        opSchema = (data && typeof data === "object") ? data : null;
+        return opSchema;
+      })
+      .catch(() => {
+        opSchemaPromise = null;    // a memoized failure would poison every later retry
+        return null;
+      });
+  }
+  return opSchemaPromise;
+}
+
+// --- setDoc: the three-way sync, in one place --------------------------------
+// `source` is the view the edit CAME FROM, and it is never re-rendered from its own edit:
+//   "json"   — rewriting the textarea mid-keystroke would fight the caret.
+//   "canvas" — the canvas repaints itself from the new doc (see flow_canvas.js's
+//              canvasMutate); a second render here would be wasted work and a re-entrancy
+//              hazard.
+//   "chat" / "load" — both other views repaint.
+//
+// `gen` is the ANTI-CLOBBER GUARD, and it is why this is not a timing bet. Every act that
+// REPLACES what the editor is working on (openFlow, newFlow, resetFlowEditor) bumps
+// flowDocGen. An async writer — an openFlow() still awaiting its fetch — captures the
+// generation it started under and hands it back here; if the generation has moved on, its
+// document is a straggler from a superseded state and is DROPPED rather than painted over
+// whatever the user is now looking at. Callers with nothing to be stale about (the JSON
+// textarea, the canvas, a live chat draft, a human's Restore click — all synchronous with
+// the current doc) pass no `gen` and are never gated.
+function setDoc(doc, source, gen) {
+  if (gen !== undefined && gen !== flowDocGen) return;   // superseded writer — drop it
+  flowDoc = doc;
+  const editor = flEl("flow-editor-text");
+  const canvas = flEl("flow-canvas");
+  if (editor && source !== "json") {
+    editor.value = JSON.stringify(doc, null, 2);
+  }
+  if (canvas && source !== "canvas" && typeof renderCanvasFromDoc === "function") {
+    renderCanvasFromDoc(canvas, doc, opSchema, {
+      onMutate: (next) => setDoc(next, "canvas"),
+    });
+  }
+  scheduleValidate();              // every change is validated — no exceptions
+}
+
 // --- lifecycle: open / destroy (app.js owns the host-switch calls) -----------
 function openFlowsView(host) {
   if (host && host === flowsHost) return;    // same host already rendered — no-op
@@ -147,16 +219,133 @@ function openFlowsView(host) {
   if (list) list.textContent = "";
   if (!host) {
     if (status) status.textContent = "Pick a host first.";
+    if (flowChat) flowChat.destroy();
     return;
   }
   if (status) status.textContent = "";
+  ensureOpSchema();                // the canvas needs it before it can offer an op picker
+  const chat = ensureFlowChat();
+  if (chat) chat.selectHost(host);
   loadFlowList(host);
+}
+
+// The Flows tab's chat pane: the SAME factory the Workspace tab uses (app.js), mounted a
+// second time with flow-namespaced ids and `mode=flow` — so it lists only flow chats, talks
+// to the flow-authoring agent, ships the LIVE doc as `draft` on every message, and feeds
+// LIVE `flow_draft` frames into setDoc() (replayed ones only render — see applyFlowDraft).
+function ensureFlowChat() {
+  if (flowChat) return flowChat;
+  if (typeof createChatPane !== "function") return null;   // app.js absent — degrade quietly
+  flowChat = createChatPane({
+    ids: {
+      log: "flow-chat-log",
+      status: "flow-chat-status",
+      form: "flow-chat-form",
+      input: "flow-chat-input",
+      sessions: "flow-chat-sessions",
+      sessionList: "flow-chat-session-list",
+      sessionNew: "flow-chat-session-new",
+    },
+    mode: "flow",
+    readyText: "ready — describe the automation you want.",
+    getDraft: () => flowDoc,       // ALWAYS the live doc, never the agent's stale copy
+    onFlowDraft: applyFlowDraft,
+  });
+  return flowChat;
+}
+
+// A `flow_draft` frame. TWO frames wear this type and they are NOT the same thing:
+//
+//   LIVE  (meta.live)  — the agent rewrote the doc, on this turn, in answer to what the
+//                        human just asked. It is applied to the editor, EVEN WHEN
+//                        status === "invalid". That is the point of the three-way view: a
+//                        withheld bad draft teaches the user nothing, whereas an applied
+//                        one shows them exactly WHAT the agent wrote and WHERE it's wrong
+//                        — the canvas highlights the offending box and the banner names
+//                        the error. They can then fix it by hand, or say so in the chat.
+//
+//   REPLAYED           — a stored draft, re-read out of a transcript when a chat session
+//                        is opened. It is HISTORY: a doc from twenty turns ago, and quite
+//                        possibly a doc for a different flow than the one now open. It is
+//                        NEVER applied. Replaying a conversation must not mutate the
+//                        document you are working on, and a replay landing a beat after a
+//                        click on a saved flow would otherwise clobber it silently. It
+//                        gets its chip plus a "Restore this draft" button — the ONLY way a
+//                        historical doc reaches the editor is a human pressing that.
+function applyFlowDraft(frame, pane, meta) {
+  if (!frame) return;
+  const live = !!(meta && meta.live);
+  const doc = (frame.doc && typeof frame.doc === "object") ? frame.doc : null;
+  if (live && doc) applyDraftDoc(frame, doc);
+  if (pane) pane.appendNode(buildDraftChip(frame, live ? null : doc));
+}
+
+// Put a draft doc (live, or a restored historical one) into the three views, and paint the
+// server's verdict NOW rather than waiting out the 300ms debounce — the canvas box lights
+// up in the same frame the draft lands in.
+function applyDraftDoc(frame, doc) {
+  setDoc(doc, "chat");
+  if (frame.status === "invalid") {
+    const detail = (frame.path ? String(frame.path) + ": " : "") +
+      (frame.error || "invalid flow");
+    showValidation("bad", detail);
+    const canvas = flEl("flow-canvas");
+    if (canvas && typeof highlightPath === "function") highlightPath(canvas, frame.path);
+  }
+}
+
+// One compact chip per draft, so the conversation reads as a HISTORY OF EDITS rather than
+// a wall of prose. Every string on it (note / name / path / error) is model-authored —
+// createElement + textContent, never innerHTML.
+//
+// `restoreDoc` (replayed drafts only) adds the Restore button that applies that historical
+// document. A real <button>, so it is focusable and Enter/Space-activatable.
+function buildDraftChip(frame, restoreDoc) {
+  const invalid = frame.status === "invalid";
+  const chip = document.createElement("div");
+  chip.className = "flow-draft-chip" + (invalid ? " bad" : " ok");
+
+  const dot = document.createElement("span");
+  dot.className = "flow-draft-dot";
+  dot.textContent = invalid ? "!" : "✓";        // fixed glyph, not model data
+  chip.appendChild(dot);
+
+  const note = document.createElement("span");
+  note.className = "flow-draft-note";
+  note.textContent = frame.note || frame.name || "flow updated";   // model string
+  chip.appendChild(note);
+
+  if (restoreDoc) {
+    const btn = document.createElement("button");
+    btn.type = "button";                        // never a form submit
+    btn.className = "flow-draft-restore";
+    btn.textContent = "Restore this draft";     // fixed UI copy
+    btn.addEventListener("click", () => {
+      applyDraftDoc(frame, restoreDoc);
+      setFlowSaveMsg("Draft restored into the editor — Save to keep it.");
+    });
+    chip.appendChild(btn);
+  }
+
+  if (invalid) {
+    const err = document.createElement("span");
+    err.className = "flow-draft-err";
+    err.textContent = (frame.path ? frame.path + ": " : "") + (frame.error || "invalid");
+    chip.appendChild(err);
+  }
+  return chip;
+}
+
+function setFlowSaveMsg(text) {
+  const msg = flEl("flow-save-msg");
+  if (msg) msg.textContent = text;              // fixed UI copy
 }
 
 // app.js calls this on EVERY host switch (before opening the new one) so a stale host's
 // flows — and its run socket — never bleed into the next. Mirrors destroyExploreView().
 function destroyFlowsView() {
   closeFlowSocket();
+  if (flowChat) flowChat.destroy();     // the flow chat is per-host too — never bleed it
   flowsHost = null;
   flowList = [];
   resetFlowEditor();
@@ -185,9 +374,15 @@ function resetFlowEditor() {
   flowId = null;
   flowSummary = null;
   flowValid = false;
+  flowDoc = null;                      // the three views share ONE doc — drop it once
+  flowDocGen += 1;                     // …and invalidate every in-flight writer of the old one
   if (flowValidTimer) { clearTimeout(flowValidTimer); flowValidTimer = null; }
   const editor = flEl("flow-editor-text");
   if (editor) editor.value = "";
+  const canvas = flEl("flow-canvas");
+  if (canvas && typeof renderCanvasFromDoc === "function") {
+    renderCanvasFromDoc(canvas, null, opSchema, {});   // paints the "no flow open" note
+  }
   for (const id of ["flow-validation", "flow-log", "flow-inputs", "flow-runs",
                     "flow-artifacts", "flow-dedupe"]) {
     const node = flEl(id);
@@ -277,8 +472,9 @@ async function openFlow(id) {
   const host = flowsHost;
   if (!host || !id) return;
   closeFlowSocket();
-  resetFlowEditor();
-  flowId = id;
+  resetFlowEditor();                           // bumps flowDocGen: THIS is now the doc
+  const gen = flowDocGen;                      // …and anything that lands under an older
+  flowId = id;                                 //    generation has been superseded
   renderFlowList();                            // reflect the selection
 
   let record;
@@ -289,12 +485,13 @@ async function openFlow(id) {
     setFlowsStatus("Could not load that flow.");
     return;
   }
-  if (flowsHost !== host || flowId !== id) return;
+  await ensureOpSchema();                      // the canvas can't build forms without it
+  if (flowsHost !== host || flowId !== id || flowDocGen !== gen) return;
 
-  const editor = flEl("flow-editor-text");
-  if (editor && record && record.doc) {
-    editor.value = JSON.stringify(record.doc, null, 2);
-  }
+  // ONE call populates BOTH the textarea and the canvas — the two views can no longer be
+  // loaded out of step with each other, because there is only one way in.
+  if (record && record.doc) setDoc(record.doc, "load", gen);
+
   const del = flEl("flow-delete");
   if (del) del.hidden = false;
   const save = flEl("flow-save");
@@ -319,16 +516,21 @@ function setFlowsStatus(text) {
   if (status) status.textContent = text;
 }
 
-function newFlow() {
+async function newFlow() {
   if (!flowsHost) { setFlowsStatus("Pick a host first."); return; }
+  const host = flowsHost;
   closeFlowSocket();
-  resetFlowEditor();
+  resetFlowEditor();                     // bumps flowDocGen — see setDoc()
+  const gen = flowDocGen;
   renderFlowList();
+  // A new flow also gets a FRESH chat: authoring it is a conversation, and starting one
+  // inside the transcript of the last flow would have the agent editing the wrong story.
+  if (flowChat) flowChat.newChat();
+  await ensureOpSchema();
+  if (flowsHost !== host || flowDocGen !== gen) return;
+  setDoc(flowStarterDoc(host), "load", gen);
   const editor = flEl("flow-editor-text");
-  if (editor) {
-    editor.value = JSON.stringify(flowStarterDoc(flowsHost), null, 2);
-    editor.focus();
-  }
+  if (editor) editor.focus();
   validateNow();
 }
 
@@ -392,18 +594,37 @@ async function validateNow() {
   }
   if (seq !== flowValidSeq) return;            // a newer keystroke already won
 
+  const canvas = flEl("flow-canvas");
   if (data && data.status === "ok") {
     flowValid = true;
-    setSaveEnabled(true);
-    showValidation("ok", validSummaryText(data));
+    setSaveEnabled(true);                      // a WARNING IS NOT A BLOCKER — Save stays on
+    const warns = flowWarnings(data);
+    showValidation(warns.length ? "warn" : "ok", validSummaryText(data));
+    if (canvas && typeof highlightPath === "function") highlightPath(canvas, null);  // clear
+    if (canvas && typeof markWarnings === "function") markWarnings(canvas, warns);
     return;
   }
-  const path = data && data.path ? String(data.path) + ": " : "";
+  const path = data && data.path ? String(data.path) : "";
   const detail = (data && (data.error || data.detail)) || "invalid flow";
-  showValidation("bad", path + detail);
+  showValidation("bad", (path ? path + ": " : "") + detail);
+  // flow.validate() reports its path in the SAME grammar the canvas uses for `data-path`,
+  // so the error is ADDRESSABLE: light up the actual BOX instead of printing a path and
+  // leaving the user to count brackets.
+  if (canvas && typeof highlightPath === "function") highlightPath(canvas, path);
+  if (canvas && typeof markWarnings === "function") markWarnings(canvas, []);  // clear amber
 }
 
-// "valid — 4 steps · download · inputs: since" — the one-line contract of the document.
+// RESOLVABILITY warnings from the validate response. A structurally VALID document whose
+// `goal` matches nothing in the host's crawled graph: the flow saves, runs, and only then
+// aborts — so it must be visible at authoring time. Advisory, hence a third banner state
+// (amber) rather than "invalid", and Save is untouched.
+function flowWarnings(data) {
+  const list = (data && Array.isArray(data.warnings)) ? data.warnings : [];
+  return list.filter((w) => w && typeof w === "object");
+}
+
+// "valid — 4 steps · download · inputs: since" — the one-line contract of the document,
+// plus "⚠ 1 step may not resolve" when the graph disagrees with a goal.
 function validSummaryText(data) {
   const steps = Array.isArray(data.steps) ? data.steps.length : data.steps;
   const parts = ["valid"];
@@ -412,6 +633,11 @@ function validSummaryText(data) {
   parts.push(caps.length ? "capabilities: " + caps.join(", ") : "no capabilities");
   const names = flInputSpecs(data.inputs).map((i) => i.name);
   parts.push(names.length ? "inputs: " + names.join(", ") : "no inputs");
+  const warns = flowWarnings(data);
+  if (warns.length) {
+    parts.push("⚠ " + warns.length + (warns.length === 1 ? " step may not resolve"
+                                                         : " steps may not resolve"));
+  }
   return parts[0] + " — " + parts.slice(1).join(" · ");
 }
 
@@ -454,7 +680,14 @@ async function saveFlow() {
     }
     return;
   }
-  if (msg) msg.textContent = editing ? "updated." : "saved.";
+  // Saved — but if a goal doesn't resolve, say so HERE too: the save banner is the last
+  // thing the user reads before they walk away thinking the flow is good to run.
+  const saveWarns = flowWarnings(data);
+  const warnNote = saveWarns.length
+    ? " ⚠ " + saveWarns.length + (saveWarns.length === 1 ? " step may not resolve"
+                                                         : " steps may not resolve")
+    : "";
+  if (msg) msg.textContent = (editing ? "updated." : "saved.") + warnNote;
   await loadFlowList(host);
   // A fresh POST mints an id server-side; find it by name so the new flow opens directly.
   if (!editing) {
@@ -807,12 +1040,19 @@ function stepDetail(step) {
 function logAddResult(result) {
   const status = result.status || "?";
   const stats = result.stats || {};
+  const ok = status === "ok";
   const bits = ["run " + status];
   if (typeof result.duration_s === "number") bits.push(result.duration_s.toFixed(1) + "s");
   if (typeof stats.steps_executed === "number") bits.push(stats.steps_executed + " steps");
   if (typeof stats.artifacts_new === "number") bits.push(stats.artifacts_new + " new");
   if (typeof stats.artifacts_dupe === "number") bits.push(stats.artifacts_dupe + " dupe");
-  logAddLine("✓ " + bits.join(" · "), status === "ok" ? "ok" : "error");
+  logAddLine((ok ? "✓ " : "✗ ") + bits.join(" · "), ok ? "ok" : "error");
+  // WHY the reason gets its own line: a run can abort for a reason the static validator
+  // cannot see (an unresolvable `goto` goal, a missing capability). `flow_cmd` prints it
+  // ("✗ ABORTED — <reason>"); without this the web UI just said "aborted" and left the
+  // user with no idea what to fix. Keep the two surfaces at parity.
+  if (result.aborted) logAddLine("aborted — " + String(result.aborted), "error");
+  if (result.detail) logAddLine(String(result.detail), "error");
 }
 
 // --- the dedupe counter (the differentiator, made visible DURING the run) -----
@@ -997,8 +1237,23 @@ function buildArtifactRow(a) {
 
 // --- wiring (flows.js loads exactly once, so top-level listeners are safe) ----
 (function wireFlows() {
+  // The JSON textarea is a first-class EDITOR of the shared doc, not a display of it: a
+  // keystroke that leaves valid JSON behind flows straight into setDoc(…, "json"), which
+  // repaints the canvas. A SYNTAX error stays local (the banner below says so) — there is
+  // nothing to sync yet, and round-tripping half-typed JSON would just flicker the canvas.
   const editor = flEl("flow-editor-text");
-  if (editor) editor.addEventListener("input", scheduleValidate);
+  if (editor) {
+    editor.addEventListener("input", () => {
+      let doc;
+      try {
+        doc = JSON.parse(editor.value);
+      } catch (err) {
+        scheduleValidate();          // keeps the existing local "not valid JSON" banner
+        return;
+      }
+      setDoc(doc, "json");           // setDoc schedules the validation itself
+    });
+  }
 
   const nw = flEl("flow-new");
   if (nw) nw.addEventListener("click", newFlow);

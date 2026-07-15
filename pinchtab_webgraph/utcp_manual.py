@@ -15,7 +15,9 @@ that mirrors the `query` (and `crawl` / `ask`) command surface.
 
 The exposed tool surface is a deliberate SUBSET: only required core args (so every
 command string is free of optional placeholders), and query tools route by `--host`
-only. Manual generation is pure stdlib; the `[utcp]` extra is only for the
+only — except the two cross-host content tools (`find_content_hosts` /
+`list_content_hosts`), which take no host and span every cached host at once.
+Manual generation is pure stdlib; the `[utcp]` extra is only for the
 importorskip-gated test that validates this manual against the real UTCP model.
 
 Generic + stdlib only: routing is by hostname, nothing app-specific.
@@ -68,7 +70,7 @@ def _tool(name, description, tags, args, command, status_enum=None, extra_out=No
     }
 
 
-# --- the 6 offline query tools (share the `_tool` code path) ------------------
+# --- the 8 offline query tools (share the `_tool` code path) ------------------
 
 _OFFLINE = " Answers OFFLINE from the per-host cache (no browser, no network)."
 
@@ -116,6 +118,29 @@ _QUERY_TOOLS = [
         command="pwg query list_content --host UTCP_ARG_host_UTCP_END",
         status_enum=["ok", "empty"],
         extra_out={"views": {"type": "array"}},
+    ),
+    dict(
+        name="find_content_hosts",
+        description="Search captured data collections across EVERY cached host and merge the "
+        "matches, ranked by reach and labeled by origin host (each view carries its `host`)."
+        + _OFFLINE.replace("a per-host cache", "every per-host cache")
+        + " Takes no host — it spans them all. Returns JSON with a `status` in {ok, no_match}.",
+        tags=["offline", "content", "search", "cross-host"],
+        args=[("text", "text to search for across every host's captured collections")],
+        command="pwg query find_content_hosts --text UTCP_ARG_text_UTCP_END",
+        status_enum=["ok", "no_match"],
+        extra_out={"views": {"type": "array"}, "hosts_matched": {"type": "array"}},
+    ),
+    dict(
+        name="list_content_hosts",
+        description="Per-host inventory of captured data collections across EVERY cached host, "
+        "grouped by origin host." + _OFFLINE.replace("a per-host cache", "every per-host cache")
+        + " Takes no host — it spans them all. Returns JSON with a `status` in {ok, empty}.",
+        tags=["offline", "content", "inventory", "cross-host"],
+        args=[],
+        command="pwg query list_content_hosts",
+        status_enum=["ok", "empty"],
+        extra_out={"hosts": {"type": "array"}, "hosts_with_content": {"type": "array"}},
     ),
     dict(
         name="list_forms",

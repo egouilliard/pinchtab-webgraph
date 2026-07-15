@@ -61,7 +61,7 @@ Automating or documenting a web app usually means one of two brittle things: han
 - **How-to guides & onboarding** — "how do I create a template / an invoice / a new team?" becomes a shortest-path query that returns the exact clicks *and* the form fields, in milliseconds.
 - **Change detection & QA** — snapshot the full control + content graph, then diff two crawls to see what moved, appeared, or disappeared.
 - **Site maps for humans and agents** — a structured, low-noise map of an app's real navigation, far cheaper than replaying a browser for every question an agent asks.
-- **Content discovery** — `--find TEXT` searches every view's captured data (rows / files / messages / cards) and returns what matched, which view it's in, and the click-path to get there.
+- **Content discovery** — `--find TEXT` searches every view's captured data (rows / files / messages / cards) and returns what matched, which view it's in, and the click-path to get there. Add `--all-hosts` to search **every crawled host at once**, offline — results are merged, ranked by reach, and labeled by origin host.
 
 ## 📦 Requirements
 
@@ -111,7 +111,7 @@ The `scripts/run-*.sh` wrappers forward the bridge auth token automatically and 
 | --- | --- |
 | `interaction_crawl.py` / `scripts/run-crawl-interactions.sh <url>` | **The core.** Crawls the live UI once into an interaction graph: states + action edges + every create-trigger's form spec. Full **capture-all is the default** — control inventory *and* data collections per state. Atomic checkpoints (never loses progress), explicit truncation reasons in `meta.stopped`. Modes: `--single-url` (app-shell SPAs), `--cross-host` (follow links + iframes to other hosts). Safe: opens and reads forms, never submits. |
 | `howto.py <graph.json>` | **Offline** BFS over a crawled graph → shortest click-path + form spec in ms, no browser. `--goal "…"` for actions; `--find TEXT` searches captured data → what matched, which view, and the path to it; `--list-content` = per-view data inventory. |
-| `ask.py` / `scripts/run-ask.sh` | **Cache-first** entry point. Routes by host to a per-host cache, answers offline via `howto.py`; on a miss runs a live discovery, then writes the result back so the next ask is an offline hit. `--verify` re-checks live. |
+| `ask.py` / `scripts/run-ask.sh` | **Cache-first** entry point. Routes by host to a per-host cache, answers offline via `howto.py`; on a miss runs a live discovery, then writes the result back so the next ask is an offline hit. `--verify` re-checks live. Content queries (`--find` / `--list-content`) also take **`--all-hosts`** to search *every* cached host in one offline pass — results merged, ranked by reach, and labeled by origin host. |
 | `recipe.py` / `scripts/run-recipe.sh` | **Live** how-to finder: priority-BFS over the running UI to a goal's trigger, opens the form, reads the fields, never submits. The live fallback for cache misses. |
 | `perform.py` (`pinchtab-webgraph perform`) | **PERFORM** a how-to: resolve it OFFLINE (from a crawled cache/graph), then RUN the compiled block live through the bridge — navigate the path, then download / upload / fill. Safe by default: navigation + downloads run; a form field with no supplied value is skipped (`--set 'Label=value'`, `--file <path>`); the submit runs only with `--allow-submit`; `--dry-run` previews. See [Runnable command blocks](#️-runnable-command-blocks). |
 | `flow_cmd.py` (`pinchtab-webgraph flow`) | **Run a declarative automation FLOW** — a JSON document (not a script) executed by a step VM: `goto` / `do` / `click` / `fill` / `download` / `collect` plus the control-flow ops **`for_each`** and **`paginate`**. Downloads are content-hashed against a **persistent dedupe ledger** (a re-run reports `dupe`, not a result). Safe by default: a write runs only if the flow *declares* the capability **and** the caller *grants* it. `flow run \| validate \| schema`. See [Automation flows](#-automation-flows) and [`docs/flows.md`](docs/flows.md). |
@@ -119,7 +119,7 @@ The `scripts/run-*.sh` wrappers forward the bridge auth token automatically and 
 | `paths.py` | Offline shortest / all click-paths over a crawled link graph (`--from`, `--to`, `--structural`, `--all`). |
 | `login.py` (`pinchtab-webgraph login`) | Open a persistent browser session and sign in to a host (credentials from the OS keyring) so subsequent crawls run authenticated. Needs the optional `login` extra (`keyring`). |
 | `cache_cmd.py` (`pinchtab-webgraph cache`) | Inspect / manage the per-host interaction-graph caches `ask.py` writes back: `cache list`, `cache path <host>`, `cache show <host>`, `cache clear <host>` / `--all` (destructive, dry-run unless `--yes`). |
-| `query_cmd.py` (`pinchtab-webgraph query`) | **Machine-readable** twin of `howto.py` / `paths.py`: runs the offline `api.*` queries (`graph_summary`, `howto`, `find_content`, `list_content`, `list_forms`, `link_paths`) and prints the result as JSON on stdout. Takes `--host` (cache) or `--graph` (path). The substrate the UTCP manual shells out to. |
+| `query_cmd.py` (`pinchtab-webgraph query`) | **Machine-readable** twin of `howto.py` / `paths.py`: runs the offline `api.*` queries (`graph_summary`, `howto`, `find_content`, `list_content`, `list_forms`, `link_paths`, plus the cross-host `find_content_hosts` / `list_content_hosts`) and prints the result as JSON on stdout. Takes `--host` (cache) or `--graph` (path); the cross-host ops take neither and search every cached host. The substrate the UTCP manual shells out to. |
 | `utcp_manual.py` (`pinchtab-webgraph manual`) | Build / print / serve the [UTCP](https://www.utcp.io) tool-calling manual so external tool-callers can invoke the `query` (and live `crawl`/`ask`) surface by running the CLI directly — no wrapper server. `manual --out FILE` / `manual --serve`. |
 | `selftest.py` (`pinchtab-webgraph test`) | **Self-improvement loop.** Interactively throw your hardest "how do I do X?" goals at a crawled graph — each is answered **offline** via `api.howto`, you judge whether it's right, and every miss/wrong answer becomes a captured gap. Writes a self-contained HTML report; with `--repo OWNER/NAME` it can (after you confirm) file the report as a GitHub issue. See [Self-test & report](#-self-test--report). |
 | `commands.py` | The deterministic **path → executable** compiler shared by every how-to surface. Turns a click-path + terminal action into a runnable `pinchtab` command block (`nav`/`click`/`download`/`upload`/`fill`/`select`/`check`). Pure, stdlib-only, no browser. See [Runnable command blocks](#️-runnable-command-blocks). |
@@ -350,7 +350,8 @@ pip install 'pinchtab-webgraph[mcp]'   # on Ubuntu/PEP-668: add --user --break-s
 
 - **Offline tools** (`graph_summary`, `howto`, `find_content`, `list_content`,
   `list_forms`, `link_paths`) take either `host=` (cache routing) or `graph=` (a path);
-  no browser, no network.
+  no browser, no network. `find_content_hosts` / `list_content_hosts` take neither —
+  they search **every** cached host at once and label each result by origin host.
 - **Resources** `graph://hosts`, `graph://{host}/summary`, `graph://{host}` browse the
   interaction-graph cache.
 - **Live tools** `crawl` (replaces a host's cache) and `ask_howto` (cache-first,
@@ -525,7 +526,7 @@ UNWIND $g.edges AS e
 - Auto-detect single-URL app-shell mode (no `--single-url` flag).
 - Form-reading inside single-URL apps (currently disabled there for safety).
 - Sub-10s cold-start live discovery for cache misses.
-- Richer content queries surfaced through `ask.py` (cross-host collections).
+- ~~Richer content queries surfaced through `ask.py` (cross-host collections).~~ ✅ Shipped — `ask.py --find/--list-content --all-hosts` searches every cached host offline, ranked and labeled by origin (also `pwg query find_content_hosts` / `list_content_hosts` and the matching MCP tools).
 
 ## 🤝 Contributing
 

@@ -110,6 +110,14 @@ def _build_parser():
     sub.add_parser("list_content", parents=[parent],
                    help="per-view inventory of captured collections")
 
+    p = sub.add_parser("find_content_hosts",
+                       help="cross-host content search across ALL cached hosts")
+    p.add_argument("--text", required=True, help="text to search for (required)")
+    p.add_argument("--limit", type=int, default=40, help="cap merged items (default 40)")
+
+    sub.add_parser("list_content_hosts",
+                   help="cross-host collection inventory across ALL cached hosts")
+
     sub.add_parser("list_forms", parents=[parent],
                    help="every create-form: label, host, click-depth, field count")
 
@@ -130,6 +138,14 @@ def _build_parser():
 
 def _dispatch(a):
     op = a.op
+    # Cross-host ops enumerate every cached host; they take neither --host nor --graph
+    # (those attrs don't exist on their subparsers), so handle them BEFORE reading them.
+    if op == "find_content_hosts":
+        hp = [(h, cache_store.cache_path(h)) for h in cache_store.list_hosts()]
+        return api.find_content_hosts(hp, text=a.text, limit=a.limit)
+    if op == "list_content_hosts":
+        hp = [(h, cache_store.cache_path(h)) for h in cache_store.list_hosts()]
+        return api.list_content_hosts(hp)
     host, graph = a.host, a.graph
     if op == "graph_summary":
         return _call(api.graph_summary, host, graph)

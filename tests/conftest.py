@@ -27,6 +27,13 @@ def sample_link_graph_path():
 
 
 @pytest.fixture
+def second_host_graph_path():
+    # A minimal SECOND host (shop.test) for cross-host content queries: its "Customers"
+    # list carries "Alice Cooper" (so "alice" hits BOTH hosts) and a UNIQUE "Widget Zeta".
+    return FIXTURES_DIR / "second_host_graph.json"
+
+
+@pytest.fixture
 def two_downloads_graph_path():
     # Models a crawl of a site with TWO download links on the SAME state: the case where
     # only the goal's NOUN can pick the right one (both labels share "download", both are
@@ -70,3 +77,12 @@ def populated_cache_home(isolated_cache_home):
     graph = json.loads((FIXTURES_DIR / "sample_interaction_graph.json").read_text())
     cache_store.atomic_write("example.test", graph)
     return isolated_cache_home
+
+
+@pytest.fixture
+def two_hosts_cache_home(populated_cache_home):
+    """populated_cache_home (example.test) PLUS a second host (shop.test) — for the
+    cross-host content-query tests that enumerate every cached host."""
+    graph = json.loads((FIXTURES_DIR / "second_host_graph.json").read_text())
+    cache_store.atomic_write("shop.test", graph)
+    return populated_cache_home

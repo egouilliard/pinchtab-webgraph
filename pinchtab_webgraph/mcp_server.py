@@ -144,6 +144,31 @@ def list_content(host: str | None = None, graph: str | None = None) -> dict:
 
 
 @mcp.tool()
+def find_content_hosts(text: str, limit: int = 40) -> dict:
+    """Search captured data collections across ALL cached hosts; rank + label by origin.
+
+    Enumerates every persisted per-host cache (no host/graph argument), searches each
+    offline, and merges matching views globally ranked (reachable + nearest first), each
+    tagged with its `host`. One unreadable cache is recorded (status "error") and skipped.
+    `status` is `ok` if any host matched, else `no_match`.
+    """
+    host_paths = [(h, cache_store.cache_path(h)) for h in cache_store.list_hosts()]
+    return api.find_content_hosts(host_paths, text=text, limit=limit)
+
+
+@mcp.tool()
+def list_content_hosts() -> dict:
+    """Per-host inventory of captured data collections across ALL cached hosts.
+
+    Enumerates every persisted per-host cache (no host/graph argument) and groups the
+    per-view collection inventory by origin host. One unreadable cache is recorded
+    (status "error") and skipped. `status` is `ok` if any host has content, else `empty`.
+    """
+    host_paths = [(h, cache_store.cache_path(h)) for h in cache_store.list_hosts()]
+    return api.list_content_hosts(host_paths)
+
+
+@mcp.tool()
 def list_forms(host: str | None = None, graph: str | None = None) -> dict:
     """Every create-form in the cache: label, host, click-depth, field count.
 

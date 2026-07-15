@@ -153,6 +153,21 @@ def test_list_content_empty_by_graph(sample_link_graph_path):
     assert out["status"] == "empty"
 
 
+# --- find_content_hosts / list_content_hosts (cross-host, all cached hosts) --
+
+def test_find_content_hosts(two_hosts_cache_home):
+    out = mcp_server.find_content_hosts("alice")
+    assert out["status"] == "ok"
+    assert set(out["hosts_matched"]) == {"example.test", "shop.test"}
+    assert all("host" in v for v in out["views"])
+
+
+def test_list_content_hosts(two_hosts_cache_home):
+    out = mcp_server.list_content_hosts()
+    assert out["status"] == "ok"
+    assert set(out["hosts_with_content"]) == {"example.test", "shop.test"}
+
+
 # --- list_forms --------------------------------------------------------------
 
 def test_list_forms_by_graph(sample_interaction_graph_path):

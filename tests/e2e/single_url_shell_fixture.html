@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Single-URL App Shell Fixture</title>
+  <style>
+    body { font-family: sans-serif; margin: 1.5rem; }
+    [role=tablist] { display: flex; gap: 1rem; border-bottom: 1px solid #ccc; padding-bottom: .5rem; }
+    [role=tab] { padding: .4rem .8rem; cursor: pointer; border: 1px solid #ccc; background: #f6f6f6; }
+    [role=tab][aria-selected="true"] { background: #fff; font-weight: 600; border-bottom-color: #fff; }
+    #widget-dialog { margin-top: 1rem; padding: 1rem; border: 1px solid #888; max-width: 420px; }
+    #widget-dialog label { display: block; margin: .6rem 0 .2rem; }
+    #widget-dialog input, #widget-dialog select { width: 100%; padding: .3rem; box-sizing: border-box; }
+    .actions { margin: 1rem 0; }
+    button, a.btn { display: inline-block; padding: .5rem .9rem; }
+  </style>
+</head>
+<!--
+  A PERSISTENT app-shell SPA for --single-url mode. The [role=tablist] with an
+  [aria-selected="true"] tab is the chrome that keys the active view (VIEW_JS), and it
+  MUST survive an in-place trigger open (single-URL never navigates the shell).
+
+  Two create-triggers, deliberately different in kind:
+    (a) "New Widget"  — a <button> that reveals an IN-PLACE [role=dialog] via inline JS
+        (NO href, NO navigation). Its form has >=2 real fields + a "Create" submit button.
+        The crawler must open it (JS-dispatch click), read the form, then Escape — never
+        submit. #submitted below is the tamper-evidence that submit was never clicked.
+    (b) "New Report" — an <a href> that performs a REAL full-page navigation to
+        single_url_report_page.html (no app-shell chrome). This simulates the shell
+        "blanking": the crawler must detect the nav and record the trigger with form=null
+        / opensAt=null WITHOUT scraping the destination page as a form.
+
+  "New Widget" is a <button> (score tier 3) and "New Report" is an <a> (tier 1), so the
+  crawler ranks and reads the in-place widget form FIRST, while still on the shell — the
+  report navigation happens last and can't strand the widget read.
+-->
+<body>
+  <!-- Persistent app-shell chrome: a tablist with a selected tab keys the single-URL view -->
+  <div role="tablist" aria-label="Primary">
+    <button role="tab" aria-selected="true" aria-controls="view-home">Home</button>
+    <button role="tab" aria-selected="false" aria-controls="view-archive">Archive</button>
+  </div>
+
+  <main id="view-home">
+    <h1>Workspace</h1>
+
+    <div class="actions">
+      <!-- (a) IN-PLACE trigger: reveals a modal via inline JS, no navigation -->
+      <button type="button" id="new-widget-btn"
+              onclick="document.getElementById('widget-dialog').style.display='block';">
+        New Widget
+      </button>
+
+      <!-- (b) REAL navigation trigger: a full-page hop to a chrome-less page -->
+      <a class="btn" id="new-report-link" href="single_url_report_page.html">New Report</a>
+    </div>
+
+    <!-- In-place create form, hidden until "New Widget" reveals it. Escape hides it again. -->
+    <div id="widget-dialog" role="dialog" aria-modal="true" aria-label="New Widget"
+         style="display:none">
+      <h2>Create a widget</h2>
+      <form id="widget-form" onsubmit="document.getElementById('submitted').textContent='yes';
+                                       return false;">
+        <label for="widget-name">Widget name</label>
+        <input id="widget-name" name="name" type="text" placeholder="e.g. Revenue" />
+
+        <label for="widget-kind">Widget kind</label>
+        <select id="widget-kind" name="kind">
+          <option value="chart">Chart</option>
+          <option value="table">Table</option>
+          <option value="metric">Metric</option>
+        </select>
+
+        <button type="submit">Create</button>
+      </form>
+    </div>
+  </main>
+
+  <!-- Tamper-evidence: empty unless the widget form was actually SUBMITTED. The crawler
+       must Escape, never submit, so this stays empty. Owners can eyeball it after a manual
+       run; the automated test proves read-only via the graph (see the test docstring). -->
+  <div id="submitted" hidden></div>
+
+  <script>
+    // Escape closes the in-place dialog WITHOUT submitting (mirrors close_modal()).
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') {
+        document.getElementById('widget-dialog').style.display = 'none';
+      }
+    });
+    // Flip the selected tab on click (persistent-chrome view switch, no navigation).
+    document.querySelectorAll('[role=tab]').forEach(function (t) {
+      t.addEventListener('click', function () {
+        document.querySelectorAll('[role=tab]').forEach(function (o) {
+          o.setAttribute('aria-selected', o === t ? 'true' : 'false');
+        });
+      });
+    });
+  </script>
+</body>
+</html>

@@ -246,6 +246,14 @@ def nav_state_key(url):
     return "u::" + norm(url)
 
 
+def shell_blanked(before_url, after_url):
+    # The same URL-changed comparison inlined in capture_triggers today, lifted out as
+    # the single-URL "did opening this trigger navigate away / blank the shell?"
+    # predicate: True iff the URL changed (trailing slash ignored). None/empty after is
+    # treated defensively as changed (unsafe — never read that DOM as a form).
+    return (after_url or "").rstrip("/") != (before_url or "").rstrip("/")
+
+
 def probe_bridge(server, start_url, timeout, single_url=False):
     # Distinguish a WEDGED bridge from a merely-bad path/selector. Don't use nav()
     # (it hardcodes timeout=60) — probe directly with a short timeout. Both calls
@@ -351,7 +359,10 @@ def main():
                     help="single-URL app-shell mode: NEVER navigate (a programmatic nav "
                          "blanks such SPAs, e.g. MS Teams) — read the current live page and "
                          "drive it with JS-dispatch clicks; key states by active aria-view. "
-                         "Use --no-read-forms with this (form-open in this mode is a follow-up).")
+                         "Form-open triggers ARE read here via in-place JS-dispatch clicks "
+                         "with an automatic shell-blank guard (never a real navigation); a "
+                         "trigger that can't open without navigating is recorded with "
+                         "form: null and the crawl recovers in place.")
     ap.add_argument("--read-forms", dest="read_forms", action="store_true", default=True,
                     help="open+read each create form (default on)")
     ap.add_argument("--no-read-forms", dest="read_forms", action="store_false",
@@ -517,6 +528,7 @@ def main():
         cand.sort(key=score, reverse=True)
         seen_labels = set()
         need_remat = False                                   # only re-nav when needed
+        shell_dead = False                                   # single-url: shell unrecoverable
         for c in cand:
             lab = c["text"].strip()
             key = lab.lower()
@@ -533,26 +545,56 @@ def main():
                 rec["form"], rec["opensAt"] = cached         # reuse its form, don't re-open
                 triggers.append(rec)
                 continue
+            if a.single_url and shell_dead:                  # shell couldn't be recovered:
+                triggers.append(rec)                         # record the trigger, form=None,
+                continue                                     # don't poison the label cache
             if a.read_forms:
-                try:
-                    if need_remat:                           # previous trigger navigated away
-                        materialize(path)
-                        need_remat = False
-                    before = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
-                    pt(["click", c["selector"]], a.server, timeout=30)
-                    settle(a.server)
-                    after = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
-                    form = pt_json(FORM_JS, a.server)
-                    rec["form"] = form
-                    if after.rstrip("/") != before.rstrip("/"):
-                        rec["opensAt"] = after                # full-page form: must re-nav next
+                if not a.single_url and need_remat:          # normal mode: re-anchor BEFORE
+                    materialize(path)                        # reading 'before' — a prior full-
+                    need_remat = False                       # page form left us off-position
+                before = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
+                if not a.single_url:
+                    try:
+                        pt(["click", c["selector"]], a.server, timeout=30)
+                        settle(a.server)
+                        after = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
+                        form = pt_json(FORM_JS, a.server)
+                        rec["form"] = form
+                        if after.rstrip("/") != before.rstrip("/"):
+                            rec["opensAt"] = after            # full-page form: must re-nav next
+                            need_remat = True
+                        else:
+                            close_modal()                    # modal: just Escape (NEVER submit)
+                    except Exception as e:
+                        print("  ! form read failed @ %r (%s)" % (lab, str(e)[:60]), file=sys.stderr)
+                        close_modal()
                         need_remat = True
-                    else:
-                        close_modal()                        # modal: just Escape (NEVER submit)
-                except Exception as e:
-                    print("  ! form read failed @ %r (%s)" % (lab, str(e)[:60]), file=sys.stderr)
-                    close_modal()
-                    need_remat = True
+                else:
+                    # single-url: JS-dispatch click (no real nav). Read the form ONLY if the
+                    # shell didn't blank; recovery is immediate (materialize re-anchors us).
+                    try:
+                        click_js(c["selector"], a.server)
+                        settle(a.server)
+                        after = pt(["eval", "location.href"], a.server)[1].strip().strip('"')
+                        if shell_blanked(before, after):
+                            # opening navigated away / blanked the shell — do NOT read that
+                            # DOM as a form; leave form/opensAt None and recover in place.
+                            print("  ! shell blanked opening %r (single-url) — recovering" % lab,
+                                  file=sys.stderr)
+                            if not materialize(path):
+                                shell_dead = True
+                                print("  ! could not recover shell position — skipping "
+                                      "remaining triggers this state", file=sys.stderr)
+                        else:
+                            rec["form"] = pt_json(FORM_JS, a.server)   # safe in-place open
+                            close_modal()                    # modal: just Escape (NEVER submit)
+                    except Exception as e:
+                        print("  ! single-url form read failed @ %r (%s)" % (lab, str(e)[:60]),
+                              file=sys.stderr)
+                        if not materialize(path):
+                            shell_dead = True
+                            print("  ! could not recover shell position — skipping "
+                                  "remaining triggers this state", file=sys.stderr)
                 forms_by_label[key] = (rec["form"], rec["opensAt"])   # cache (incl. failures)
             triggers.append(rec)
             print("    ✓ trigger %r%s" % (lab, " + form" if rec["form"] else ""),

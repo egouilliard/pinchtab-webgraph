@@ -102,9 +102,11 @@ def test_single_url_reads_inplace_form_and_guards_shell_blank(fixture_server, tm
         env.setdefault("PINCHTAB_CONFIG", str(cfg))
 
     # --single-url calls recipe.pin_tab, which needs an ALREADY-OPEN tab (it reads the
-    # live page before any nav would pin one). Open the fixture in a tab first.
+    # live page before any nav would pin one). Open the fixture in a FRESH tab first —
+    # `--new-tab` is required: a bare `nav` targets pinchtab's stored default tab id,
+    # which 404s on a fresh bridge ("tab not found").
     open_tab = subprocess.run(
-        ["pinchtab", "--server", SERVER, "nav", fixture_url],
+        ["pinchtab", "--server", SERVER, "nav", fixture_url, "--new-tab"],
         cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=60,
     )
     assert open_tab.returncode == 0, \

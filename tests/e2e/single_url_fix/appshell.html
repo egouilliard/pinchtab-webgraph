@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>App Shell Fixture</title>
+<style>body{font:16px system-ui;margin:0}nav{display:flex;gap:4px;padding:8px;background:#eee}
+button[role=tab]{padding:8px 14px}button[role=tab][aria-selected=true]{background:#38f;color:#fff}
+main{padding:16px}main button{display:block;margin:6px 0;padding:8px 12px}</style>
+</head>
+<body>
+<!-- A single-URL app-shell: a persistent tablist swaps the main view IN PLACE via JS.
+     location.href NEVER changes (no navigation, no hash) — the defining app-shell trait. -->
+<nav role="tablist" aria-label="Primary">
+  <button role="tab" data-view="alpha"   aria-selected="true">Alpha</button>
+  <button role="tab" data-view="bravo"    aria-selected="false">Bravo</button>
+  <button role="tab" data-view="charlie"  aria-selected="false">Charlie</button>
+  <button role="tab" data-view="delta"    aria-selected="false">Delta</button>
+  <button role="tab" data-view="echo"     aria-selected="false">Echo</button>
+  <button role="tab" data-view="foxtrot"  aria-selected="false">Foxtrot</button>
+  <button role="tab" data-view="golf"     aria-selected="false">Golf</button>
+  <button role="tab" data-view="hotel"    aria-selected="false">Hotel</button>
+</nav>
+<main id="view"></main>
+<script>
+// each view renders a UNIQUE set of content controls, so switching tabs changes the
+// visible control set (and the aria-selected marker) — with the URL held constant.
+function render(v){
+  var m=document.getElementById('view'); m.innerHTML='';
+  var h=document.createElement('h2'); h.textContent=v.toUpperCase()+' view'; m.appendChild(h);
+  ['open','review','archive'].forEach(function(a){
+    var b=document.createElement('button'); b.textContent=v+'-'+a; m.appendChild(b);
+  });
+}
+document.querySelectorAll('button[role=tab]').forEach(function(t){
+  t.addEventListener('click',function(){
+    document.querySelectorAll('button[role=tab]').forEach(function(x){x.setAttribute('aria-selected','false');});
+    t.setAttribute('aria-selected','true');
+    render(t.dataset.view);           // in-place swap; NO location change
+  });
+});
+render('alpha');
+</script>
+</body>
+</html>

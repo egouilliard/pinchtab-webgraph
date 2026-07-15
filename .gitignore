@@ -26,6 +26,7 @@ out/
 !pinchtab_webgraph/ui/static/*.html
 # ...and the hand-authored e2e HTML fixtures (inputs to the crawl smoke test)
 !tests/e2e/*.html
+!tests/e2e/**/*.html
 *.png
 *.output
 leytongo-*.json

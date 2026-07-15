@@ -362,7 +362,7 @@ async def _run_relayed(argv, on_line, timeout_seconds, _subprocess_exec, want_st
 # --- live tools --------------------------------------------------------------
 
 async def _crawl_impl(start, *, max_states=None, max_visits=None, max_depth=None,
-                      cross_host=False, max_cross_host=None, single_url=False,
+                      cross_host=False, max_cross_host=None, single_url=None,
                       capture_content=True, read_forms=True, server=DEFAULT_SERVER,
                       out_path=None, extra_cli_args=None, timeout_seconds=1800,
                       on_line=None, _subprocess_exec=asyncio.create_subprocess_exec):
@@ -405,8 +405,11 @@ async def _crawl_impl(start, *, max_states=None, max_visits=None, max_depth=None
         argv += ["--cross-host"]
     if max_cross_host is not None:
         argv += ["--max-cross-host", str(max_cross_host)]
-    if single_url:
-        argv += ["--single-url"]
+    if single_url is True:
+        argv += ["--single-url"]           # force app-shell mode
+    elif single_url is False:
+        argv += ["--no-single-url"]         # force normal nav mode (skip auto-detect)
+    # single_url is None → pass neither flag → the crawler auto-detects the mode
     if not capture_content:
         argv += ["--no-capture-content"]
     if not read_forms:
@@ -451,7 +454,7 @@ async def _crawl_impl(start, *, max_states=None, max_visits=None, max_depth=None
 @mcp.tool()
 async def crawl(start: str, max_states: int | None = None, max_visits: int | None = None,
                 max_depth: int | None = None, cross_host: bool = False,
-                max_cross_host: int | None = None, single_url: bool = False,
+                max_cross_host: int | None = None, single_url: bool | None = None,
                 capture_content: bool = True, read_forms: bool = True,
                 server: str = DEFAULT_SERVER, out_path: str | None = None,
                 extra_cli_args: list[str] | None = None, timeout_seconds: int = 1800,
@@ -466,6 +469,10 @@ async def crawl(start: str, max_states: int | None = None, max_visits: int | Non
     fetch that on demand via the `graph://{host}` resource. `status` is one of
     {ok, timeout, partial, failed} or a bridge error
     {bridge_unavailable, bridge_unreachable, bridge_no_token} or invalid_args.
+
+    `single_url` is tri-state: None (default) auto-detects app-shell/SPA mode structurally
+    at crawl start; True forces single-URL app-shell mode; False forces normal nav mode
+    (the escape hatch when auto-detection guesses wrong).
 
     NOTE: the crawler's restart/login shell hooks are operator-only (env/config), not
     tool parameters. `extra_cli_args` is forwarded argv-only (never through a shell).

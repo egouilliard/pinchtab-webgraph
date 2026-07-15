@@ -264,6 +264,96 @@ def probe_bridge(server, start_url, timeout, single_url=False):
         return False
 
 
+# ---- crawl-start structural probe: is this a single-URL app-shell? -------------------
+# GENERIC auto-detection of the mode --single-url gates, so the operator no longer has to
+# know in advance. Purely structural (control counts + the URL + ARIA view markers) — NO
+# app routes/labels/vocabulary. The defining property of an app-shell SPA (e.g. MS Teams)
+# is that state transitions swap the view IN PLACE without changing the URL, whereas a
+# normal multi-page site changes the URL. So we exercise a few representative nav controls
+# on the live page and watch the URL: the first control that changes the URL PATH proves
+# URL-primary routing (→ nav mode); a control that swaps the visible control set / active
+# ARIA view while the URL path stays put proves an app-shell (→ single-URL mode).
+# NON-DESTRUCTIVE by design — clicking a nav control is exactly what the crawl does anyway,
+# and an app-shell's chrome is persistent, so a swapped view still exposes every top-level
+# control. CONSERVATIVE: too little rendered, no observable transition, or any read error
+# → False, which preserves today's nav-mode default (the explicit --single-url / the new
+# --no-single-url force the mode either way and skip this probe entirely).
+DETECT_MIN_CONTROLS = 8      # the live page must be substantially rendered to judge it
+DETECT_MAX_PROBES = 3        # nav controls to try before defaulting to nav mode
+
+
+def _ctrl_sig(controls):
+    # Structural fingerprint of a view: the set of non-bulk control-label prefixes (the
+    # same signal state_sig keys on) — lets us tell "the view swapped" from "nothing moved".
+    return frozenset((c.get("text") or "")[:30] for c in controls if not c.get("bulk"))
+
+
+def detect_single_url(server, start_url):
+    """Structurally decide whether `start_url` is a single-URL app-shell SPA that must be
+    crawled in single-URL mode. Returns True (app-shell) or False (normal nav mode). See
+    the block comment above for the heuristic. Any failure → False (safe nav-mode default)."""
+    def live():
+        st = pt_json("({href:location.href, controls:%s})" % CONTROLS_JS, server)
+        try:
+            view = pt_json(VIEW_JS, server) or []
+        except Exception:
+            view = []
+        return ((st.get("href") or "").strip().strip('"'),
+                st.get("controls") or [], view)
+
+    try:
+        recipe.pin_tab(server, start_url)                # target the live app tab (0.10.0)
+        u0, controls0, view0 = live()
+    except Exception:
+        return False
+    if len(controls0) < DETECT_MIN_CONTROLS:
+        return False                                     # nothing substantial rendered → nav
+    base0, sig0, view0set = norm(u0), _ctrl_sig(controls0), set(view0)
+
+    def is_link(c):                                      # a same-host http link that isn't a
+        h = c.get("href") or ""                          # download — clicking it WOULD route
+        return (h.startswith("http") and same_host(h, start_url)  # a normal multi-page site.
+                and not is_direct_download(h))
+
+    def kind(c):                                         # probe URL-changing links first: one
+        if is_link(c):                                   # URL change is decisive for nav mode.
+            return 0
+        return 1 if c.get("role") in NAV_ROLES else 2
+    cands = [c for c in controls0
+             if c.get("selector") and not c.get("bulk")
+             and not SKIP_NAV.search(c.get("text") or "")
+             and not TRIGGER_RE.search(c.get("text") or "")   # never probe a create-trigger
+             and (c.get("nav") or c.get("role") in NAV_ROLES or is_link(c))]
+    cands.sort(key=kind)
+    # the nav control that owns the operator's ORIGINAL view (its label is an active aria
+    # marker) — used to click back after a probe so single-URL mode reads the --start view
+    # as its root, not whatever the probe swapped into (single-URL mode never nav()s back).
+    home_sel = next((c["selector"] for c in cands
+                     if (c.get("text") or "")[:30] in view0set), None)
+    for c in cands[:DETECT_MAX_PROBES]:
+        try:
+            click_js(c["selector"], server)              # JS-dispatch: occlusion-proof click
+            settle(server)
+            u1, controls1, view1 = live()
+        except Exception:
+            continue
+        if norm(u1) != base0:
+            return False                                 # URL path changed → URL-primary nav
+        if _ctrl_sig(controls1) != sig0 or set(view1) != view0set:
+            # App-shell. Best-effort restore of the original view so the crawl's root state
+            # matches --start. If we can't identify the home control (no aria markers), we
+            # stay put — the same mild drift as before, never worse; nav mode needs no
+            # restore since its first materialize re-navs to start_url.
+            if home_sel:
+                try:
+                    click_js(home_sel, server)
+                    settle(server)
+                except Exception:
+                    pass
+            return True                                  # view swapped in place → app-shell
+    return False
+
+
 def recover_bridge(server, restart_cmd, login_cmd, attempt):
     # Mirror scripts/hard-bench.sh's ensure_browser(): kill the stale bridge by its PORT
     # pid (NEVER pkill -f — that self-kills this process, exit 144; see gotchas.md),
@@ -347,11 +437,15 @@ def main():
     ap.add_argument("--checkpoint-every", type=int, default=10,
                     help="flush the graph to disk every N new states (default 10) so a crash or "
                          "kill never loses progress; the crawl also flushes on SIGINT/SIGTERM")
-    ap.add_argument("--single-url", dest="single_url", action="store_true", default=False,
-                    help="single-URL app-shell mode: NEVER navigate (a programmatic nav "
+    ap.add_argument("--single-url", dest="single_url", action="store_true", default=None,
+                    help="FORCE single-URL app-shell mode: NEVER navigate (a programmatic nav "
                          "blanks such SPAs, e.g. MS Teams) — read the current live page and "
                          "drive it with JS-dispatch clicks; key states by active aria-view. "
-                         "Use --no-read-forms with this (form-open in this mode is a follow-up).")
+                         "Use --no-read-forms with this (form-open in this mode is a follow-up). "
+                         "Omit BOTH single-url flags to auto-detect this structurally at start.")
+    ap.add_argument("--no-single-url", dest="single_url", action="store_false", default=None,
+                    help="FORCE normal nav mode: skip the app-shell auto-detection probe. The "
+                         "escape hatch for when detection guesses wrong on a normal site.")
     ap.add_argument("--read-forms", dest="read_forms", action="store_true", default=True,
                     help="open+read each create form (default on)")
     ap.add_argument("--no-read-forms", dest="read_forms", action="store_false",
@@ -394,15 +488,9 @@ def main():
 
     start_url = a.start
 
-    # PinchTab 0.10.0 targets $PINCHTAB_TAB (a stored default that goes stale → "tab not
-    # found" on every command). Pin it to a live tab up-front — critical for --single-url,
-    # which READS the current page before any nav() would pin it.
-    if a.single_url:
-        recipe.pin_tab(a.server, start_url)
-
     # OPT-IN automated login (off unless --login-config is given). Establishes an
-    # authenticated session BEFORE crawling; the password is read from the OS
-    # keyring at runtime, never from disk here — see pinchtab_webgraph/login.py.
+    # authenticated session BEFORE crawling (and before we probe the shell below); the
+    # password is read from the OS keyring at runtime, never from disk here — see login.py.
     if a.login_config:
         import shlex
         from . import login as _login
@@ -413,6 +501,24 @@ def main():
                 shlex.quote(sys.executable), shlex.quote(a.login_config),
                 shlex.quote(a.server), shlex.quote(urlparse(start_url).hostname or ""),
                 shlex.quote(a.config))
+
+    # Resolve single-URL app-shell mode. --single-url / --no-single-url force it either way
+    # (a.single_url is True/False); otherwise it's None → auto-detect structurally against
+    # the live shell (must run AFTER login so an authenticated shell is what we probe).
+    if a.single_url is None:
+        a.single_url = detect_single_url(a.server, start_url)
+        print("· single-URL app-shell mode: %s (auto-detected)"
+              % ("on" if a.single_url else "off"), file=sys.stderr, flush=True)
+    else:
+        print("· single-URL app-shell mode: %s (explicit)"
+              % ("on" if a.single_url else "off"), file=sys.stderr, flush=True)
+
+    # PinchTab 0.10.0 targets $PINCHTAB_TAB (a stored default that goes stale → "tab not
+    # found" on every command). Pin it to a live tab up-front — critical for single-URL
+    # mode, which READS the current page before any nav() would pin it. (Auto-detect
+    # already pinned it above; re-pinning is cheap and keeps the explicit path correct.)
+    if a.single_url:
+        recipe.pin_tab(a.server, start_url)
 
     # ---- browser position tracking + materialization (prefix-reuse, like recipe) ----
     mat_state = {"path": None}

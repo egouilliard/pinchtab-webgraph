@@ -321,6 +321,26 @@ def test_crawl_happy_path(sample_interaction_graph_path, tmp_path, monkeypatch):
     assert "--max-visits" in rec["argv"] and "100" in rec["argv"]
 
 
+def test_crawl_single_url_tristate_maps_to_argv(monkeypatch):
+    # single_url is tri-state: None → auto-detect (no flag), True → --single-url,
+    # False → --no-single-url (the force-off escape hatch). Backward-compatible: True
+    # still forces app-shell mode exactly as before; the default just changed to auto.
+    monkeypatch.setattr(mcp_server, "_bridge_health", lambda server: None)
+    for val in (None, True, False):
+        proc = _FakeProc(returncode=0, completes=True)
+        rec = {}
+        asyncio.run(mcp_server._crawl_impl(
+            "https://example.test/", single_url=val,
+            _subprocess_exec=_fake_exec_factory(proc, rec)))
+        argv = list(rec["argv"])
+        if val is None:
+            assert "--single-url" not in argv and "--no-single-url" not in argv
+        elif val is True:
+            assert "--single-url" in argv and "--no-single-url" not in argv
+        else:
+            assert "--no-single-url" in argv and "--single-url" not in argv
+
+
 def test_crawl_timeout_returns_partial(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_server, "_bridge_health", lambda server: None)
     out_path = tmp_path / "partial.json"

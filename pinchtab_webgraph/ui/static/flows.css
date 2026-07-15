@@ -1,0 +1,676 @@
+/* pinchtab-webgraph — the Flows view.
+   Everything is scoped under .flows-view so it can never leak into the Workspace,
+   Graph or Explore views. Two panes: the host's saved flows on the left, the editor +
+   run panel + results on the right. Reuses the SPA's CSS custom properties, so light/
+   dark theming comes for free. Layout mirrors graph.css / explore.css. */
+
+.flows-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+/* a display:flex base rule beats the bare UA [hidden] (same reason graph.css needs it). */
+.flows-view[hidden] { display: none; }
+
+.flows-body {
+  display: flex;
+  gap: 1rem;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* left pane: the flow list ------------------------------------------------- */
+.flows-sidebar {
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  padding-right: 0.9rem;
+}
+.flows-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.flows-sidebar-head h2 { margin: 0; font-size: 0.9rem; }
+.flow-new-btn {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  padding: 0.25rem 0.6rem;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.flow-new-btn:hover { background: var(--accent-soft); }
+
+.flow-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+/* the row is a real <button> (keyboard- and AT-reachable) inside a bare <li>; the
+   resets below make it render exactly as the old <li> did. */
+.flow-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 0.5rem 0.6rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.flow-row:hover { background: var(--panel-2); }
+.flow-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.flow-row.selected { background: var(--accent-soft); border-color: var(--border-strong); }
+.flow-row-name { font-size: 0.85rem; font-weight: 600; word-break: break-word; }
+.flow-row-meta { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.flow-row-meta .count { font-size: 0.72rem; color: var(--muted); }
+
+/* right pane: editor + run + results --------------------------------------- */
+.flows-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.flows-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+#flows-status { font-size: 0.78rem; }
+.flows-main h3 { margin: 0 0 0.4rem; font-size: 0.82rem; }
+
+/* the workbench: chat | canvas | JSON, side by side ------------------------- */
+/* All three are views of the SAME doc and all three are ALWAYS visible — the point of the
+   feature is watching an edit in one land in the other two. They only stack (below) when
+   the viewport genuinely can't hold three columns. */
+.flow-workbench {
+  display: flex;
+  gap: 0.9rem;
+  align-items: stretch;
+  min-height: 320px;
+}
+.flow-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+  min-height: 0;
+}
+.flow-chat-col { flex: 1 1 260px; }
+.flow-canvas-col { flex: 1.4 1 340px; }
+.flow-json-col { flex: 1 1 280px; }
+.flow-col-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.flow-col-head h3 { margin: 0; font-size: 0.82rem; }
+.flow-col-hint { font-size: 0.72rem; }
+
+/* the flow-authoring chat pane (the shared chat component, mounted with mode=flow) */
+.flow-chat-col .chat-log,
+.flow-chat-log {
+  flex: 1 1 auto;
+  min-height: 220px;
+  max-height: 460px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.5rem 0.6rem;
+}
+/* one chip per flow_draft frame — the conversation reads as a history of EDITS */
+.flow-draft-chip {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0.3rem 0.5rem;
+  margin: 0.3rem 0;
+  font-size: 0.76rem;
+}
+.flow-draft-chip.ok { border-color: var(--ok-fg); background: var(--ok-bg); color: var(--ok-fg); }
+.flow-draft-chip.bad { border-color: var(--warn-fg); background: var(--warn-bg); color: var(--warn-fg); }
+.flow-draft-dot { font-weight: 700; }
+.flow-draft-note { flex: 1 1 auto; min-width: 0; word-break: break-word; }
+/* replayed drafts only: history reaches the editor ONLY through this button */
+.flow-draft-restore {
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  padding: 0.1rem 0.5rem;
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.flow-draft-restore:hover { background: var(--panel); }
+.flow-draft-err {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  word-break: break-word;
+}
+
+/* the canvas: a VERTICAL flow diagram whose containers WRAP their children -- */
+.flow-canvas {
+  flex: 1 1 auto;
+  min-height: 240px;
+  max-height: 460px;
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--panel-2);
+  padding: 0.6rem;
+}
+.flow-node-list { display: flex; flex-direction: column; }
+
+/* the box */
+.flow-node {
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.flow-node-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.5rem;
+  flex-wrap: wrap;
+}
+.flow-node-op {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+.flow-node-write {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.05rem 0.3rem;
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+.flow-node-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.74rem;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+/* a body op (for_each / paginate) is a CONTAINER: the doubled border + the indented,
+   accent-railed body are the visible promise that these steps run INSIDE it. */
+.flow-node-container { border-width: 2px; border-color: var(--accent); }
+.flow-node-container > .flow-node-head { border-bottom: 1px dashed var(--border-strong); }
+.flow-node-body {
+  margin: 0.4rem 0.5rem 0.5rem 1rem;
+  padding-left: 0.7rem;
+  border-left: 3px solid var(--accent);
+}
+
+/* the connector between two consecutive boxes */
+.flow-connector {
+  width: 0;
+  height: 14px;
+  margin-left: 1.3rem;
+  border-left: 2px solid var(--border-strong);
+}
+
+/* the offending box, as reported by flow.validate()'s error path */
+.flow-node-error {
+  border-color: var(--err-fg);
+  box-shadow: 0 0 0 2px var(--err-bg);
+}
+
+/* AMBER, not red: the box is structurally FINE — its `goal` just doesn't resolve against the
+   crawled graph, so the run would abort here. Advisory (Save stays enabled), which is exactly
+   why it must not wear the same colour as an invalid document. */
+.flow-node-warn {
+  border-color: var(--warn-fg);
+  box-shadow: 0 0 0 2px var(--warn-bg);
+}
+.flow-node-warning {
+  margin: 0.35rem 0 0;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 0.74rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+.flow-node-warning-icon { margin-right: 0.35rem; }
+.flow-node-warning-cands {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.3rem;
+}
+.flow-node-warning-lead { opacity: 0.8; }
+.flow-node-cand {
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--warn-fg);
+  border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+}
+
+/* per-node toolbar */
+.flow-node-toolbar { display: flex; gap: 0.15rem; margin-left: auto; }
+.flow-node-btn {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.74rem;
+  line-height: 1;
+  padding: 0.2rem 0.35rem;
+  cursor: pointer;
+}
+.flow-node-btn:hover { background: var(--panel-2); color: var(--text); border-color: var(--border); }
+.flow-node-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.flow-node-del.confirm { color: var(--warn-fg); border-color: var(--warn-fg); }
+
+/* the per-op edit form — every field derived from GET /api/flows/op_schema */
+.flow-node-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.45rem 0.55rem 0.55rem;
+  border-top: 1px solid var(--border);
+  background: var(--panel-2);
+  border-radius: 0 0 9px 9px;
+}
+.flow-field { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.flow-field-label {
+  flex: 0 0 5.5rem;
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.flow-field-input { flex: 1 1 8rem; min-width: 0; display: flex; }
+.flow-field input[type="text"],
+.flow-field input[type="number"],
+.flow-field select,
+.flow-field-json,
+.flow-op-picker select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.76rem;
+}
+.flow-field-json {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+}
+.flow-field-oneof > select { flex: 0 0 auto; width: auto; }
+.flow-field-err { margin: 0; font-size: 0.72rem; color: var(--warn-fg); }
+.flow-field-hint { margin: 0; font-size: 0.72rem; color: var(--muted); }
+.flow-field-actions { display: flex; gap: 0.4rem; }
+.flow-node-save {
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 0.76rem;
+  padding: 0.25rem 0.7rem;
+  cursor: pointer;
+}
+.flow-node-save:hover { background: var(--accent-hover); }
+
+/* the op picker + the [+ add step] row */
+.flow-add-row { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; padding: 0.35rem 0 0 1rem; }
+.flow-add-btn,
+.flow-op-add,
+.flow-op-cancel {
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+}
+.flow-op-add { border-style: solid; }
+.flow-op-cancel { color: var(--muted); border-style: solid; }
+.flow-add-btn:hover,
+.flow-op-add:hover { background: var(--accent-soft); }
+.flow-op-picker,
+.flow-node-picker,
+.flow-node-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  padding: 0.35rem 0.5rem;
+}
+.flow-op-picker select { flex: 0 1 12rem; width: auto; }
+.flow-node-empty { margin: 0; padding: 0.35rem 0; font-size: 0.76rem; color: var(--muted); }
+
+/* JSON editor: a plain <textarea>, no editor library ----------------------- */
+#flow-editor-text {
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 240px;
+  max-height: 460px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  tab-size: 2;
+}
+#flow-editor-text:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--panel);
+}
+
+/* the live validation banner ---------------------------------------------- */
+.flow-validation {
+  font-size: 0.78rem;
+  border-radius: 8px;
+  word-break: break-word;
+  min-height: 0;
+}
+.flow-validation.ok {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+  padding: 0.35rem 0.6rem;
+}
+.flow-validation.bad {
+  background: var(--err-bg);
+  color: var(--err-fg);
+  padding: 0.35rem 0.6rem;
+}
+/* the THIRD state: valid + savable, but a goal doesn't resolve against the crawled graph. */
+.flow-validation.warn {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  padding: 0.35rem 0.6rem;
+}
+
+.flow-editor-actions,
+.flow-run-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.flow-editor-actions button,
+.flow-run-actions button {
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  padding: 0.4rem 0.9rem;
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.flow-editor-actions button:hover:not(:disabled),
+.flow-run-actions button:hover:not(:disabled) { background: var(--accent-hover); }
+.flow-editor-actions button:disabled,
+.flow-run-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+.flow-delete-btn,
+.flow-cancel-btn {
+  background: transparent !important;
+  border: 1px solid var(--border-strong) !important;
+  color: var(--muted) !important;
+}
+.flow-delete-btn.confirm { color: var(--warn-fg) !important; border-color: var(--warn-fg) !important; }
+#flow-save-msg { font-size: 0.78rem; }
+
+/* run panel: inputs + the capability grants -------------------------------- */
+.flow-run {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.7rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.flow-run[hidden] { display: none; }
+.flow-inputs { display: flex; flex-wrap: wrap; gap: 0.6rem 0.9rem; align-items: flex-start; }
+.flow-input {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  min-width: 12rem;
+  max-width: 22rem;
+}
+.flow-input-name { color: var(--text); }
+.flow-input-req { color: var(--err-fg); font-weight: 600; }
+.flow-input input[type="text"],
+.flow-input input[type="number"],
+.flow-input input[type="file"],
+.flow-input select {
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  max-width: 100%;
+}
+.flow-input input[type="file"] { cursor: pointer; }
+.flow-input input[type="file"]::file-selector-button {
+  margin-right: 0.55rem;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.flow-input input[type="file"]::file-selector-button:hover { background: var(--accent-soft); }
+.flow-input input[type="checkbox"] { align-self: flex-start; }
+
+/* the flow's own words about the input — the upload flow names its extensions here */
+.flow-input-help {
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+/* the staging line under a file picker: staging… -> invoice.pdf · 12.3 KB (or the error) */
+.flow-input-file-status {
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.flow-input-file-status:empty { display: none; }
+.flow-file-pending { color: var(--warn-fg); }
+.flow-file-ok { color: var(--ok-fg); }
+.flow-file-error { color: var(--err-fg); }
+
+/* an unsatisfied REQUIRED input — the reason the Run button is disabled, made visible */
+.flow-input.invalid .flow-input-name { color: var(--err-fg); }
+.flow-input.invalid input[type="text"],
+.flow-input.invalid input[type="number"],
+.flow-input.invalid input[type="file"],
+.flow-input.invalid select {
+  border-color: var(--err-fg);
+}
+
+/* the server's own invalid_input verdict, shown where the inputs are */
+.flow-inputs-error {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 0.35rem 0.55rem;
+  border-radius: 8px;
+  background: var(--err-bg);
+  color: var(--err-fg);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.flow-grants { display: flex; gap: 0.9rem; flex-wrap: wrap; }
+.flow-grants label,
+.flow-dry {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+/* a capability the flow does NOT declare: the grant is dimmed AND disabled, so the
+   "declared AND granted" rule is legible at a glance rather than implied. */
+.flow-grants label.undeclared { opacity: 0.45; cursor: not-allowed; }
+.flow-dry { color: var(--warn-fg); }
+
+/* the live dedupe counter — the differentiator, visible DURING the run ------ */
+.flow-dedupe { margin-left: auto; font-size: 0.82rem; font-weight: 600; }
+.flow-dedupe-new { color: var(--ok-fg); }
+.flow-dedupe-sep { color: var(--muted); font-weight: 400; }
+.flow-dedupe-dupe { color: var(--muted); }
+
+/* the run log -------------------------------------------------------------- */
+.flow-log {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 0.4rem 0.55rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+.flow-log:empty { display: none; }
+.flow-log-line { display: flex; gap: 0.5rem; word-break: break-word; }
+.flow-log-line.flow-info { color: var(--muted); }
+.flow-log-line.flow-ok { color: var(--ok-fg); }
+.flow-log-line.flow-error { color: var(--warn-fg); }
+.flow-step-status {
+  flex: 0 0 4.5rem;
+  color: var(--muted);
+}
+.flow-step-status.st-new { color: var(--ok-fg); font-weight: 600; }
+.flow-step-status.st-dupe { color: var(--muted); }
+.flow-step-status.st-error { color: var(--warn-fg); font-weight: 600; }
+.flow-step-status.st-dry-run { color: var(--accent); }
+.flow-step-op { flex: 0 0 5rem; color: var(--accent); }
+.flow-step-detail { flex: 1 1 auto; min-width: 0; }
+
+/* results: history + the all-time artifact ledger --------------------------- */
+.flow-results { display: flex; gap: 1rem; flex-wrap: wrap; }
+.flow-results[hidden] { display: none; }
+.flow-results-col { flex: 1 1 320px; min-width: 0; }
+
+.flow-runs,
+.flow-artifacts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.flow-run-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 0.45rem 0.6rem;
+  cursor: pointer;
+}
+.flow-run-row:hover { background: var(--panel-2); }
+.flow-run-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.flow-run-when { font-size: 0.74rem; color: var(--muted); }
+.flow-run-stats { font-size: 0.76rem; color: var(--muted); margin-top: 0.15rem; }
+
+.flow-artifact {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  padding: 0.25rem 0.1rem;
+  border-bottom: 1px solid var(--border);
+}
+.flow-artifact-name { flex: 1 1 auto; min-width: 0; word-break: break-all; }
+.flow-artifact-size,
+.flow-artifact-when { color: var(--muted); font-size: 0.74rem; white-space: nowrap; }
+.flow-artifact-sha {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+}
+#flow-artifacts-summary { font-size: 0.76rem; word-break: break-all; }
+
+.flow-empty { font-size: 0.82rem; color: var(--muted); padding: 0.4rem 0; margin: 0; }
+
+/* responsive: stack the panes on a narrow viewport -------------------------- */
+/* The workbench folds before the sidebar does: three columns need real width, but the
+   canvas and the JSON must stay side by side for as long as they possibly can — seeing an
+   edit land in the other view IS the feature. */
+@media (max-width: 1180px) {
+  .flow-workbench { flex-wrap: wrap; }
+  .flow-chat-col { flex: 1 1 100%; }
+}
+@media (max-width: 860px) {
+  .flows-body { flex-direction: column; }
+  .flow-workbench { flex-direction: column; }
+  .flow-canvas, .flow-chat-log, #flow-editor-text { max-height: 320px; }
+  .flows-sidebar {
+    flex: 0 0 auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    padding-right: 0;
+    padding-bottom: 0.7rem;
+  }
+  .flow-list { max-height: 160px; }
+}

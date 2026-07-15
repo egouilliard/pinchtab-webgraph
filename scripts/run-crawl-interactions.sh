@@ -4,10 +4,13 @@
 # Crawls once, thoroughly; never submits forms. Query the result offline with howto.py.
 #
 #   scripts/run-crawl-interactions.sh --start https://app/dashboard --out out/app-cache
-#   python3 pinchtab_webgraph/howto.py out/app-cache.json --goal "create team"   # offline, milliseconds
+#   python3 -m pinchtab_webgraph.howto out/app-cache.json --goal "create team"   # offline, milliseconds
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 export PINCHTAB_CONFIG="$ROOT/crawl-config.json"
 export PINCHTAB_TOKEN="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["server"]["token"])' "$ROOT/crawl-config.json")"
-exec python3 "$ROOT/pinchtab_webgraph/interaction_crawl.py" "$@" --server http://localhost:9871
+# run as a MODULE, not a file path — the package uses relative imports (`from . import recipe`),
+# so executing the .py directly dies with "attempted relative import with no known parent package".
+cd "$ROOT"
+exec python3 -m pinchtab_webgraph.interaction_crawl "$@" --server http://localhost:9871

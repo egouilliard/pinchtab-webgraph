@@ -99,7 +99,7 @@ def test_list_sessions_sorted_updated_desc(isolated_cache_home):
 def test_summary_omits_heavy_fields(isolated_cache_home):
     rec = chat_store.create("example.test", backend="api")
     s = chat_store.summary(rec)
-    assert set(s) == {"id", "host", "backend", "title", "created_at",
+    assert set(s) == {"id", "host", "backend", "mode", "title", "created_at",
                       "updated_at", "message_count"}
     assert "transcript" not in s and "wire_messages" not in s
     assert "sdk_session_id" not in s
@@ -266,3 +266,56 @@ def test_no_secret_leak_in_persisted_view(isolated_cache_home):
     with open(chat_store.session_path("example.test", rec["id"])) as f:
         raw = json.load(f)
     assert "_disk_len" not in raw
+
+
+# --- mode: written once at create, back-compat default, list filter ----------
+
+def test_create_defaults_to_workspace_mode(isolated_cache_home):
+    rec = chat_store.create("example.test", backend="api")
+    assert rec["mode"] == "workspace"
+    assert chat_store.load("example.test", rec["id"])["mode"] == "workspace"
+    assert chat_store.summary(rec)["mode"] == "workspace"
+
+
+def test_create_flow_mode_is_persisted(isolated_cache_home):
+    rec = chat_store.create("example.test", backend="api", mode="flow")
+    assert chat_store.load("example.test", rec["id"])["mode"] == "flow"
+    assert chat_store.summary(rec)["mode"] == "flow"
+
+
+def test_mode_defaults_to_workspace_for_old_records(isolated_cache_home):
+    # a record written BEFORE flow mode existed has no "mode" key — it must read back as
+    # "workspace" (never as the mode that grants a tool).
+    rec = chat_store.create("example.test", backend="api")
+    del rec["mode"]
+    assert chat_store.summary(rec)["mode"] == "workspace"
+    assert chat_store._persisted(rec)["mode"] == "workspace"
+
+
+def test_list_sessions_filters_by_mode(isolated_cache_home):
+    ws = chat_store.create("example.test", backend="api")
+    fl = chat_store.create("example.test", backend="api", mode="flow")
+
+    all_ids = {s["id"] for s in chat_store.list_sessions("example.test")}
+    assert all_ids == {ws["id"], fl["id"]}                      # unfiltered = everything
+    assert [s["id"] for s in chat_store.list_sessions("example.test", mode="flow")] \
+        == [fl["id"]]
+    assert [s["id"] for s in chat_store.list_sessions("example.test", mode="workspace")] \
+        == [ws["id"]]
+
+
+def test_append_flow_draft_frame_persists_the_document(isolated_cache_home):
+    rec = chat_store.create("example.test", backend="api", mode="flow")
+    doc = {"name": "invoices", "steps": [{"op": "goto", "url": "https://x.test/i"}]}
+    chat_store.append_display_frame(rec, {
+        "type": "flow_draft", "doc": doc, "status": "ok", "path": None, "error": None,
+        "name": "invoices", "note": "first draft"})
+    entry = rec["transcript"][-1]
+    assert entry["type"] == "flow_draft" and entry["role"] == "assistant"
+    assert entry["doc"] == doc                     # the WHOLE doc, so a reopen restores it
+    assert entry["status"] == "ok" and entry["note"] == "first draft"
+    assert entry["ts"]
+
+    chat_store.save(rec)
+    reloaded = chat_store.load("example.test", rec["id"])
+    assert reloaded["transcript"][-1]["doc"] == doc

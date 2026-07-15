@@ -69,11 +69,28 @@ def _pt(argv, server, token, tab, timeout=90):
         return 124, "", "timeout"
 
 
-def resolve_tab(server, token):
-    """Return a live page tab id to drive (PinchTab's stored default tab id goes stale
-    and then every command 404s with 'tab not found'). Reuse an existing page tab, else
-    open a blank one. None if the bridge can't be reached."""
-    rc, out, _ = _pt(["tab", "--json"], server, token, None, timeout=15)
+def _tab_is_missing(text):
+    """Does this failure mean 'the tab I aimed at is gone'? The bridge answers a command aimed
+    at a dead/stale tab with `Error 404: tab <id> not found`. That — and only that — is the
+    failure a nav may retry in a new tab; anything else (a real 404, a blocked domain) must
+    surface rather than be masked."""
+    return "not found" in (text or "").lower()
+
+
+def _printed_tab_id(out):
+    """The tab id `nav --print-tab-id` prints (last non-empty line of stdout)."""
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else None
+
+
+def resolve_tab(server, token, url=None, _run=_pt):
+    """Return a live page tab id to drive (PinchTab's stored default tab id goes stale and
+    then every command 404s with 'tab not found'). Reuse an existing page tab; if there is
+    none (a freshly started bridge has NO tabs) open one AT `url` when the caller knows one —
+    `nav <url> --new-tab --print-tab-id` is the only way to create a tab, and it needs a REAL
+    url (the bridge rejects a blank-page url with `400 invalid url`). None when there is no
+    tab and no url — which is survivable: execute_steps self-heals on its first `nav`."""
+    rc, out, _ = _run(["tab", "--json"], server, token, None, timeout=15)
     if rc == 0 and out:
         try:
             tabs = json.loads(out)
@@ -85,10 +102,10 @@ def resolve_tab(server, token):
                 return active[-1]["id"]
         except (ValueError, TypeError):
             pass
-    rc, out, _ = _pt(["nav", "about:blank", "--new-tab", "--print-tab-id"], server, token, None)
-    if rc == 0 and out:
-        return out.strip().splitlines()[-1].strip() or None
-    return None
+    if not url:
+        return None
+    rc, out, _ = _run(["nav", url, "--new-tab", "--print-tab-id"], server, token, None)
+    return _printed_tab_id(out) if rc == 0 else None
 
 
 def _apply_out_dir(argv, out_dir):
@@ -134,7 +151,16 @@ def execute_steps(steps, *, server=DEFAULT_SERVER, token=None, tab=None,
                                 "reason": "needs a value — pass --set %r"
                                           % ("%s=<value>" % (s.get("label") or "field"))})
                     continue
-                argv[s["value_index"]] = val
+                if s["value_index"] is None:
+                    # a checkbox: `check <sel>` has no value slot. The value is a BOOLEAN —
+                    # run the command when truthy, skip it when falsy. (Substituting here
+                    # would be argv[None] → TypeError.)
+                    if not commands.is_truthy(val):
+                        out.append({"line": rendered, "role": role, "status": "skipped",
+                                    "reason": "value %r is falsy — leaving it unchecked" % val})
+                        continue
+                else:
+                    argv[s["value_index"]] = val
         if role == "download":
             argv = _apply_out_dir(argv, out_dir)
         shown = commands.render_step({**s, "argv": argv})
@@ -142,6 +168,15 @@ def execute_steps(steps, *, server=DEFAULT_SERVER, token=None, tab=None,
             out.append({"line": shown, "role": role, "status": "dry-run"})
             continue
         rc, sout, serr = _run(argv, server, token, tab)
+        if rc != 0 and role == "nav" and _tab_is_missing(serr + sout):
+            # SELF-HEAL a missing tab. `tab` is None (nothing to adopt on a fresh bridge, so
+            # the bridge fell back to its STALE stored default) or its tab has since closed —
+            # either way every later step would 404 the same way. Re-nav to the SAME url in a
+            # new tab and pin the id it prints, so the rest of the plan lands on a live tab.
+            # Only a "tab not found" failure is retried; a genuine nav error still errors.
+            rc, sout, serr = _run(argv + ["--new-tab", "--print-tab-id"], server, token, None)
+            if rc == 0:
+                tab = _printed_tab_id(sout) or tab
         rec = {"line": shown, "role": role, "status": "ok" if rc == 0 else "error", "rc": rc}
         if rc != 0:
             rec["stderr"] = (serr or sout)[:300]
@@ -226,8 +261,9 @@ def main():
 
     token = load_token(a.config)
     values = _parse_set(a.set)
-    # pin a live tab so the nav/click steps don't 404 on PinchTab's stale default tab.
-    tab = None if a.dry_run else resolve_tab(a.server, token)
+    # pin a live tab so the nav/click steps don't 404 on PinchTab's stale default tab. The
+    # plan's start_url is what a fresh (zero-tab) bridge opens its first tab at.
+    tab = None if a.dry_run else resolve_tab(a.server, token, plan["start_url"])
     results = execute_plan(plan["trigger"], plan["path_steps"], plan["start_url"],
                            allow_submit=a.allow_submit, server=a.server, token=token, tab=tab,
                            values=values, upload_file=a.file, out_dir=a.out_dir,

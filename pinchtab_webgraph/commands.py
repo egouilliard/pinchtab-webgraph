@@ -72,12 +72,44 @@ def shq(s):
 # executor; `needs_input` marks a step whose value is a placeholder the user must supply;
 # `value_index` points at that placeholder arg; `disabled` renders the line commented out
 # and is never auto-run (e.g. a form submit). Notes/blanks carry `text` and no argv.
+#
+# EVERY click step is emitted as `["click", "--css", <sel>, "--wait-nav"]`. `--wait-nav` is
+# not an optimisation, it is required for CORRECTNESS: PinchTab's action guard returns
+# `409: unexpected page navigation` when a click moves the page — AFTER the click already
+# succeeded — so a caller that treats a nonzero rc as fatal (perform.execute_steps aborts on
+# rc != 0 for role nav/click) would report FAILURE for an action that worked. That hits the
+# common cases: a submit that redirects, a trigger that opens the form on a new URL, a
+# path-prefix tab click. The flag is safe unconditionally — a non-navigating click still
+# returns immediately. Fixing it HERE fixes all three consumers at once: the printed block,
+# `perform.execute_steps` (runs argv verbatim), and the flow VM (runner._exec_command_step
+# passes only argv[2], the selector, to browser.click(), which appends its own --wait-nav —
+# so the trailing flag never double-applies). The flag is also index-safe: it is APPENDED,
+# and no click step has a `value_index`.
 
 def _cmd(argv, comment=None, role="", needs_input=False, value_index=None,
          disabled=False, label=None):
     return {"argv": list(argv), "comment": comment, "role": role,
             "needs_input": needs_input, "value_index": value_index,
             "disabled": disabled, "label": label, "text": None}
+
+
+# A checkbox is the one `needs_input` step with NO `value_index`: `["check", <sel>]` has no
+# value slot to substitute into. Its supplied value is therefore a BOOLEAN — check it when
+# truthy, skip it when falsy. Every executor (perform.execute_steps, runner._exec_command_step)
+# must branch on `value_index is None` rather than indexing argv with it.
+_FALSY = {"", "0", "false", "no", "off", "none", "null", "unchecked"}
+
+
+def is_truthy(value):
+    """Interpret a caller-supplied value (a CLI string, or a real bool from JSON) as a
+    boolean — the semantics a valueless `check` step needs."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in _FALSY
+    return bool(value)
 
 
 def _note(text):
@@ -173,8 +205,8 @@ def _path_steps(start_url, steps):
         if href:
             out.append(_cmd(["nav", href], comment=label or None, role="nav"))
         elif st.get("selector"):
-            out.append(_cmd(["click", "--css", st["selector"]], comment=label or None,
-                            role="click"))
+            out.append(_cmd(["click", "--css", st["selector"], "--wait-nav"],
+                            comment=label or None, role="click"))
         else:
             out.append(_note("# (no selector recorded) click %s"
                              % (shq(label) if label else "the control")))
@@ -193,7 +225,7 @@ def _download_steps(href=None, selector=None, accept=None, label=None):
         name = suggest_filename(href, accept, label)
         return [_cmd(["download", href, "-o", name], role="download")]
     if selector:
-        return [_cmd(["click", "--css", selector], role="download",
+        return [_cmd(["click", "--css", selector, "--wait-nav"], role="download",
                      comment="JS-triggered — the session captures the file")]
     return [_note("# download control had neither a URL nor a selector recorded")]
 
@@ -273,19 +305,19 @@ def _form_steps(form, trigger_selector=None, opens_at=None, allow_submit=False):
     if opens_at:
         out.append(_cmd(["nav", opens_at], comment="opens the form", role="nav"))
     elif trigger_selector:
-        out.append(_cmd(["click", "--css", trigger_selector], comment="opens the form",
-                        role="click"))
+        out.append(_cmd(["click", "--css", trigger_selector, "--wait-nav"],
+                        comment="opens the form", role="click"))
     for f in form.get("fields", []):
         out.append(_field_step(f))
     sub_sel = form.get("submitSelector")
     subs = form.get("submitButtons") or []
     if sub_sel:
         if allow_submit:
-            out.append(_cmd(["click", "--css", sub_sel], role="submit",
+            out.append(_cmd(["click", "--css", sub_sel, "--wait-nav"], role="submit",
                             comment=("submit: %s" % subs[0]) if subs else "submit"))
         else:
-            out.append(_cmd(["click", "--css", sub_sel], role="submit", disabled=True,
-                            comment="submit (uncomment to save)"))
+            out.append(_cmd(["click", "--css", sub_sel, "--wait-nav"], role="submit",
+                            disabled=True, comment="submit (uncomment to save)"))
     elif subs:
         out.append(_note("# then click %s to submit" % shq(subs[0])))
     return out

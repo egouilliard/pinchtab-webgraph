@@ -67,13 +67,15 @@ def test_open_chat_session_claude_code_dispatch(isolated_cache_home, monkeypatch
     opened = []
 
     @asynccontextmanager
-    async def fake_open_client(host, *, model=None):
+    async def fake_open_client(host, *, model=None, mode="workspace"):
         opened.append(host)
+        opened.append(mode)
         yield fake_client
 
     recorded = {}
 
-    async def fake_handle(client, text, *, emit, live_url=None, on_sdk_session_id=None):
+    async def fake_handle(client, text, *, emit, live_url=None, draft=None,
+                          on_sdk_session_id=None):
         recorded["client"] = client
         recorded["text"] = text
         recorded["live_url"] = live_url
@@ -99,7 +101,7 @@ def test_open_chat_session_claude_code_dispatch(isolated_cache_home, monkeypatch
             return session.record
 
     record = _run(go())
-    assert opened == ["example.test"]
+    assert opened == ["example.test", "workspace"]
     assert recorded["client"] is fake_client
     assert recorded["text"] == "hi there"
     assert recorded["live_url"] == "https://example.test/y"   # threaded through
@@ -119,12 +121,12 @@ def test_open_chat_session_api_dispatch(isolated_cache_home, monkeypatch):
     fake_state = _FakeState()
 
     @asynccontextmanager
-    async def fake_open_api(host, *, record=None):
+    async def fake_open_api(host, *, record=None, mode="workspace"):
         yield fake_state
 
     recorded = {}
 
-    async def fake_handle(state, text, *, emit, live_url=None):
+    async def fake_handle(state, text, *, emit, live_url=None, draft=None):
         recorded["state"] = state
         recorded["text"] = text
         recorded["live_url"] = live_url
@@ -174,7 +176,7 @@ def test_open_chat_session_pins_backend_from_record(isolated_cache_home, monkeyp
     record = chat_store.create("example.test", backend="api")
 
     @asynccontextmanager
-    async def fake_open_api(host, *, record=None):
+    async def fake_open_api(host, *, record=None, mode="workspace"):
         yield _FakeState()
 
     monkeypatch.setattr(chat_backend, "_open_api_session", fake_open_api)
@@ -193,3 +195,90 @@ def test_open_chat_session_pins_backend_from_record(isolated_cache_home, monkeyp
 def test_chat_unavailable_reexport_is_chat_type():
     from pinchtab_webgraph.ui import chat
     assert chat_backend.ChatUnavailable is chat.ChatUnavailable
+
+
+# --- mode: threaded on create, PINNED on resume ------------------------------
+
+def test_open_chat_session_new_flow_mode_reaches_state_and_record(isolated_cache_home,
+                                                                  monkeypatch):
+    from pinchtab_webgraph.ui import chat
+
+    seen = {}
+
+    @asynccontextmanager
+    async def fake_open_api(host, *, record=None, mode="workspace"):
+        seen["mode"] = mode
+        yield chat.ChatState(host=host, mode=mode)
+
+    monkeypatch.setattr(chat_backend, "_open_api_session", fake_open_api)
+
+    async def go():
+        async with chat_backend.open_chat_session(
+                "example.test", backend_name="api", mode="flow") as session:
+            return session
+
+    session = _run(go())
+    assert seen["mode"] == "flow"
+    assert session.state.mode == "flow"
+    assert session.record["mode"] == "flow"
+    # persisted, so the resume below reads it back.
+    assert chat_store.load("example.test", session.record["id"])["mode"] == "flow"
+
+
+def test_open_chat_session_pins_mode_from_record_ignoring_the_param(isolated_cache_home,
+                                                                   monkeypatch):
+    # THE SAFETY REGRESSION: a session created in WORKSPACE mode must resume in workspace
+    # mode even when the caller asks for flow — otherwise `?mode=flow` on an old session id
+    # would hand it the propose_flow tool it was never granted. Mode is pinned from the
+    # record, exactly like backend.
+    from pinchtab_webgraph.ui import chat
+
+    seen = {}
+
+    @asynccontextmanager
+    async def fake_open_api(host, *, record=None, mode="workspace"):
+        seen["mode"] = mode
+        yield chat.ChatState(host=host, mode=mode)
+
+    monkeypatch.setattr(chat_backend, "_open_api_session", fake_open_api)
+    record = chat_store.create("example.test", backend="api")      # workspace
+    assert record["mode"] == "workspace"
+
+    async def go():
+        async with chat_backend.open_chat_session(
+                "example.test", mode="flow", record=record) as session:
+            return session
+
+    session = _run(go())
+    assert seen["mode"] == "workspace"                             # NOT flow
+    assert session.state.mode == "workspace"
+    # …and therefore the flow tool is not in its fence.
+    assert "propose_flow" not in chat.effective_tool_names(session.state.mode)
+
+
+def test_open_chat_session_threads_draft_into_handle(isolated_cache_home, monkeypatch):
+    recorded = {}
+
+    async def fake_handle(state, text, *, emit, live_url=None, draft=None):
+        recorded["draft"] = draft
+        await emit({"type": "done"})
+
+    @asynccontextmanager
+    async def fake_open_api(host, *, record=None, mode="workspace"):
+        yield _FakeState()
+
+    monkeypatch.setattr(chat_backend, "_open_api_session", fake_open_api)
+    monkeypatch.setattr(chat_backend.chat, "handle_user_message", fake_handle)
+
+    doc = {"name": "f", "steps": []}
+
+    async def emit(f):
+        pass
+
+    async def go():
+        async with chat_backend.open_chat_session(
+                "example.test", backend_name="api", mode="flow") as session:
+            await session.handle("edit", emit=emit, draft=doc)
+
+    _run(go())
+    assert recorded["draft"] == doc

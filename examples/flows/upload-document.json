@@ -1,0 +1,25 @@
+{
+  "name": "upload-document",
+  "host": "doc-approval-system.localhost",
+  "description": "Upload a document to the approval system's dropzone. Stages the file and stops — it does not click Analyze, so nothing is processed or decided.",
+
+  "inputs": {
+    "file": {
+      "type": "file",
+      "required": true,
+      "description": "the document to upload (.pdf .png .jpg .jpeg .tif .tiff .csv .xlsx)"
+    }
+  },
+
+  "capabilities": {"allow_upload": true},
+
+  "steps": [
+    {"op": "goto", "url": "https://doc-approval-system.localhost:1355/"},
+
+    {"op": "upload", "selector": "input[type=file]", "file": "${file}"},
+
+    {"op": "wait", "text": "Remove", "timeout_ms": 15000},
+
+    {"op": "log", "message": "staged ${file} — the document is queued, not analyzed"}
+  ]
+}

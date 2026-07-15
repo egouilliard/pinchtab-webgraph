@@ -1,6 +1,6 @@
 # Web UI
 
-> **Docs:** [← README](../README.md) · [📚 Index](README.md) · [MCP server](mcp-server.md) · [UTCP interface](utcp.md) · [Authenticated login](authenticated-login.md)
+> **Docs:** [← README](../README.md) · [📚 Index](README.md) · [Automation flows](flows.md) · [MCP server](mcp-server.md) · [UTCP interface](utcp.md) · [Authenticated login](authenticated-login.md)
 
 `pinchtab-webgraph` ships an **optional** local web UI: a small FastAPI app behind a
 single console script, `pinchtab-webgraph-ui`. From one loopback-only browser app you can:
@@ -15,6 +15,12 @@ single console script, `pinchtab-webgraph-ui`. From one loopback-only browser ap
 - **[explore / search](#explore-view)** everything the crawl captured — full-text search,
   the create-form inventory + a goal path-finder, and the per-view content inventory —
   plus a Ctrl/Cmd-K [command palette](#command-palette) launcher over the whole UI;
+- **author, run and re-run [automation flows](#flows-view-opt-in)** — the host's saved
+  [declarative flows](flows.md), in a workbench of **three synchronized views**: an
+  [**AI agent** you describe the automation to](flows.md#authoring-a-flow-with-the-ai-agent),
+  an editable **visual canvas**, and the live-validating **JSON** — plus visible capability
+  toggles, a streaming run log with a live `N new · M dupe` dedupe counter, run history, and
+  the flow's all-time artifact ledger (opt-in);
 - store per-host login credentials in a keyring-backed [vault](#vault-credentials).
 
 Underneath it's a small FastAPI app that serves a read-only REST API over the offline
@@ -61,11 +67,13 @@ vault reports `vault_unavailable`.
 
 ## Graph view
 
-The host header carries a **Workspace | Graph | Explore** view switcher. **Workspace** is
-the two-pane chat + live-browser view above; **Graph** replaces it with an interactive
+The host header carries a **Workspace | Graph | Explore | Flows** view switcher. **Workspace**
+is the two-pane chat + live-browser view above; **Graph** replaces it with an interactive
 rendering of the selected host's **interaction graph** (below); **[Explore](#explore-view)**
-replaces it with a read-only browser over the crawled cache (search / forms / content) — all
-three read the same offline cache the REST API and chat serve. Switching views only toggles
+replaces it with a read-only browser over the crawled cache (search / forms / content); and
+**[Flows](#flows-view-opt-in)** replaces it with the host's saved automations (the only view
+that can *write* to the target site, and the only one behind an opt-in gate). The first three
+read the same offline cache the REST API and chat serve. Switching views only toggles
 which pane is `hidden`; it **never** opens or closes the chat / live-browser WebSockets, so
 flipping to Graph or Explore and back leaves both live sessions running untouched.
 
@@ -226,6 +234,174 @@ the selected row (a disabled row is a no-op and explains why via its hint). Ever
 built with `createElement` + `textContent` (host names are untrusted crawled data), and the
 Ctrl/Cmd-K shortcut fires even while a chat or crawl input is focused.
 
+## Flows view (opt-in)
+
+The fourth tab, **Flows**, is the front end for the [declarative automation flow
+layer](flows.md) — the host's **saved automations**. It is a **workbench**, not a textarea:
+**[describe the automation to an agent](flows.md#authoring-a-flow-with-the-ai-agent)**, or draw it
+on a **visual canvas**, or type the **JSON** — three synchronized views of **one** document. Then
+run it against a real browser, watch every step stream in, and re-run it to see the content-hash
+dedupe do its job.
+
+```bash
+PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1 pinchtab-webgraph-ui        # 1 / true / yes / on
+```
+
+**Off by default**, the same posture as [New crawl](#new-crawl-get-wscrawl-opt-in) — and more
+warranted: a crawl *structurally never submits*, where a flow's `do{submit:true}` / `upload` step
+**can write to the real site**. With the gate unset the editor, **the agent** and the CRUD routes
+still work; only `/ws/flows/run` refuses (`flow_unavailable` / `disabled`). Authoring is always
+safe; *running* is what is gated.
+
+```
+┌───────────────┬──────────────────────────────────────────────────────────┐
+│ Crawled       │ app.example.com   [Workspace][Graph][Explore][Flows]      │
+│ graphs        ├──────────┬────────────────┬──────────────────────────────┤
+│ ───────────   │  Flows   │ Chat (mode=    │  ┌ canvas ─────────────────┐ │
+│ app.example   │  ──────  │       flow)    │  │ goto  goal=Reports       │ │
+│ …             │ ▸ downl- │ ──────────────  │  │ ┌ paginate ────────────┐ │ │
+│               │   all-   │ “download every│  │ │ ┌ for_each ────────┐ │ │ │
+│               │   reports│  report PDF    │  │ │ │ ▸ download        │ │ │ │
+│               │   ·3     │  across all    │  │ │ └──────────────────┘ │ │ │
+│               │ ▸ export-│  the pages”    │  │ └──────────────────────┘ │ │
+│               │   users  │                │  └──────────────────────────┘ │
+│  [Credentials]│          │ ▸ draft ✓ ok   │  { "name": …, "steps": […] }  │
+│               │ [+ New   │   (chip)       │  ✓ valid · 2 steps  ← JSON    │
+│               │   flow]  │                │  ┌──────────────────────────┐ │
+│               │          │                │  │ [x] Dry run [ ] Allow sub│ │
+│               │          │                │  │ [Run flow][Cancel] 5 new·│ │
+│               │          │                │  └──────────────────────────┘ │
+│               │          │                │  Runs (history) │ Artifacts   │
+└───────────────┴──────────┴────────────────┴──────────────────────────────┘
+```
+
+- **Three synchronized views, one document.** The **chat agent** proposes; the **canvas** is
+  clicked; the **JSON** is typed. Any of them mutates the doc, the other two re-render, and
+  validation runs on every change. A validation error at `steps[1].body[0]` **highlights that
+  canvas box** — the canvas's `data-path` uses `flow.py`'s path grammar verbatim. The full model
+  is in **[flows.md → Authoring a flow with the AI
+  agent](flows.md#authoring-a-flow-with-the-ai-agent)**; the UI-side wiring is
+  [below](#the-flow-agent-and-the-mode-axis).
+- **Live validator.** Every keystroke (debounced) is `POST`ed to `/api/flows/validate` — which is
+  `flow.validate()`: pure, no browser, no graph. A typo'd `${itm.href}` is caught **as you type**,
+  named together with its exact path in the document, and **Save stays disabled** until the document
+  is legal. A bad document can never be saved, let alone scheduled.
+- **Resolvability warnings (amber).** The same call re-resolves every `goto`/`do` **`goal`** against
+  the host's *crawled graph*. A goal that matches nothing (`"reports"` on a site that only has
+  “Add Report”) is a valid document that would abort at run time — so the banner turns amber
+  (`valid — 3 steps · ⚠ 1 step may not resolve`), the offending canvas box goes amber
+  (`.flow-node-warn`, distinct from the red `.flow-node-error`), and the box prints the message plus
+  the *candidate labels the site actually has*. **Save stays enabled** — it is a warning, not a
+  blocker (the flow may predate the crawl), and an uncrawled host produces no warnings at all.
+- **The safety model is visible, not just enforced.** The **Allow-submit** / **Allow-upload**
+  toggles are **disabled unless the flow document itself declares that capability**, and **Dry run
+  is checked by default**. That makes *"a write happens only if the flow **declares** it **and** the
+  caller **grants** it"* something you can see. The server re-derives the same AND before spawning,
+  and the runner re-checks it per step — the checkbox is a convenience, never the enforcement.
+- **The dedupe counter is the product.** `download` step frames arrive with status `new` or `dupe`,
+  which the log folds into a live **`N new · M dupe`** counter. Re-running a flow and watching it
+  report **0 new · 5 dupe** is what makes this a change detector rather than a poller.
+- **History + an all-time ledger.** Past runs replay their persisted step log into the same panel;
+  the **Artifacts** column is the flow's cumulative [dedupe ledger](flows.md#the-dedupe-ledger) —
+  every distinct file it has *ever* fetched (name / size / when / sha256), which a single run record
+  cannot answer.
+- **A flow run and a live crawl refuse each other** (cross-veto, both directions): they drive the
+  same single-tenant PinchTab bridge. A **dry** run is exempt — it opens no browser.
+
+### The flow agent and the `mode` axis
+
+The Flows tab's chat pane is **the same chat pane as the Workspace tab's** — the same
+`createChatPane` factory in `app.js`, mounted a second time with flow-namespaced element ids. One
+implementation, two mounts: a second copy of the pane would drift the first time the frame protocol
+moved. (It did, once: extracting the factory briefly leaked flow chats into the Workspace tab's chip
+bar — fixed by the `mode` filter below, and regression-tested.)
+
+What separates them is **one axis: `mode`.**
+
+| | `mode: "workspace"` (the default) | `mode: "flow"` |
+| --- | --- | --- |
+| **The job** | the navigation assistant — *"how do I do X on this site?"* | the **flow author** — *"download every report PDF across all the pages"* |
+| **Tools** | the **6** offline graph tools (`chat.OFFLINE_TOOL_NAMES`) | those same **6**, **plus** `propose_flow` (`FLOW_TOOL_NAMES`) — 7 |
+| **System prompt** | `build_system_prompt` | `build_flow_system_prompt` — a **sibling**, not a branch. Its op table, capability names and loop vars are **generated from `flow.py`'s tables**, so the prompt can't drift from the validator |
+| **Extra per-turn payload** | `live_url` (the live pane's position) | `draft` (the live flow document) |
+| **Extra frame** | `tour` (after an OK `howto`) | `flow_draft` (after a `propose_flow`) |
+| **Where its chats are listed** | the Workspace chip bar | the Flows tab's chip bar |
+
+**The fence is additive and fails closed.** `chat.effective_tool_names(mode)` is the single safety
+predicate: flow mode **unions in** `{"propose_flow"}`; the 6-tool browsing fence is never widened;
+and **any unknown mode degrades to the base 6** (so a typo'd or hostile mode token can never be the
+thing that grants a tool). `server._mode()` normalizes the query param the same way.
+
+**A session's mode is PINNED at creation** — written into its record by `chat_store.create` and read
+back from the record on every resume, exactly like its `backend`. `open_chat_session` passes
+`mode=None` for a resumed session, so **the query param is irrelevant once a session exists**: a
+workspace chat **cannot be escalated** into flow mode by reconnecting with `?mode=flow` (and thereby
+handed a tool it was never granted). A record written before flow mode existed counts as
+`"workspace"`.
+
+**And the agent can only PROPOSE.** `propose_flow` is a pure validate-and-echo — no disk, no
+browser, no subprocess — and **no tool anywhere on the MCP surface reaches `flow_store` (save) or
+`flow_runner` (run)**. Both facts are held by tests (`test_propose_flow_is_pure_no_disk_no_subprocess`
+poisons `open`/`os.replace`/`subprocess`; `test_no_flow_save_or_run_tool_exists_anywhere` guards the
+surface). **Save and Run are the human's, and only the human's.** See
+[flows.md](flows.md#the-agent-can-only-propose--and-that-is-structural).
+
+**The draft round-trips every turn.** The SPA ships the **live** document (`getDraft()`, read from
+the editor's current state — never the agent's stale copy) as `user_message.draft`, and
+`chat.augment_with_flow_draft` prefixes the turn with it. So the agent revises *the document on your
+screen*, and **hand edits made between turns survive**. A **replayed** draft (out of a stored
+transcript) is deliberately **never** auto-applied — it renders as a chip with an explicit **"Restore
+this draft"** button, and a monotonic generation guard drops any superseded async writer, so
+reopening an old chat can't clobber the flow you just opened.
+
+### Flow modules (and what they mirror)
+
+The tab is two new server modules, each a deliberate twin of an existing one:
+
+| New module | Mirrors | What it does |
+| --- | --- | --- |
+| [`ui/flow_store.py`](../pinchtab_webgraph/ui/flow_store.py) | [`chat_store.py`](#on-disk-layout) | Saved flows + run records on disk: `<home>/flows/<host>/<flow_id>.json` and `…/<flow_id>/runs/<run_id>.json`. Stdlib-only, per-host directory, **atomic writes** (tmp + `os.replace`), one id/host validation choke-point (uuid4-hex ids, `cache_store.validate_host`). Caps: **200 flows/host** (hard reject, `429 too_many_flows` — a flow is authored content, never silently evicted) and **50 runs/flow** (**FIFO-evict** — an audit line is cheap to lose; the ability to run the automation is not). |
+| [`ui/flow_runner.py`](../pinchtab_webgraph/ui/flow_runner.py) | [`live_crawl.py`](#new-crawl-get-wscrawl-opt-in) | Spawns `python -m pinchtab_webgraph.flow_cmd run <doc> --jsonl` as a **subprocess** and relays its JSONL frames. Same degradation idiom (`FlowRunUnavailable(reason, detail)` → a structured frame, never a 500), same process-group teardown, same argv-list-never-a-shell-string discipline. `MAX_LIVE_FLOW_RUNS = 1`. |
+
+**Why a subprocess and not an in-process `runner.execute()`:** `runner.execute()` has **no
+cooperative-cancellation hook** — no callback, no flag it re-checks between steps — so an in-process
+design could never honour a **Cancel** click. The only cancellation primitive that works is
+SIGTERM→SIGKILL on the process's own group (`start_new_session=True`). Crash isolation on the thing
+holding a real, logged-in browser tab comes free with it.
+
+> **The `<host>` in `<home>/flows/<host>/…` is a STORAGE PARTITION KEY** — which drawer the flow is
+> filed in — and is *not* the flow document's own optional `host` field, which is a **runtime
+> navigation guard** the runner enforces. They may legitimately differ. See
+> [flows.md → Storage layout and caps](flows.md#storage-layout-and-caps).
+
+### The flow REST + WS surface
+
+Twelve REST routes (CRUD + audit; all usable with the env gate **off**) and one gated WebSocket.
+The full table, the status-code contract, the frame protocol, and the artifact-scope caveat live in
+**[flows.md → Running flows from the web UI](flows.md#running-flows-from-the-web-ui)**. In brief:
+
+| Method · Path | Does |
+| --- | --- |
+| `POST /api/flows/validate` · `/api/flows/schema` | Stateless: validate a posted document (structural verdict **+ [resolvability `warnings`](flows.md#resolvability-warnings)**) / derive its `inputs` JSON Schema. |
+| `GET /api/flows/op_schema` | Stateless: **the op vocabulary itself**, served from `flow.py`'s own `LEAF_OPS`/`BODY_OPS`. **Every** per-op canvas form is derived from it — there is no second copy of the DSL in JS to drift. |
+| `GET` · `POST /api/hosts/{host}/flows` | List the host's flow summaries / create one. |
+| `GET` · `PUT` · `DELETE /api/hosts/{host}/flows/{flow_id}` | The full record (doc included) / replace / delete (idempotent, cascades to runs). |
+| `GET /api/hosts/{host}/flows/{flow_id}/schema` | The saved flow's `inputs` as a JSON Schema. |
+| `GET /api/hosts/{host}/flows/{flow_id}/runs` · `/runs/{run_id}` | Run summaries (newest first) / one full run record. |
+| `GET /api/hosts/{host}/flows/{flow_id}/artifacts` | The flow's cumulative artifact ledger + stats. |
+| **`GET /ws/flows/run?host=&flow_id=`** | **Execute a saved flow.** Gated by `PINCHTAB_WEBGRAPH_ENABLE_FLOWS`. |
+
+The `/ws/flows/run` wire format: a **`flow`** bootstrap frame (the client builds the run form from
+it — no second fetch) → per run **`status`** → *N* × **`step`** → **`log`** (anything the subprocess
+printed that wasn't a frame, stderr included) → **exactly one** terminal **`result`** (sent *after*
+the run is persisted). The client sends `{"type":"run", inputs, grant, dry_run}` — **repeatable**,
+so Run-again is one click — and `{"type":"cancel"}`; **a client disconnect is an implicit cancel**,
+and the partial run is still persisted.
+
+A document that fails validation is a structured **200 miss** (`{"status":"invalid", path, error}`,
+the same shape `pwg flow validate` prints); a bad **id token** is a malformed request
+(`invalid_flow` / `invalid_run` → **400**), rejected before any filesystem access.
+
 ## Chat backends
 
 The chat pane has **two interchangeable backends**. Both stream the identical frame
@@ -305,11 +481,20 @@ and a single validation choke-point. `<host>` is run through `cache_store.valida
 `<id>` is a **uuid4 hex** (`^[0-9a-f]{32}$`) validated by `chat_store.validate_session_id`
 — no separators or dots, so a raw id can never resolve outside its host's directory.
 
-Each record carries `id`, `host`, `backend`, `title` / `title_locked`, `created_at` /
-`updated_at`, `message_count`, `sdk_session_id`, and **two** history fields:
+Each record carries `id`, `host`, `backend`, **`mode`**, `title` / `title_locked`, `created_at` /
+`updated_at`, `message_count`, `sdk_session_id`, and **two** history fields.
+
+**`mode`** (`workspace` | `flow`) is written once at creation and — like `backend` — **pinned** on
+every resume, never re-resolved (see [The flow agent and the `mode`
+axis](#the-flow-agent-and-the-mode-axis)). A record written before flow mode existed reads back as
+`"workspace"`, so an old chat keeps resuming as the navigation assistant it was created as.
+
+The history fields:
 
 - **`transcript`** — the display-only fold of the emitted WS frames (user text +
-  assistant `text` / `tool_use` / `tool_result` / `tour` / `error` entries). Replayed
+  assistant `text` / `tool_use` / `tool_result` / `tour` / **`flow_draft`** / `error` entries;
+  a `flow_draft` persists the **proposed document itself**, not just its note, so reopening a
+  flow chat can restore the draft to the canvas). Replayed
   verbatim on reconnect, so the chat **log** is restored for **every** backend. A
   `TranscriptSink` wraps the route's `emit` and folds each frame into the record as it is
   sent, so both backends persist identically.
@@ -487,8 +672,8 @@ any filesystem access.
 
 | Method · Path | Does | Notes |
 | --- | --- | --- |
-| `GET /api/hosts/{host}/sessions` | list a host's chats | `{"sessions":[…]}`, lightweight **summaries** (no transcript / wire state), newest `updated_at` first |
-| `POST /api/hosts/{host}/sessions` | create a chat | optional `{"title"}` body; returns the new summary. **429 `too_many_sessions`** at `MAX_SESSIONS_PER_HOST` (50) |
+| `GET /api/hosts/{host}/sessions?mode=` | list a host's chats | `{"sessions":[…]}`, lightweight **summaries** (no transcript / wire state), newest `updated_at` first. The optional **`mode=`** filter (`workspace` \| `flow`) is what keeps the two chip bars separate — the Workspace tab lists `workspace` chats and the [Flows tab](#the-flow-agent-and-the-mode-axis) lists `flow` chats, out of the same store |
+| `POST /api/hosts/{host}/sessions` | create a chat | optional `{"title", "mode"}` body; returns the new summary. `mode` (`workspace` \| `flow`, **unknown fails closed to `workspace`**) is written **once** here and [pinned](#the-flow-agent-and-the-mode-axis) on every resume. **429 `too_many_sessions`** at `MAX_SESSIONS_PER_HOST` (50) |
 | `GET /api/hosts/{host}/sessions/{id}` | one chat's full record | includes `transcript`, **minus** the resume-only internals (`wire_messages`, `sdk_session_id`). `session_not_found` (**404**) if absent |
 | `PATCH /api/hosts/{host}/sessions/{id}` | rename | body `{"title"}`; locks the title. `session_not_found` (**404**) if absent |
 | `DELETE /api/hosts/{host}/sessions/{id}` | delete | **idempotent** — deleting an absent chat is a green `{"deleted": false}`, never a 404 |
@@ -541,11 +726,17 @@ socket with `invalid_session`, and an id that doesn't resolve (or belongs to ano
 closes it with `session_not_found`. When absent, the connection uses/mints the host's chat
 without restoring a prior transcript.
 
+The optional **`mode=`** query param (`workspace` | `flow`) selects the agent's job — the
+navigation assistant, or the [flow author](#the-flow-agent-and-the-mode-axis). It applies to a
+**brand-new** session only: a **resumed** session's mode is **pinned** from its own record, so a
+workspace chat can never be re-opened with the `propose_flow` tool attached. An **unknown** value
+fails closed to `workspace`.
+
 **Client → server:**
 
 | Frame | Meaning |
 | --- | --- |
-| `{"type":"user_message","text":<str>,"live_url":<str\|null>}` | a user turn; the optional `live_url` is the live pane's current page (tracked by the SPA from screencast `location` frames). When present it is folded into the turn so the agent calls `howto` with `start=<live_url>` and routes **from where the user is**, not the crawl root. See [Live-position awareness](#live-position-awareness). Any other `type` is ignored |
+| `{"type":"user_message","text":<str>,"live_url":<str\|null>,"draft":<dict\|null>}` | a user turn. The optional `live_url` is the live pane's current page (tracked by the SPA from screencast `location` frames); when present it is folded into the turn so the agent calls `howto` with `start=<live_url>` and routes **from where the user is**, not the crawl root (see [Live-position awareness](#live-position-awareness)). The optional `draft` (**`mode=flow`** only) is the **live flow document** on the user's screen, folded into the turn by `chat.augment_with_flow_draft` so the agent edits **your** current doc — hand edits between turns survive. Any other `type` is ignored |
 
 **Server → client:**
 
@@ -556,6 +747,7 @@ without restoring a prior transcript.
 | `{"type":"tool_use","name":<str>,"input":<dict>}` | the agent is about to call a tool |
 | `{"type":"tool_result","name":<str>,"status":"ok"\|"error"}` | a tool returned |
 | `{"type":"tour","data":{"goal","start_url","trigger_label","opens_at","form","steps":[…]}}` | a **"Show Me How"** guided tour — emitted once after an OK `howto` tool result (from its FIRST result's `tour` field). `steps` is the ordered highlight list; the SPA replays it on the live pane. See [Show Me How guided tour](#show-me-how-guided-tour). |
+| `{"type":"flow_draft","doc":{…},"status":"ok"\|"invalid","path","error","name","note"}` | **`mode=flow`** only — the exact **twin of `tour`**, emitted after a [`propose_flow`](flows.md#propose_flow-and-the-flow_draft-frame) tool result: the WHOLE candidate document plus the validator's verdict. The SPA re-renders its **canvas + JSON pane** from it, so the draft lands **live** mid-conversation. An **invalid** draft is still emitted and still rendered (with `path`/`error`, and the offending canvas box lit up) — a withheld bad draft teaches the user nothing. Persisted into the transcript, so reopening a flow chat restores its drafts (as **chips**, never auto-applied — see [the mode axis](#the-flow-agent-and-the-mode-axis)) |
 | `{"type":"done"}` | end of the turn (exactly once) |
 | `{"type":"error","detail":<str>}` | a per-turn error (e.g. tool-iteration limit) |
 | `{"type":"error","status":"invalid_host",…}` | bad host token; the socket then closes |
@@ -738,7 +930,9 @@ graph first (its own SIGTERM handler), a cancelled crawl can still promote what 
 | `PINCHTAB_UI_CLAUDE_CODE_MODEL` | Override the `claude_code`-backend model. Default: your account's Claude Code default (deliberately *not* the API `claude-opus-4-8` alias). |
 | `PINCHTAB_WEBGRAPH_BRIDGE` | PinchTab bridge URL for the live pane's best-effort automated login. Absent → the live pane still runs, just unauthenticated. |
 | `PINCHTAB_WEBGRAPH_ENABLE_CRAWL` | **Opt-in gate** for the [New crawl](#new-crawl-get-wscrawl-opt-in) socket (`/ws/crawl`). Unset → **off**: `/ws/crawl` refuses with a `crawl_unavailable`/`disabled` frame. Set to a truthy value (`1` / `true` / `yes` / `on`) to allow crawling a URL from the UI. |
-| `PINCHTAB_WEBGRAPH_CRAWL_SERVER` | PinchTab bridge URL the [New crawl](#new-crawl-get-wscrawl-opt-in) subprocess drives (default `http://localhost:9871`). Deliberately **distinct** from `PINCHTAB_WEBGRAPH_BRIDGE` so a crawl and the live pane can target different bridges. The crawler self-loads its bridge **token** from `$PINCHTAB_CONFIG`. |
+| `PINCHTAB_WEBGRAPH_CRAWL_SERVER` | PinchTab bridge URL the [New crawl](#new-crawl-get-wscrawl-opt-in) **and** the [flow-run](#flows-view-opt-in) subprocesses drive (default `http://localhost:9871`). Deliberately **distinct** from `PINCHTAB_WEBGRAPH_BRIDGE` so a crawl and the live pane can target different bridges. Both subprocesses self-load the bridge **token** from `$PINCHTAB_CONFIG`. A crawl and a flow run read the **same** var because they drive the **same** bridge — which is exactly why they [veto each other](#flows-view-opt-in). |
+| `PINCHTAB_WEBGRAPH_ENABLE_FLOWS` | **Opt-in gate** for **running** a flow ([`/ws/flows/run`](#flows-view-opt-in)). Unset → **off**: the run socket refuses with a `flow_unavailable`/`disabled` frame, while the editor + the flow CRUD routes keep working. Truthy (`1` / `true` / `yes` / `on`) allows a saved flow to drive a real browser — and, if the document declares it *and* you grant it, to **submit / upload**. Strictly more dangerous than `PINCHTAB_WEBGRAPH_ENABLE_CRAWL`. |
+| `PINCHTAB_CONFIG` | The bridge config file a [flow run](#flows-view-opt-in) / [crawl](#new-crawl-get-wscrawl-opt-in) subprocess reads its bridge **token** from (default `crawl-config.json`, gitignored — never commit it). A **live** flow run with it unset/missing fails fast (`flow_unavailable` / `no_config`); a **dry** run needs neither the config nor a reachable bridge, because `--dry-run` touches nothing. A live flow run also **preflights** the bridge and refuses with `bridge_unreachable` rather than spawning a process against nothing. |
 
 ## Security model
 
@@ -763,7 +957,16 @@ graph first (its own SIGTERM handler), a cancelled crawl can still promote what 
   subprocess that *could* otherwise run Bash/Write on the host, so it is fenced harder still:
   all built-in tools are removed (`tools=[]`), no `~/.claude` / `CLAUDE.md` / project settings
   are loaded, and a deny-by-default `can_use_tool` backstop rejects anything off the
-  six-tool allow-list.
+  allow-list.
+- **The flow agent can only PROPOSE — it can neither save nor run.** [`mode=flow`](#the-flow-agent-and-the-mode-axis)
+  **adds exactly one** tool to that six-tool fence — `propose_flow` — and never widens it. That
+  tool is a **pure validate-and-echo**: no disk write, no browser, no subprocess (a test poisons
+  `open` / `os.replace` / `subprocess` to prove it). And **no tool anywhere on the MCP surface
+  reaches `flow_store` (save) or `flow_runner` (run)** — also guarded by a test — so the human's
+  **Save** and **Run** buttons remain the only authority, and the [capability
+  model](flows.md#the-capability--safety-model) still applies to everything the agent drafts.
+  `effective_tool_names()` **fails closed** on an unknown mode, and a session's mode is **pinned**
+  from its record, so a workspace chat can't be escalated via `?mode=flow`.
 - **Crawl-from-UI is the strongest capability — and the most fenced.** The
   [New crawl](#new-crawl-get-wscrawl-opt-in) socket (`/ws/crawl`) can
   make the server drive a **real browser** through the whole target app and open every
@@ -776,8 +979,19 @@ graph first (its own SIGTERM handler), a cancelled crawl can still promote what 
   with a hostname the `cache_store.validate_host` choke-point accepts, so a crawl can never
   resolve or write outside `caches_dir()`. Concurrency is capped at one, and the result is
   promoted by an **atomic same-filesystem move** so a failed crawl can't corrupt a good cache.
-- **Per-host path quarantine (defense-in-depth).** Both the cache and the
-  [chat-session store](#chat-sessions) route every `host` through the shared
+- **Running a flow is the only capability that can WRITE to the target site — so it is gated
+  hardest.** A [flow](#flows-view-opt-in) can `do{submit: true}` or `upload` a file; a crawl
+  structurally never submits. Five guards: **opt-in** — `/ws/flows/run` is dead unless
+  `PINCHTAB_WEBGRAPH_ENABLE_FLOWS` is truthy; **declared AND granted** — a write runs only if
+  the *document* declares the capability *and* the *caller* grants it, ANDed by the server and
+  re-checked per step by the runner (either side vetoes); **dry-run by default** in the UI;
+  **no shell / no argv injection** — inputs and paths are inert argv elements passed to
+  `create_subprocess_exec`, never a shell string; and **loopback-only**, like the rest of the
+  UI. The run is a **subprocess in its own process group**, so Cancel (and a client disconnect,
+  which is an implicit cancel) can actually stop it, and a wedged browser step can't take the
+  server down. Concurrency is 1, and a flow run and a crawl refuse each other.
+- **Per-host path quarantine (defense-in-depth).** The cache, the
+  [chat-session store](#chat-sessions) and the [flow store](#flows-view-opt-in) route every `host` through the shared
   `cache_store.validate_host` choke-point before touching the filesystem. That guard was
   hardened to also **reject all-dots tokens** (`"."`, `".."`, …): the host regex accepted
   them, harmless for `cache_path` (which appends `.json`) but not for `chat_store`, which
@@ -808,6 +1022,16 @@ graph first (its own SIGTERM handler), a cancelled crawl can still promote what 
   reconnect. The `api` backend fully continues a reopened chat; the `claude_code` backend
   restores the transcript for **display only** in v1 (with a UI badge). See
   [Chat sessions](#chat-sessions).
+- **Flows are opt-in and single-tenant.** Running a saved [flow](#flows-view-opt-in) needs
+  `PINCHTAB_WEBGRAPH_ENABLE_FLOWS`; one run at a time, and a run and a crawl refuse each other
+  (same bridge, same tab). **Authoring** — including the [AI
+  agent](flows.md#authoring-a-flow-with-the-ai-agent) — validating, and browsing runs/artifacts
+  all work with the gate **off**; only *running* is gated. The dedupe scope in the UI is the flow's
+  **id**, which is *not* what the CLI defaults to — see the [artifact-scope
+  caveat](flows.md#caveat-the-artifact-scope-diverges-between-cli-and-ui).
+- **The flow agent needs a chat backend, like any other chat.** With neither an
+  `ANTHROPIC_API_KEY` nor a logged-in `claude` CLI, the Flows tab's chat pane reports
+  `chat_unavailable` and the canvas + JSON editor keep working — you can still author by hand.
 - **Chat replies render as markdown.** The SPA renders the assistant's reply — bold,
   italics, headings, ordered/unordered lists, inline + block code, links, and GitHub-style
   **tables** — through a small HTML-escape-first renderer, so no model or crawled-site text
@@ -836,3 +1060,35 @@ graph first (its own SIGTERM handler), a cancelled crawl can still promote what 
   `claude` CLI (the `claude_code` backend, no key). See [Chat backends](#chat-backends).
 - **The live browser pane stays blank.** No Chrome/Chromium on `PATH` — install one of
   `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`.
+- **The Flows tab is there but Run does nothing / says `flow_unavailable`.** Read the frame's
+  `reason`: `disabled` → `PINCHTAB_WEBGRAPH_ENABLE_FLOWS` isn't set (see below); `no_config` →
+  `$PINCHTAB_CONFIG` doesn't point at a readable `crawl-config.json`; `bridge_unreachable` → no
+  PinchTab bridge is listening (start one, e.g. `scripts/start-crawl-browser.sh`). A **dry run**
+  needs none of the three and is the fastest way to confirm the rest of the tab works.
+
+### Operational notes (developing / e2e-testing the UI)
+
+Hard-won, and each one cost real time:
+
+- **Launching the UI with every capability on** (flows *and* crawl), through
+  [portless](https://www.npmjs.com/package/portless):
+
+  ```bash
+  nvm use 24                                     # portless needs node 24+
+  PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1 PINCHTAB_WEBGRAPH_ENABLE_CRAWL=1 \
+    portless run --name webgraph -- python3 -m pinchtab_webgraph.ui.server
+  #   -> https://webgraph.localhost   (in a git WORKTREE the branch is prefixed:
+  #      https://<branch>.webgraph.localhost — read the real URL from `portless list`)
+  ```
+
+  **In a git worktree, only `portless run` is correct.** The flat form
+  (`portless <name> <cmd>`) does **not** apply the worktree prefix and collides with the main
+  checkout's route.
+- **To drive the UI *itself* with PinchTab (e2e), use the RAW loopback URL, not the portless
+  one.** The PinchTab bridge's IDPI allowlist admits `127.0.0.1` / `localhost` but **not a
+  `*.localhost` subdomain**, so `https://webgraph.localhost` is refused. Point the automation at
+  `http://127.0.0.1:<uvicorn-port>/` instead. (The portless HTTPS URL is for the *human's*
+  browser.)
+- **`pinchtab press Enter` does NOT activate a focused `<button>`.** Verified with a synthetic
+  probe: **0 click hits**. Use `pinchtab type <sel> $'\n'` instead. This is a pinchtab
+  limitation, and it will silently no-op your UI e2e test otherwise.

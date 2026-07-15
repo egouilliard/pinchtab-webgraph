@@ -20,6 +20,7 @@ Keep the root clean. Everything has a home:
 | --- | --- |
 | `pinchtab_webgraph/` | The Python package — all crawler / path-finder / API / CLI / MCP / UI code. |
 | `pinchtab_webgraph/ui/static/` · `vendor/` | Shipped web-UI assets and vendored JS (tracked; the wheel bundles them). |
+| `examples/flows/` | Committed, runnable example [flow documents](docs/flows.md) (e.g. `download-all-reports.json`). |
 | `scripts/` | Runnable shell wrappers — `start-crawl-browser.sh`, `run-*.sh`, `bench.sh`, `hard-bench.sh`, etc. Invoke them as `scripts/<name>.sh`. |
 | `tests/` | Unit + `tests/e2e/` (needs a live bridge; HTML fixtures in `tests/e2e/*.html` are tracked). |
 | `docs/` | Long-form docs, indexed by [`docs/README.md`](docs/README.md). |

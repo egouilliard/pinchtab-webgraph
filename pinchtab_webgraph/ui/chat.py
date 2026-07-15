@@ -26,6 +26,8 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
+from .. import flow as flow_mod
+
 DEFAULT_MODEL = "claude-opus-4-8"
 MODEL_ENV_VAR = "PINCHTAB_UI_MODEL"
 
@@ -38,6 +40,30 @@ OFFLINE_TOOL_NAMES = frozenset({
     "graph_summary", "howto", "find_content", "list_content", "list_forms",
     "link_paths",
 })
+
+# FLOW mode's ONE extra tool. Deliberately a SIBLING set, never folded into
+# OFFLINE_TOOL_NAMES: the browsing fence above must stay exactly those 6 names, so the
+# safety story is "flow mode ADDS one provably-pure tool" rather than "flow mode widens
+# the fence". `propose_flow` performs no disk write, no browser action and no subprocess
+# — it validates a document and hands it back (mcp_server.propose_flow). There is no
+# flow save/run tool anywhere on the MCP surface, so the agent can only PROPOSE.
+FLOW_TOOL_NAMES = frozenset({"propose_flow"})
+
+# The chat modes. "workspace" = the original navigation assistant; "flow" = the flow
+# author. A session's mode is fixed at creation and PINNED on resume (chat_backend),
+# exactly like its backend — a workspace chat can never be talked into flow mode.
+MODES = ("workspace", "flow")
+
+
+def effective_tool_names(mode="workspace"):
+    """The tool names a session in ``mode`` may call. The single safety predicate.
+
+    The base offline fence is NEVER widened; flow mode only ADDS FLOW_TOOL_NAMES. Any
+    unknown mode degrades to the base fence (fail closed).
+    """
+    if mode == "flow":
+        return OFFLINE_TOOL_NAMES | FLOW_TOOL_NAMES
+    return OFFLINE_TOOL_NAMES
 
 
 class ChatUnavailable(Exception):
@@ -114,6 +140,125 @@ def build_system_prompt(host):
     )
 
 
+def _op_line(op, spec, is_body):
+    """One op's signature line, DERIVED from its flow.py spec (never hand-written)."""
+    parts = []
+    one_of = spec.get("one_of", ())
+    if one_of:
+        parts.append("exactly one of: %s" % " | ".join(one_of))
+    if spec.get("req"):
+        parts.append("required: %s" % ", ".join(spec["req"]))
+    if spec.get("opt"):
+        parts.append("optional: %s" % ", ".join(spec["opt"]))
+    if is_body:
+        parts.append("required: body (a non-empty list of steps)")
+    return "  %-9s %s" % (op, "; ".join(parts) if parts else "(no keys)")
+
+
+def op_reference():
+    """The op table, GENERATED from flow.LEAF_OPS / BODY_OPS. Pure.
+
+    The vocabulary has exactly one home (flow.py). Hand-copying it into a prompt string
+    would give it a second, and the copy WOULD drift the first time an op grows a key —
+    with the model then confidently emitting a document the validator rejects.
+    """
+    lines = ["LEAF OPS (a step is an object with an `op` key plus these):"]
+    lines += [_op_line(op, spec, False) for op, spec in sorted(flow_mod.LEAF_OPS.items())]
+    lines.append("BODY OPS (control flow — each takes a nested `body` list of steps):")
+    lines += [_op_line(op, spec, True) for op, spec in sorted(flow_mod.BODY_OPS.items())]
+    return "\n".join(lines)
+
+
+def build_flow_system_prompt(host):
+    """The FLOW-AUTHOR system prompt — a SIBLING of build_system_prompt, not a branch.
+
+    Same read-only graph tools, a different job: draft a flow DOCUMENT (flow.py's model)
+    for "%s" by grounding every step in the REAL crawled graph, and hand it to the human
+    via `propose_flow`. Kept separate so the navigation prompt (and its tests) are
+    untouched, and so the two prompts can diverge without either growing conditionals.
+
+    Everything site-agnostic in it — the op table, the capability names, the loop vars —
+    is GENERATED from flow.py's tables, so the prompt cannot drift from the validator.
+    """
+    caps = ", ".join("%s (default %s)" % (k, str(v).lower())
+                     for k, v in sorted(flow_mod.DEFAULT_CAPABILITIES.items()))
+    write_ops = ", ".join(sorted(flow_mod.WRITE_OPS)) or "(none)"
+    loop_vars = "; ".join(
+        "`%s` body injects ${%s}" % (op, "}, ${".join(sorted(vs)))
+        for op, vs in sorted(flow_mod.BODY_VARS.items()))
+    return (
+        "You are a FLOW AUTHOR for the website \"%(host)s\". A flow is a declarative JSON "
+        "document that a runner later executes against a real browser on this site. You "
+        "draft it WITH the human, in conversation.\n"
+        "\n"
+        "AUTHORITY — read this twice:\n"
+        "You can only PROPOSE. Call `propose_flow(doc, note)` every time you want to show "
+        "or change the draft — always resend the ENTIRE document. You cannot save or run a "
+        "flow; only the human can, via the Save/Run buttons. Ground every step in the REAL "
+        "crawled graph — use `howto`/`find_content`/`list_forms`/`graph_summary` to find the "
+        "actual trigger and click-path BEFORE proposing. Never invent a selector or a "
+        "trigger label.\n"
+        "\n"
+        "TOOLS: always pass host=\"%(host)s\" to every graph tool. Never pass a filesystem "
+        "graph= path. `propose_flow` takes no host — the document carries its own.\n"
+        "\n"
+        "GOTO GOALS — the one thing the validator CANNOT check for you:\n"
+        "A `goto` step's `goal` is resolved against the graph AT RUN TIME by the same "
+        "path-finder `howto` uses. `propose_flow` only checks the document's SHAPE — it "
+        "will happily call a flow \"valid\" whose `goal` matches nothing, and the run then "
+        "aborts instantly with \"could not resolve '<goal>' against the graph: no_match\". "
+        "So: for EVERY `goto` you write, first call `howto(host=\"%(host)s\", goal=...)` and "
+        "use a goal that actually RESOLVES — normally the real trigger label you found in "
+        "the graph (e.g. the exact text of the link or button). If the draft you are editing "
+        "already contains a `goto` you did not yourself verify — including the placeholder in "
+        "a new/seed document — verify it before you propose, and replace it if it does not "
+        "resolve. A \"valid\" verdict is NOT evidence that the goal resolves.\n"
+        "\n"
+        "THE DOCUMENT:\n"
+        "  {\"name\": <non-empty string>, \"host\": \"%(host)s\", \"inputs\": {...}, "
+        "\"capabilities\": {...}, \"steps\": [ ...steps... ]}\n"
+        "`steps` is a non-empty list. Max nesting depth %(max_depth)d, max %(max_steps)d "
+        "steps in total.\n"
+        "\n"
+        "%(ops)s\n"
+        "\n"
+        "CONTROL FLOW:\n"
+        "  `for_each` repeats its body once per element the `match` selects (e.g. "
+        "{\"kind\": \"download\"}); the element is bound to the variable named by `as` "
+        "(default `item`).\n"
+        "  `paginate` repeats its body page by page until `max_pages` / `until`.\n"
+        "  Loop variables exist ONLY inside the body that injects them: %(loop_vars)s. "
+        "`${run}` is available everywhere.\n"
+        "\n"
+        "SUBSTITUTION: `${a.b}` is a LITERAL dotted lookup into the run's variables — NOT "
+        "an expression language. No arithmetic, no calls, no conditionals. Every `${x}` "
+        "must resolve to a declared input, a loop variable in scope, a `set`/`collect` "
+        "variable, or `${run}` — otherwise the document is invalid.\n"
+        "\n"
+        "CAPABILITIES: a write must be DECLARED. Known capabilities: %(caps)s. The write "
+        "ops are: %(write_ops)s (each needs its allow_* capability set to true), and a `do` "
+        "step with submit=true needs capabilities.allow_submit=true. Never set a capability "
+        "the human did not ask for — if a step needs one, say so and ask.\n"
+        "\n"
+        "WORKFLOW: understand the goal -> query the graph to find the real pages, triggers "
+        "and form fields -> `propose_flow` the whole draft with a one-line `note` -> read "
+        "back the verdict. If it comes back \"invalid\", fix the reported `path`/`error` and "
+        "propose again. Then explain the draft in two or three plain sentences and stop — "
+        "the human decides whether to Save and Run it."
+        % {"host": host, "ops": op_reference(), "caps": caps, "write_ops": write_ops,
+           "loop_vars": loop_vars, "max_depth": flow_mod.MAX_DEPTH,
+           "max_steps": flow_mod.MAX_STEPS}
+    )
+
+
+def system_prompt_for(host, mode="workspace"):
+    """The system prompt for a session's mode. The ONE place the two prompts are chosen
+    between, so both backends pick identically."""
+    if mode == "flow":
+        return build_flow_system_prompt(host)
+    return build_system_prompt(host)
+
+
 def _anthropic_tool_from_mcp(tool):
     """Convert one MCP `Tool` to an Anthropic tool spec (a near-passthrough).
 
@@ -127,11 +272,13 @@ def _anthropic_tool_from_mcp(tool):
     }
 
 
-async def list_allowed_tools(mcp_session):
-    """List the MCP server's tools, keep only the OFFLINE set, map to Anthropic specs."""
+async def list_allowed_tools(mcp_session, mode="workspace"):
+    """List the MCP server's tools, keep only the ones ``mode`` permits, map to Anthropic
+    specs. The filter is effective_tool_names(mode) — the base offline fence, plus
+    `propose_flow` in flow mode. A LIVE tool (crawl/ask_howto) is in neither set."""
     listed = await mcp_session.list_tools()
-    return [_anthropic_tool_from_mcp(t) for t in listed.tools
-            if t.name in OFFLINE_TOOL_NAMES]
+    allowed = effective_tool_names(mode)
+    return [_anthropic_tool_from_mcp(t) for t in listed.tools if t.name in allowed]
 
 
 @asynccontextmanager
@@ -243,6 +390,26 @@ def _extract_tour(payload):
             "form": r.get("form"), "opens_at": r.get("opens_at")}
 
 
+def _extract_flow_draft(payload):
+    """Pull the proposed flow draft out of a `propose_flow` payload, else None. Pure.
+
+    The exact twin of _extract_tour, for the flow-authoring mode: when the model calls
+    `propose_flow`, the payload echoes the WHOLE candidate document plus the validator's
+    verdict, and we surface it as one structured `{"type":"flow_draft"}` frame the SPA
+    re-renders its canvas / JSON pane from. An INVALID draft still yields a frame (status
+    "invalid" + path/error) — the human should see the broken document and the reason,
+    not nothing. None only when there is no document to show at all.
+    """
+    if not isinstance(payload, dict):
+        return None
+    doc = payload.get("doc")
+    if not isinstance(doc, dict):
+        return None
+    return {"doc": doc, "status": payload.get("status"), "path": payload.get("path"),
+            "error": payload.get("error"), "name": payload.get("name"),
+            "note": payload.get("note")}
+
+
 # --- session persistence: wire-message (de)serialization ----------------------
 #
 # Phase 4 persists the API backend's ``ChatState.messages`` to disk so a reconnect can
@@ -348,12 +515,17 @@ def trim_wire_messages(messages, max_turns=100):
 
 @dataclass
 class ChatState:
-    """Injected agent context — the anthropic client + mcp session live HERE, not global."""
+    """Injected agent context — the anthropic client + mcp session live HERE, not global.
+
+    ``mode`` ("workspace" | "flow") selects the system prompt and the tool fence; it is
+    fixed for the life of the session (chat_backend pins it from the record on resume).
+    """
     host: str
     messages: list = field(default_factory=list)
     mcp_session: object = None
     anthropic_client: object = None
     tools: list = field(default_factory=list)
+    mode: str = "workspace"
 
 
 async def run_conversation_turn(state, *, emit, model=None, max_tokens=1024,
@@ -368,10 +540,12 @@ async def run_conversation_turn(state, *, emit, model=None, max_tokens=1024,
       {"type":"tool_result","name":<str>,"status":"ok"|"error"}  after a tool
       {"type":"error","detail":<str>}                    on the iteration bound
       {"type":"done"}                                    exactly once at the end
+    plus, additively, {"type":"tour","data":{...}} after an OK `howto` and
+    {"type":"flow_draft", ...} after a `propose_flow` (flow mode).
     """
     client = state.anthropic_client
     the_model = model or resolve_model()
-    system = build_system_prompt(state.host)
+    system = system_prompt_for(state.host, state.mode)
 
     # Snapshot the history length ONCE, at the pending user turn, BEFORE the tool loop
     # appends anything. If any stream call fails mid-turn, roll the WHOLE turn back to
@@ -418,6 +592,10 @@ async def run_conversation_turn(state, *, emit, model=None, max_tokens=1024,
                 tour = _extract_tour(payload)
                 if tour is not None:
                     await emit({"type": "tour", "data": tour})
+            if block.name == "propose_flow" and status == "ok":
+                draft = _extract_flow_draft(payload)
+                if draft is not None:
+                    await emit({"type": "flow_draft", **draft})
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
@@ -521,15 +699,38 @@ def augment_with_location(text, live_url):
             "and tour start from this page.]\n\n%s" % (live_url, live_url, text))
 
 
-async def handle_user_message(state, text, *, emit, live_url=None):
+def augment_with_flow_draft(text, draft_doc):
+    """Prefix the user's message with the CURRENT draft document (flow mode).
+
+    The sibling of augment_with_location, and the reason the draft never forks: the UI —
+    not the model — owns the live document (the human can hand-edit the JSON or the canvas
+    between turns), so each turn re-grounds the model on what is ACTUALLY on screen instead
+    of the stale copy in its own context. Pure + shared by BOTH chat backends; returns
+    ``text`` unchanged when there is no draft yet. A non-serializable draft degrades to the
+    bare text rather than breaking the turn.
+    """
+    if not draft_doc:
+        return text
+    try:
+        body = json.dumps(draft_doc, indent=2)
+    except (TypeError, ValueError):
+        return text
+    return ("[Current draft flow — this is the live document on the user's screen, "
+            "including any edits they made by hand. Base every change on THIS document "
+            "and resend it WHOLE via propose_flow:\n%s]\n\n%s" % (body, text))
+
+
+async def handle_user_message(state, text, *, emit, live_url=None, draft=None):
     """Append a user message and run one conversation turn. NEVER raises into the WS.
 
     Any ChatUnavailable / anthropic error / mcp transport error is reported as a
     single {"type":"error", ...} frame so the WebSocket route never sees an exception.
-    ``live_url`` (the live browser pane's current page, when known) is folded into the
-    turn so the agent routes from where the user actually is.
+    ``live_url`` (the live browser pane's current page, when known) and ``draft`` (the
+    flow document currently on screen, in flow mode) are folded into the turn so the agent
+    routes from where the user actually is and edits what they can actually see.
     """
-    state.messages.append({"role": "user", "content": augment_with_location(text, live_url)})
+    content = augment_with_flow_draft(augment_with_location(text, live_url), draft)
+    state.messages.append({"role": "user", "content": content})
     try:
         await run_conversation_turn(state, emit=emit)
     except ChatUnavailable as e:

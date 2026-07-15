@@ -98,6 +98,9 @@ def _persisted(record):
         "id": record["id"],
         "host": record["host"],
         "backend": record["backend"],
+        # "workspace" for every record written before flow mode existed — an old session
+        # must keep resuming as the navigation assistant it was created as.
+        "mode": record.get("mode") or "workspace",
         "title": record.get("title"),
         "title_locked": bool(record.get("title_locked")),
         "created_at": record["created_at"],
@@ -115,6 +118,7 @@ def summary(record):
         "id": record["id"],
         "host": record["host"],
         "backend": record["backend"],
+        "mode": record.get("mode") or "workspace",
         "title": record.get("title"),
         "created_at": record["created_at"],
         "updated_at": record["updated_at"],
@@ -128,12 +132,13 @@ def _count_sessions(host):
                 if not p.endswith(".json.tmp")])
 
 
-def create(host, *, backend, title=None):
+def create(host, *, backend, title=None, mode="workspace"):
     """Mint a new session record, persist it immediately, and return it.
 
     Raises TooManySessions if the host is already at MAX_SESSIONS_PER_HOST (no silent
     eviction). The record is atomically written on creation so a fresh chat survives a
-    reconnect even before its first message.
+    reconnect even before its first message. ``mode`` ("workspace" | "flow") is written
+    ONCE here and pinned on every resume — like ``backend``, it is never re-resolved.
     """
     cache_store.validate_host(host)
     if _count_sessions(host) >= MAX_SESSIONS_PER_HOST:
@@ -144,6 +149,7 @@ def create(host, *, backend, title=None):
         "id": new_session_id(),
         "host": host,
         "backend": backend,
+        "mode": mode or "workspace",
         "title": title,
         "title_locked": bool(title),
         "created_at": now,
@@ -171,8 +177,13 @@ def load(host, session_id):
     return record
 
 
-def list_sessions(host):
-    """Summaries of every session for a host, newest (updated_at) first. Never raises."""
+def list_sessions(host, mode=None):
+    """Summaries of every session for a host, newest (updated_at) first. Never raises.
+
+    ``mode`` optionally filters to one mode ("workspace" | "flow") — the Chat tab lists
+    workspace chats and the Flows tab lists flow chats, from the same store. A record with
+    no ``mode`` (written before flow mode existed) counts as "workspace".
+    """
     cache_store.validate_host(host)
     out = []
     for p in glob.glob(os.path.join(host_sessions_dir(host), "*.json")):
@@ -183,6 +194,8 @@ def list_sessions(host):
                 out.append(summary(json.load(f)))
         except (OSError, ValueError, KeyError):
             continue  # a corrupt record never breaks the whole list
+    if mode is not None:
+        out = [s for s in out if s.get("mode") == mode]
     out.sort(key=lambda s: s.get("updated_at") or "", reverse=True)
     return out
 
@@ -292,6 +305,16 @@ def append_display_frame(record, frame):
     if ftype == "tour":
         transcript.append({"role": "assistant", "type": "tour",
                            "data": frame.get("data"), "ts": ts})
+        return
+
+    if ftype == "flow_draft":
+        # The proposed document is persisted IN the transcript (not just its note), so
+        # reopening a flow chat restores the draft on the canvas — the twin of `tour`.
+        transcript.append({"role": "assistant", "type": "flow_draft",
+                           "doc": frame.get("doc"), "status": frame.get("status"),
+                           "path": frame.get("path"), "error": frame.get("error"),
+                           "name": frame.get("name"), "note": frame.get("note"),
+                           "ts": ts})
         return
 
     if ftype == "error":

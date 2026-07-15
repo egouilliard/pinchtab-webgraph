@@ -16,7 +16,8 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 
 - **Graph from anything** — one crawl records each state's full control inventory (links / buttons / tabs / menus) **and** its data collections (tables, grids, trees, lists, feeds, virtualized/scroll-loaded content). A complete nav + content graph of any site, all from structural signals.
 - **Offline "how-to" in milliseconds** — BFS over the crawled graph returns the shortest click-path to any action *plus* the fields of the form it opens, in ~60–130 ms with zero browser calls.
-- **Runnable answers, not just directions** — every how-to also compiles the click-path + terminal action into a copy-pasteable **PinchTab command block** (`pinchtab nav … → click … → download/upload/fill …`). So "how do I download the Q3 report" returns both the route *and* a `pinchtab download <url> -o q3.pdf` you can run. Form answers become a `fill`/`select`/`check` script with the submit line left **commented out** (safety). See [Runnable command blocks](#-runnable-command-blocks).
+- **Runnable answers, not just directions** — every how-to also compiles the click-path + terminal action into a copy-pasteable **PinchTab command block** (`pinchtab nav … → click … → download/upload/fill …`). So "how do I download the Q3 report" returns both the route *and* a `pinchtab download <url> -o q3.pdf` you can run. Form answers become a `fill`/`select`/`check` script with the submit line left **commented out** (safety). See [Runnable command blocks](#️-runnable-command-blocks).
+- **Declarative automation flows — that you author by *describing* them.** A how-to answers "how do I do X" and `perform` does it *once, in a straight line*. A **flow** is the layer above: a JSON **document** — not a script — executed by a step VM with `for_each` / `paginate` / `collect`, so "download all 20 PDFs on this page, then do it again for each of the 12 pages, and only keep the files I don't already have" is 12 lines of JSON. And you don't type them: **say it to an agent**, which drafts the document grounded in the *real crawled graph* (it looks the trigger up instead of inventing a selector) onto an **editable visual canvas**. It can only **propose** — you Save and you Run. No code executes, so a scheduler or an HTTP handler can safely run one; every download is content-hashed against a **persistent dedupe ledger**, which turns a dumb poller into a change detector. See [Automation flows](#-automation-flows).
 - **Download / export discovery** — download and export affordances become read-only `download` nodes: a link that resolves to a file (a `download` attribute, a file-extension path, or a `blob:`/`data:` URL → tagged with the file URL) or a button whose label is a download/export verb (JS-triggered). Like uploads, they are **never clicked** during the crawl — detected, recorded, and turned into a `pinchtab download`/`click` command on demand.
 - **File-upload discovery** — the crawl also finds where you can upload a document. File inputs (including ones hidden behind a styled `<label>`/button) and `ondrop` dropzones become read-only `upload` nodes tagged with the file types they accept (e.g. `.pdf,.docx`, `image/*`), so "how do I upload a … ?" is answerable — and the crawler never clicks them (that would pop a native OS file dialog).
 - **Safe by construction** — discovery opens and reads forms, then presses Escape. It never submits, saves, or deletes anything. Destructive-looking controls are skipped and recorded, not clicked.
@@ -32,7 +33,8 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - [Requirements](#-requirements)
 - [Quickstart](#-quickstart)
 - [The tools](#️-the-tools)
-- [Runnable command blocks](#-runnable-command-blocks)
+- [Runnable command blocks](#️-runnable-command-blocks)
+- [Automation flows](#-automation-flows)
 - [Self-test & report](#-self-test--report)
 - [Regression audit (10 public sites)](#-regression-audit-10-public-sites)
 - [Three ways to call it](#-three-ways-to-call-it)
@@ -42,9 +44,9 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - [How interaction crawling works](#-how-interaction-crawling-works)
 - [Architecture](#️-architecture)
 - [Graph shape](#-graph-shape)
-- [Safety model](#-safety-model)
+- [Safety model](#️-safety-model)
 - [Authenticated apps (login)](#-authenticated-apps-login)
-- [Importing into Neo4j](#-importing-into-neo4j-optional)
+- [Importing into Neo4j](#️-importing-into-neo4j-optional)
 - [Roadmap](#️-roadmap)
 - [Contributing](#-contributing)
 - [Star History](#-star-history)
@@ -111,7 +113,8 @@ The `scripts/run-*.sh` wrappers forward the bridge auth token automatically and 
 | `howto.py <graph.json>` | **Offline** BFS over a crawled graph → shortest click-path + form spec in ms, no browser. `--goal "…"` for actions; `--find TEXT` searches captured data → what matched, which view, and the path to it; `--list-content` = per-view data inventory. |
 | `ask.py` / `scripts/run-ask.sh` | **Cache-first** entry point. Routes by host to a per-host cache, answers offline via `howto.py`; on a miss runs a live discovery, then writes the result back so the next ask is an offline hit. `--verify` re-checks live. |
 | `recipe.py` / `scripts/run-recipe.sh` | **Live** how-to finder: priority-BFS over the running UI to a goal's trigger, opens the form, reads the fields, never submits. The live fallback for cache misses. |
-| `perform.py` (`pinchtab-webgraph perform`) | **PERFORM** a how-to: resolve it OFFLINE (from a crawled cache/graph), then RUN the compiled block live through the bridge — navigate the path, then download / upload / fill. Safe by default: navigation + downloads run; a form field with no supplied value is skipped (`--set 'Label=value'`, `--file <path>`); the submit runs only with `--allow-submit`; `--dry-run` previews. See [Runnable command blocks](#-runnable-command-blocks). |
+| `perform.py` (`pinchtab-webgraph perform`) | **PERFORM** a how-to: resolve it OFFLINE (from a crawled cache/graph), then RUN the compiled block live through the bridge — navigate the path, then download / upload / fill. Safe by default: navigation + downloads run; a form field with no supplied value is skipped (`--set 'Label=value'`, `--file <path>`); the submit runs only with `--allow-submit`; `--dry-run` previews. See [Runnable command blocks](#️-runnable-command-blocks). |
+| `flow_cmd.py` (`pinchtab-webgraph flow`) | **Run a declarative automation FLOW** — a JSON document (not a script) executed by a step VM: `goto` / `do` / `click` / `fill` / `download` / `collect` plus the control-flow ops **`for_each`** and **`paginate`**. Downloads are content-hashed against a **persistent dedupe ledger** (a re-run reports `dupe`, not a result). Safe by default: a write runs only if the flow *declares* the capability **and** the caller *grants* it. `flow run \| validate \| schema`. See [Automation flows](#-automation-flows) and [`docs/flows.md`](docs/flows.md). |
 | `crawl.py` / `scripts/run-crawl.sh <url>` | Page→page **link graph** → `<out>.json` + a self-contained Cytoscape.js `<out>.html` viewer. |
 | `paths.py` | Offline shortest / all click-paths over a crawled link graph (`--from`, `--to`, `--structural`, `--all`). |
 | `login.py` (`pinchtab-webgraph login`) | Open a persistent browser session and sign in to a host (credentials from the OS keyring) so subsequent crawls run authenticated. Needs the optional `login` extra (`keyring`). |
@@ -119,7 +122,7 @@ The `scripts/run-*.sh` wrappers forward the bridge auth token automatically and 
 | `query_cmd.py` (`pinchtab-webgraph query`) | **Machine-readable** twin of `howto.py` / `paths.py`: runs the offline `api.*` queries (`graph_summary`, `howto`, `find_content`, `list_content`, `list_forms`, `link_paths`) and prints the result as JSON on stdout. Takes `--host` (cache) or `--graph` (path). The substrate the UTCP manual shells out to. |
 | `utcp_manual.py` (`pinchtab-webgraph manual`) | Build / print / serve the [UTCP](https://www.utcp.io) tool-calling manual so external tool-callers can invoke the `query` (and live `crawl`/`ask`) surface by running the CLI directly — no wrapper server. `manual --out FILE` / `manual --serve`. |
 | `selftest.py` (`pinchtab-webgraph test`) | **Self-improvement loop.** Interactively throw your hardest "how do I do X?" goals at a crawled graph — each is answered **offline** via `api.howto`, you judge whether it's right, and every miss/wrong answer becomes a captured gap. Writes a self-contained HTML report; with `--repo OWNER/NAME` it can (after you confirm) file the report as a GitHub issue. See [Self-test & report](#-self-test--report). |
-| `commands.py` | The deterministic **path → executable** compiler shared by every how-to surface. Turns a click-path + terminal action into a runnable `pinchtab` command block (`nav`/`click`/`download`/`upload`/`fill`/`select`/`check`). Pure, stdlib-only, no browser. See [Runnable command blocks](#-runnable-command-blocks). |
+| `commands.py` | The deterministic **path → executable** compiler shared by every how-to surface. Turns a click-path + terminal action into a runnable `pinchtab` command block (`nav`/`click`/`download`/`upload`/`fill`/`select`/`check`). Pure, stdlib-only, no browser. See [Runnable command blocks](#️-runnable-command-blocks). |
 
 ## ▶️ Runnable command blocks
 
@@ -130,7 +133,7 @@ The terminal action is chosen structurally from the graph — no LLM, no app-spe
 | Action kind | How it's recognized | Emitted command |
 | --- | --- | --- |
 | **download** (direct) | a link/anchor that resolves to a file (`download` attr, file-extension path, or `blob:`/`data:` URL) | `pinchtab download '<url>' -o '<file>'` |
-| **download** (JS) | a control whose label is a download/export verb | `pinchtab click --css '<selector>'` — the browser session captures the file |
+| **download** (JS) | a control whose label is a download/export verb | `pinchtab click --css '<selector>' --wait-nav` — the browser session captures the file |
 | **upload** | a file input / styled `<label>` / `ondrop` dropzone | `pinchtab upload '<FILE>' -s '<selector>'` (accepted types annotated) |
 | **form** | a create-style trigger that opens a form | one `fill`/`select`/`check` per field (placeholder values); the **submit line is commented out** |
 
@@ -183,6 +186,74 @@ Resolution is offline, so `perform` needs a crawled cache/graph (`--host <h>` or
 - **Direct downloads** (`pinchtab download <url>`) also need `allowDownload = true`, but note PinchTab's `download` performs a **server-side fetch guarded against SSRF** — it refuses `internal or blocked host` URLs (e.g. `localhost`/`127.0.0.1`/link-local). That only affects fetching *internal* hosts; a normal `https://app.example.com/…/file.pdf` is fine. (The crawl bridge ships `allowDownload = false` on purpose — that config is for read-only discovery — so point `perform` at a bridge that enables it.) A rejected download surfaces the bridge's error verbatim.
 
 > **Verified end-to-end** against a real site crawled through the live browser: `crawl → howto → perform` navigates the path and the browser actually writes the file to disk (JS-export path), and the form path fills + submits with real values. See the walkthrough in [`docs/perform-live-test.md`](docs/perform-live-test.md).
+
+## 🔁 Automation flows
+
+`perform` runs a **straight line**: nav, click, fill, submit — one how-to, once. Every real automation needs more: *download all 20 PDFs on this page, then do it again for each of the 12 pages, and only keep the files I don't already have.* That is a **flow**.
+
+A flow is a **JSON document, not a script**, executed by a step VM. That is load-bearing: no arbitrary code runs, so a scheduler or an HTTP handler can safely execute one; a step names its target **semantically** (`goal` / `match`) as well as structurally, so it re-resolves against a re-crawled graph instead of snapping on a stale selector; and `inputs` derives a **JSON Schema**, so a saved flow can become a typed endpoint / MCP tool with no hand-written wrapper.
+
+**You don't hand-write it — you describe it.** JSON is the *format*, not the interface. In the [web UI](#-three-ways-to-call-it)'s **Flows tab** you say what you want, and an agent drafts the document **grounded in the site you actually crawled**:
+
+> **you:** download every report PDF across all the pages
+
+It calls `find_content` / `howto` / `graph_summary` over the **real interaction graph** to find the actual trigger and click-path — so it *resolves* a real control instead of guessing at `.btn-download`, which is the whole advantage over a generic AI flow builder. Then it hands you this:
+
+```json
+{
+  "name": "download-all-invoices",
+  "host": "app.example.com",
+  "inputs": { "since": { "type": "string", "required": false } },
+  "capabilities": { "allow_download": true },
+  "steps": [
+    { "op": "goto", "goal": "invoices" },
+    { "op": "paginate", "max_pages": 50, "body": [
+      { "op": "for_each", "match": { "kind": "download" }, "as": "item", "body": [
+        { "op": "download", "href": "${item.href}", "name": "${item.text}.pdf" }
+      ]}
+    ]}
+  ]
+}
+```
+
+**The agent can only PROPOSE — you Save and you Run**, and that is *structural*, not a promise: its one flow tool (`propose_flow`) is a pure validate-and-echo (no disk, no browser, no subprocess — a test poisons `open`/`os.replace`/`subprocess` to prove it), and **no tool anywhere on the MCP surface can save or run a flow**. The draft lands in **three synchronized views of one document** — the chat, an editable **visual canvas** (`for_each`/`paginate` visibly *wrap* their children), and the JSON — each of which you can edit, with validation on every change. Your hand edits survive the agent's next revision, because every turn ships it your *live* document.
+
+The same document runs unchanged from the CLI:
+
+```bash
+pwg flow validate ./invoices.json                                  # structure + every ${var} + capabilities
+pwg flow schema   ./invoices.json                                  # the `inputs` block as a JSON Schema
+pwg flow run      ./invoices.json --host app.example.com --dry-run # print what WOULD run; touch nothing
+pwg flow run      ./invoices.json --host app.example.com --input since=2026-01-01
+```
+```console
+=== FLOW: DOWNLOAD-ALL-INVOICES ===  (live)
+  ▸ run       flow=download-all-invoices
+  ✓ goto      goal=invoices target=Invoices
+  · paginate  page=1
+  ✓ for_each  match={"kind": "download", "limit": 200} found=2
+  ✓ download  name=Download report A.pdf via=fetch
+  …
+--- ok: 14 steps, 5 new file(s), 0 duplicate(s), 6.1s
+```
+
+Nothing in the document is app-specific. `goal: "invoices"` resolves **offline** against the crawled graph (the same resolver `howto`/`perform` use); `match: {"kind": "download"}` is the crawler's structural download classifier applied to the live DOM; `paginate` finds the next-page control structurally (`rel=next` / `aria-label` / `aria-disabled` first, a UI-verb regex second) and stops when it's exhausted — or when the page stops changing.
+
+**Safe by default, twice over.** The effective capability is the **AND** of what the flow *declares* and what the caller *grants* — either side vetoes. Downloading is read-only and on by default (`--no-allow-download` withdraws it); a form **submit** and a file **upload** write to the site, so both need `capabilities.allow_submit`/`allow_upload` in the document **and** `--allow-submit`/`--allow-upload` on the command. A document that performs a write it didn't declare is rejected at *validation* time — so a scheduled run can never half-execute.
+
+**Re-running a flow is a change detector.** "Download the report every 10s" is really "*tell me when a NEW report appears*", so every downloaded file is sha256'd into a content-addressed store with a **dedupe ledger that persists across runs**: a file whose bytes were seen before comes back as a `dupe`, not a result. Downloads take the **in-session fetch** path first (a `fetch()` inside the page — it inherits the session's cookies, so authenticated apps just work), falling back to the `pinchtab download` CLI for cross-origin hrefs.
+
+> **Verified end-to-end** with nothing mocked (real bridge, real headless Chrome): crawl a 3-page fixture site → `paginate` all 3 pages → download **5 real files** (`via="fetch"`, 5 distinct sha256s) → re-run on the same ledger → **0 new, 5 dupes**.
+
+**The Flows tab, in full.** Beyond the [agent + canvas + JSON](docs/flows.md#authoring-a-flow-with-the-ai-agent) workbench: the host's saved automations; validation on every keystroke (a typo'd `${var}` is caught, **with its path in the document**, before a browser is ever leased — and the offending canvas box lights up); **resolvability warnings** — a `goal` that matches nothing on the crawled site used to validate green and abort at run time, so it now warns in amber, *"did you mean “Add Report”?"*, checked through the **same resolver the runner uses**; a run panel where the **safety model is visible** — Allow-submit / Allow-upload are *disabled unless the flow itself declares that capability*, and dry-run is checked by default; a streaming run log with a live **`N new · M dupe`** counter; run history; and the flow's all-time artifact ledger. **Authoring is always available; only *running* is opt-in**, because unlike a crawl a flow *can* write to the site:
+
+```bash
+PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1 pinchtab-webgraph-ui        # then open the Flows tab
+```
+
+> **AI authoring verified end-to-end**, nothing mocked: asked *"download every report PDF across all the pages"*, the agent queried the graph, proposed a real `goto` → `paginate` ⊃ `for_each` ⊃ `download`, the draft landed **live** on the canvas — saved and run, it fetched **5 new** files across 3 pages; re-run, **0 new / 5 dupe**.
+
+Full format (every op and its args), [AI authoring](docs/flows.md#authoring-a-flow-with-the-ai-agent) (the `propose_flow` tool, the `flow_draft` frame, the propose-only safety model, the [resolvability warnings](docs/flows.md#resolvability-warnings)), the capability model, the download constraints, the ledger, an authoring walkthrough, and the [web-UI surface](docs/flows.md#running-flows-from-the-web-ui) (storage layout, caps, REST + WS frames, the subprocess/cancel design): **[`docs/flows.md`](docs/flows.md)**.
 
 ## 🧪 Self-test & report
 
@@ -237,7 +308,7 @@ The same crawl-once-query-offline capability is reachable through three interfac
 | **MCP server** | LLM agents / MCP hosts (Claude, IDEs) | `pinchtab-webgraph-mcp` over stdio — 6 offline query tools, 2 live tools (`crawl`, `ask_howto`) with streamed progress, and `graph://…` resources. See [MCP server](#-mcp-server). | `pip install 'pinchtab-webgraph[mcp]'` |
 | **UTCP manual** | any UTCP-aware tool-caller | a static [UTCP](https://www.utcp.io) manual (`pwg manual`, `--out`, or `--serve`) whose `cli` call templates invoke `pwg` directly — no wrapper server in the call path. See [UTCP interface](#-utcp-interface). | none to use (`[utcp]` only validates it) |
 
-For a point-and-click front end there's also an **optional local web UI** — a browser app with a **Workspace | Graph | Explore** view switcher: a Workspace of a "how do I…" chat agent + a live headless-browser pane, an interactive **Graph view** that renders the crawled interaction graph (states as blue circles, form-triggers as green diamonds) right in the browser, and an **Explore view** to search / browse everything the crawl captured — plus a read-only REST API over the same queries, behind the `pinchtab-webgraph-ui` script and the `[ui]` extra:
+For a point-and-click front end there's also an **optional local web UI** — a browser app with a **Workspace | Graph | Explore | Flows** view switcher: a Workspace of a "how do I…" chat agent + a live headless-browser pane, an interactive **Graph view** that renders the crawled interaction graph (states as blue circles, form-triggers as green diamonds) right in the browser, and an **Explore view** to search / browse everything the crawl captured — plus a read-only REST API over the same queries, behind the `pinchtab-webgraph-ui` script and the `[ui]` extra:
 
 | Interface | For | How | Extra dep |
 | --- | --- | --- | --- |
@@ -254,6 +325,8 @@ The **Graph view** renders the host's cached interaction graph entirely offline 
 The UI can also **crawl a new URL and store it**: a sidebar **"New crawl"** form spawns the interaction crawler over a WebSocket, streams live progress, and atomically promotes the resulting graph into the cache so the new host appears in the sidebar and is instantly usable by the Graph view + chat. It is **opt-in** (off unless `PINCHTAB_WEBGRAPH_ENABLE_CRAWL` is set) because a crawl drives a real browser through the whole target app and opens every Create form (it never submits). See [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in).
 
 The **Explore view** is a read-only browser over everything the crawl captured, in three sub-tabs: **Search** (full-text search of captured page data, each hit showing reachable/click-count badges, the click-path, and the matched items), **Forms** (the create-form inventory + a free-text goal path-finder — each form has a **"Show me how"** button that reuses the live guided tour), and **Content** (the per-view inventory of captured collections). A **Ctrl/Cmd-K command palette** launches over the whole UI — switch host, jump view, new chat / new crawl, manage credentials, and a free-text "search content for …" hand-off into Explore. See [Explore view](docs/ui.md#explore-view).
+
+The **Flows view** is the UI for the [automation flow layer](#-automation-flows) — a workbench of **three synchronized views of one document**: an **[AI agent](docs/flows.md#authoring-a-flow-with-the-ai-agent)** you describe the automation to (it grounds every step in the real crawled graph, and can only *propose* — you Save and you Run), an editable **visual canvas** (`for_each`/`paginate` visibly wrap their children; every edit form is derived from `GET /api/flows/op_schema`, so there's no second copy of the DSL to drift), and the **JSON**, validated as you type. Plus a run panel where the **safety model is visible** (Allow-submit / Allow-upload are *disabled unless the flow declares that capability*; dry-run is on by default), a streaming run log with a live **`N new · M dupe`** dedupe counter, run history, and the flow's all-time artifact ledger. Each run is a **subprocess**, which is what makes **Cancel** work at all. Authoring always works; **running** is **opt-in** (`PINCHTAB_WEBGRAPH_ENABLE_FLOWS=1`) because — unlike a crawl, which never submits — a flow *can* write to the site. See [Flows view](docs/ui.md#flows-view-opt-in).
 
 Only the **base install** (`pip install pinchtab-webgraph`, pure stdlib) is needed for the CLI and the UTCP manual; the MCP server and the web UI each live behind an optional extra (`[mcp]` / `[ui]`) so the base package stays dependency-free.
 
@@ -312,9 +385,11 @@ Deep-dive guides live in **[`docs/`](docs/README.md)** — start at the **[docum
 
 | Guide | What it covers |
 | --- | --- |
+| **[Automation flows](docs/flows.md)** | The flow document format (every op + its args), **[authoring a flow with the AI agent](docs/flows.md#authoring-a-flow-with-the-ai-agent)** (the three synchronized views, the [`propose_flow` tool + `flow_draft` frame](docs/flows.md#propose_flow-and-the-flow_draft-frame), [why propose-only is *structural*](docs/flows.md#the-agent-can-only-propose--and-that-is-structural), the [resolvability warnings](docs/flows.md#resolvability-warnings)), the [capability / safety model](docs/flows.md#the-capability--safety-model), the [download strategy](docs/flows.md#downloads-in-session-fetch-first-cli-fallback) (in-session fetch first, CLI fallback) and its constraints, the [dedupe ledger](docs/flows.md#the-dedupe-ledger), a [by-hand authoring walkthrough](docs/flows.md#authoring-a-flow--a-walkthrough), [running flows from the web UI](docs/flows.md#running-flows-from-the-web-ui) (storage, caps, REST + WS frames, the subprocess/cancel design, the artifact-scope caveat), and the [gotchas](docs/flows.md#gotchas). |
+| **[`perform` live test](docs/perform-live-test.md)** | The real-browser proof of `crawl → howto → perform`: a local test site, a downloads-enabled bridge, and the two bugs the live run caught. |
 | **[MCP server](docs/mcp-server.md)** | Run `pinchtab-webgraph-mcp`: the `[mcp]` extra, `.mcp.json` registration, the tool + resource inventory, env vars, and the live-tool safety model. |
 | **[UTCP interface](docs/utcp.md)** | The `pwg query` JSON surface + the `pwg manual` / `--serve` UTCP manual, the 8 tools, the scope subset, and the exit-code convention. |
-| **[Web UI](docs/ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the Workspace/[Graph](docs/ui.md#graph-view)/[Explore](docs/ui.md#explore-view) view switcher + [command palette](docs/ui.md#command-palette), the REST API + vault endpoints, the chat + screencast WebSockets, [persistent named chats](docs/ui.md#chat-sessions), the opt-in [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in) endpoint, env vars, and the loopback-only security model. |
+| **[Web UI](docs/ui.md)** | The optional local web UI (`pinchtab-webgraph-ui`, `[ui]` extra): the Workspace/[Graph](docs/ui.md#graph-view)/[Explore](docs/ui.md#explore-view)/[Flows](docs/ui.md#flows-view-opt-in) view switcher + [command palette](docs/ui.md#command-palette), the REST API + vault endpoints, the chat + screencast WebSockets, [persistent named chats](docs/ui.md#chat-sessions), the opt-in [New crawl](docs/ui.md#new-crawl-get-wscrawl-opt-in) + [flow-run](docs/ui.md#flows-view-opt-in) endpoints, env vars, the loopback-only security model, and the [operational notes](docs/ui.md#operational-notes-developing--e2e-testing-the-ui) for driving the UI itself. |
 | **[Authenticated login](docs/authenticated-login.md)** | Crawl behind a login safely: hand-login vs. keyring automation, the threat model, sandbox/bot-account isolation, and how to test it. |
 | **[Contributing](CONTRIBUTING.md)** | Branch model, Conventional Commits, the stay-generic rule, safety, security, and PRs. |
 
@@ -362,7 +437,7 @@ The JSON graph is `{ nodes, edges, meta }`:
 ## 🛡️ Safety model
 
 - **Same-origin by default** — the crawler won't wander off the target site unless you pass `--cross-host`.
-- **Never mutates data** — discovery opens and reads forms, then Escapes. Create / save / delete / submit controls are skipped by default and recorded, not clicked. **File-upload and download/export affordances are recorded but never clicked** (a file input opens a native OS picker; a JS download can pop a native save dialog the crawler can't dismiss), so the read-only contract holds. The runnable [command blocks](#-runnable-command-blocks) inherit this: their path only navigates, downloads/uploads are separate explicit commands, and a form's submit line ships commented out. **Never run a "click everything" crawl in an authenticated session you care about** — that's exactly why the isolated bridge exists.
+- **Never mutates data** — discovery opens and reads forms, then Escapes. Create / save / delete / submit controls are skipped by default and recorded, not clicked. **File-upload and download/export affordances are recorded but never clicked** (a file input opens a native OS picker; a JS download can pop a native save dialog the crawler can't dismiss), so the read-only contract holds. The runnable [command blocks](#️-runnable-command-blocks) inherit this: their path only navigates, downloads/uploads are separate explicit commands, and a form's submit line ships commented out. **Never run a "click everything" crawl in an authenticated session you care about** — that's exactly why the isolated bridge exists.
 - **Hard caps** on states, actions-per-state, interaction depth, and a global action budget prevent the classic SPA state explosion.
 - **Secrets stay out of git** — `crawl-config.json` (bridge token) and `.instance/` (live browser profile/session) are gitignored. Commit explicit source files only.
 - **OS-level sandbox (opt-in)** — run under [Claude Code's built-in sandbox](#-run-it-under-a-sandbox-recommended) to confine the crawler at the OS level: no keyring/SSH/cloud-cred reads, localhost-only egress, and no `sudo` escape. A ready posture ships in [`.claude/settings.json`](.claude/settings.json).

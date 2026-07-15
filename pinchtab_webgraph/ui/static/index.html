@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="graph.css" />
   <link rel="stylesheet" href="explore.css" />
+  <link rel="stylesheet" href="flows.css" />
   <!-- Apply the saved theme BEFORE first paint so there's no light/dark flash.
        Falls through to the CSS prefers-color-scheme default when nothing is saved. -->
   <script>try{var t=localStorage.getItem("pwg-theme");if(t==="dark"||t==="light")document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
@@ -86,6 +87,7 @@
           <button type="button" id="tab-workspace" class="view-tab on">Workspace</button>
           <button type="button" id="tab-graph" class="view-tab">Graph</button>
           <button type="button" id="tab-explore" class="view-tab">Explore</button>
+          <button type="button" id="tab-flows" class="view-tab">Flows</button>
         </div>
       </div>
       <p class="placeholder muted" id="placeholder">
@@ -197,6 +199,130 @@
           <ul id="explore-content-list" class="explore-list"></ul>
         </div>
       </div>
+
+      <!-- FLOWS view: the host's saved automations. A flow is a declarative JSON
+           document run by a step VM against a real browser.
+
+           ONE flow doc, THREE synchronized views of it — because authoring a flow should
+           be a CONVERSATION you can see:
+             * the CHAT pane (left)   — an agent edits the doc live (`mode=flow`),
+             * the CANVAS (middle)    — a vertical flow diagram whose containers visibly
+                                        WRAP their child steps; editable,
+             * the JSON pane (right)  — the raw document; editable.
+           Any one of them mutates the doc; the other two re-render and the whole thing is
+           re-validated (flows.js `setDoc`). An invalid verdict carries a path in flow.py's
+           grammar, which is exactly a canvas box's `data-path` — so the bad box lights up.
+
+           Below the workbench: the run panel (inputs + the three capability grants + a
+           dry-run switch), the streaming run log with its live "N new · M dupe" counter,
+           the run history, and the flow's all-time artifact ledger. flows.js drives it all
+           (loaded eagerly, no vendor deps; flow_canvas.js first) and owns ONLY the run
+           socket. Every server/model string is rendered via textContent; hrefs/paths are
+           plain text, never a live <a href>.
+
+           SAFETY: dry-run is checked by default, submit/upload grants are not, and a
+           grant is DISABLED unless the flow itself declares that capability — a write
+           happens only if the flow DECLARES it and the caller GRANTS it. -->
+      <div class="flows-view" id="flows-view" hidden>
+        <div class="flows-body">
+          <aside class="flows-sidebar">
+            <div class="flows-sidebar-head">
+              <h2>Flows</h2>
+              <button type="button" id="flow-new" class="flow-new-btn">+ New flow</button>
+            </div>
+            <ul id="flow-list" class="flow-list"></ul>
+          </aside>
+
+          <section class="flows-main">
+            <div class="flows-toolbar">
+              <span id="flows-status" class="muted"></span>
+            </div>
+
+            <!-- the workbench: chat | canvas | JSON. All three edit the SAME doc. -->
+            <div class="flow-workbench">
+
+              <!-- the flow-authoring chat: the SAME pane component as the Workspace tab
+                   (createChatPane in app.js), mounted with mode=flow. -->
+              <section class="flow-col flow-chat-col">
+                <div class="flow-col-head">
+                  <h3>Agent</h3>
+                  <span class="pane-status muted" id="flow-chat-status">pick a host to start.</span>
+                </div>
+                <div id="flow-chat-sessions" class="chat-sessions" hidden>
+                  <button type="button" id="flow-chat-session-new" class="chat-session-new">+ New</button>
+                  <div id="flow-chat-session-list" class="chat-session-list" role="tablist"></div>
+                </div>
+                <div id="flow-chat-log" class="chat-log flow-chat-log" aria-live="polite"></div>
+                <form id="flow-chat-form" class="chat-form" autocomplete="off">
+                  <input id="flow-chat-input" type="text"
+                         placeholder="download every invoice from this month" disabled />
+                  <button type="submit" disabled>Send</button>
+                </form>
+              </section>
+
+              <!-- the visual canvas: rendered + mutated by flow_canvas.js -->
+              <section class="flow-col flow-canvas-col">
+                <div class="flow-col-head">
+                  <h3>Canvas</h3>
+                  <span class="muted flow-col-hint">click a box to edit it</span>
+                </div>
+                <div id="flow-canvas" class="flow-canvas"></div>
+              </section>
+
+              <!-- the raw document: a plain <textarea>, LIVE-validated (JSON.parse
+                   locally, then POST /api/flows/validate — debounced, so it feels instant) -->
+              <section class="flow-col flow-json-col">
+                <div class="flow-col-head">
+                  <h3>JSON</h3>
+                </div>
+                <textarea id="flow-editor-text" spellcheck="false" autocomplete="off"
+                          aria-label="Flow document (JSON)"
+                          placeholder="Pick a flow on the left, or “+ New flow” to write one."></textarea>
+              </section>
+            </div>
+
+            <div id="flow-validation" class="flow-validation"></div>
+            <div class="flow-editor-actions">
+              <button type="button" id="flow-save" disabled>Save flow</button>
+              <button type="button" id="flow-delete" class="flow-delete-btn" hidden>Delete</button>
+              <span id="flow-save-msg" class="muted"></span>
+            </div>
+
+            <!-- run panel: built from the run socket's `flow` bootstrap frame -->
+            <div class="flow-run" id="flow-run-panel" hidden>
+              <h3>Run</h3>
+              <div id="flow-inputs" class="flow-inputs"></div>
+              <div class="flow-grants" id="flow-grants">
+                <label><input type="checkbox" id="flow-cap-submit" /> Allow submit</label>
+                <label><input type="checkbox" id="flow-cap-upload" /> Allow upload</label>
+                <label><input type="checkbox" id="flow-cap-download" /> Allow download</label>
+              </div>
+              <label class="flow-dry">
+                <input type="checkbox" id="flow-dry-run" checked /> Dry run (no writes)
+              </label>
+              <div class="flow-run-actions">
+                <button type="button" id="flow-run">Run flow</button>
+                <button type="button" id="flow-cancel" class="flow-cancel-btn" hidden>Cancel</button>
+                <span id="flow-dedupe" class="flow-dedupe"></span>
+              </div>
+              <div id="flow-log" class="flow-log" aria-live="polite"></div>
+            </div>
+
+            <!-- history (click a run to replay it read-only) + the all-time ledger -->
+            <div class="flow-results" id="flow-results" hidden>
+              <div class="flow-results-col">
+                <h3>History</h3>
+                <ul id="flow-runs" class="flow-runs"></ul>
+              </div>
+              <div class="flow-results-col">
+                <h3>Artifacts</h3>
+                <p id="flow-artifacts-summary" class="muted"></p>
+                <ul id="flow-artifacts" class="flow-artifacts"></ul>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
     </main>
   </div>
 
@@ -278,5 +404,9 @@
 
   <script src="app.js"></script>
   <script src="explore.js"></script>
+  <!-- flow_canvas.js is pure DOM + path logic (no network, no vendor deps) and must be
+       parsed BEFORE flows.js, which calls renderCanvasFromDoc/highlightPath from it. -->
+  <script src="flow_canvas.js"></script>
+  <script src="flows.js"></script>
 </body>
 </html>

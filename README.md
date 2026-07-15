@@ -23,7 +23,7 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - **Safe by construction** — discovery opens and reads forms, then presses Escape. It never submits, saves, or deletes anything. Destructive-looking controls are skipped and recorded, not clicked.
 - **Never loses progress** — atomic checkpoints every N states plus a SIGINT/SIGTERM handler; a crash, OOM, or Ctrl-C keeps the partial graph. `meta.stopped` always says *why* a crawl ended (complete vs. truncated) — no silent truncation.
 - **Spans app boundaries** — `--cross-host` follows links and `iframe[src]` into other hosts as graph nodes, so an embedded/linked app becomes part of the same graph. `--single-url` drives app-shell SPAs (e.g. Teams-style apps that swap views without changing the URL).
-- **Cache-first workflow** — `ask.py` answers from a per-host cache when it can, falls back to a live discovery on a miss, and writes the result back so the next ask is an offline hit.
+- **Cache-first workflow** — `ask.py` answers from a per-host cache when it can, falls back to a live discovery on a miss, and writes the result back so the next ask is an offline hit. A cache *hit* answers in milliseconds; a cold *miss* stays fast too — a shallow "how do I X" (trigger 0–2 clicks deep) discovers in **under 10s** because each state costs one bridge round-trip to settle, not a poll loop of them. `scripts/bench-discovery.sh` proves it offline (no live app), and `recipe.py --time-budget SECONDS` caps the worst case for deep, blind multi-step discovery.
 - **No LLM in the runtime** — indexing and path-finding are pure Python + the PinchTab CLI. Predictable, reproducible, free to re-run.
 - **Three ways to call it** — the exact same graph queries are reachable from a full **CLI**, a **Model Context Protocol (MCP)** server, and a **Universal Tool Calling Protocol (UTCP)** manual — all over one shared, importable core API. See [Three ways to call it](#-three-ways-to-call-it).
 
@@ -524,7 +524,6 @@ UNWIND $g.edges AS e
 
 - Auto-detect single-URL app-shell mode (no `--single-url` flag).
 - Form-reading inside single-URL apps (currently disabled there for safety).
-- Sub-10s cold-start live discovery for cache misses.
 - Richer content queries surfaced through `ask.py` (cross-host collections).
 
 ## 🤝 Contributing

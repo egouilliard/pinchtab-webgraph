@@ -332,6 +332,83 @@ def list_content(graph_path: str | os.PathLike) -> dict:
     return {"status": "ok" if views else "empty", "views": views}
 
 
+def find_content_hosts(host_paths, text, limit=40):
+    """Cross-host content search: run find_content() over MANY per-host caches, tag
+    each matching view with its origin host, then merge + globally rank.
+
+    `host_paths` is a list of (host, graph_path) pairs (the caller resolves hosts to
+    paths — api.py stays path-only). One unreadable cache never fails the whole query:
+    that host is recorded with status "error" and skipped. Views are ranked globally by
+    (reachable, distance_clicks, host, view_url); `limit` caps the MERGED item stream.
+    """
+    per_host = []
+    merged = []            # (sort_key, view_with_host)
+    hosts_searched, hosts_matched = [], []
+    total = 0
+    for host, path in host_paths:
+        hosts_searched.append(host)
+        try:
+            r = find_content(path, text, start=None, limit=limit)
+        except (OSError, ValueError, json.JSONDecodeError, KeyError) as e:
+            per_host.append({"host": host, "status": "error", "error": str(e)})
+            continue
+        per_host.append({"host": host, "status": r["status"],
+                         "matches": r.get("total_matches", 0)})
+        total += r.get("total_matches", 0)
+        if r["status"] == "ok":
+            hosts_matched.append(host)
+            for v in r["views"]:
+                vv = dict(v)
+                vv["host"] = host
+                key = (0 if v["reachable"] else 1,
+                       v["distance_clicks"] if v["reachable"] else 10 ** 6,
+                       host, v["view_url"] or "")
+                merged.append((key, vv))
+    merged.sort(key=lambda x: x[0])
+    views, shown = [], 0
+    for _key, vv in merged:
+        if shown >= limit:
+            break
+        vv = dict(vv)
+        items = vv["items"]
+        take = items[:limit - shown]
+        vv["items"] = take
+        # `truncated` must reflect BOTH trims: the per-host one (already flagged by
+        # find_content) and the GLOBAL one applied here — otherwise a view cut by the
+        # cross-host budget would report truncated=False and the cap would be silent.
+        vv["truncated"] = bool(vv.get("truncated")) or len(take) < len(items)
+        views.append(vv)
+        shown += len(take)
+    # NO SILENT CAPS: a caller must be able to tell that ranked views were dropped
+    # entirely by the budget, and that some host caches never contributed at all.
+    hosts_errored = [h["host"] for h in per_host if h["status"] == "error"]
+    return {"status": "ok" if hosts_matched else "no_match", "query": text,
+            "hosts_searched": hosts_searched, "hosts_matched": hosts_matched,
+            "hosts_errored": hosts_errored, "per_host": per_host,
+            "total_matches": total, "views_matched": len(merged),
+            "views_omitted": len(merged) - len(views),
+            "views": views, "shown": shown}
+
+
+def list_content_hosts(host_paths):
+    """Cross-host inventory: run list_content() over MANY per-host caches, grouping by
+    origin host. Resilient: an unreadable cache is tagged status "error" and skipped.
+    """
+    hosts, with_content = [], []
+    for host, path in host_paths:
+        try:
+            r = list_content(path)
+        except (OSError, ValueError, json.JSONDecodeError, KeyError) as e:
+            hosts.append({"host": host, "status": "error", "error": str(e), "views": []})
+            continue
+        hosts.append({"host": host, "status": r["status"], "views": r["views"]})
+        if r["status"] == "ok":
+            with_content.append(host)
+    hosts.sort(key=lambda h: h["host"])
+    return {"status": "ok" if with_content else "empty",
+            "hosts": hosts, "hosts_with_content": with_content}
+
+
 def list_forms(graph_path: str | os.PathLike) -> dict:
     """Every create-form in the cache: label, host, click-depth, field count."""
     graph = _load_interaction_graph(graph_path)

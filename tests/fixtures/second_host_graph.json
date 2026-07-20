@@ -1,0 +1,49 @@
+{
+  "meta": {
+    "start": "https://shop.test/",
+    "host": "shop.test",
+    "states": 2,
+    "edges": 1,
+    "triggers": 0,
+    "max_depth": 1,
+    "tool": "interaction_crawl.py"
+  },
+  "states": [
+    {
+      "id": "s0",
+      "url": "https://shop.test/",
+      "label": "/",
+      "depth": 0
+    },
+    {
+      "id": "s1",
+      "url": "https://shop.test/customers",
+      "label": "Customers",
+      "depth": 1,
+      "collections": [
+        {
+          "kind": "list",
+          "count": 2,
+          "items": [
+            {"t": "Alice Cooper", "cells": [], "level": 0},
+            {"t": "Widget Zeta", "cells": [], "level": 0}
+          ]
+        }
+      ]
+    }
+  ],
+  "state_index": {
+    "https://shop.test/": "s0",
+    "https://shop.test/customers": "s1"
+  },
+  "edges": [
+    {
+      "from": "s0",
+      "to": "s1",
+      "label": "Customers",
+      "selector": "nav>a:nth-of-type(1)",
+      "kind": "link"
+    }
+  ],
+  "triggers": []
+}

@@ -203,6 +203,99 @@
       }
     },
     {
+      "name": "find_content_hosts",
+      "description": "Search captured data collections across EVERY cached host and merge the matches, ranked by reach and labeled by origin host (each view carries its `host`). Answers OFFLINE from the per-host cache (no browser, no network). Takes no host \u2014 it spans them all. Returns JSON with a `status` in {ok, no_match}.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "text to search for across every host's captured collections"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "no_match"
+            ]
+          },
+          "views": {
+            "type": "array"
+          },
+          "hosts_matched": {
+            "type": "array"
+          }
+        }
+      },
+      "tags": [
+        "offline",
+        "content",
+        "search",
+        "cross-host"
+      ],
+      "tool_call_template": {
+        "name": "find_content_hosts",
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "pwg query find_content_hosts --text UTCP_ARG_text_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "list_content_hosts",
+      "description": "Per-host inventory of captured data collections across EVERY cached host, grouped by origin host. Answers OFFLINE from the per-host cache (no browser, no network). Takes no host \u2014 it spans them all. Returns JSON with a `status` in {ok, empty}.",
+      "inputs": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "empty"
+            ]
+          },
+          "hosts": {
+            "type": "array"
+          },
+          "hosts_with_content": {
+            "type": "array"
+          }
+        }
+      },
+      "tags": [
+        "offline",
+        "content",
+        "inventory",
+        "cross-host"
+      ],
+      "tool_call_template": {
+        "name": "list_content_hosts",
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "pwg query list_content_hosts",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
       "name": "list_forms",
       "description": "Every create-form in the cache: label, host, click-depth, field count. Answers OFFLINE from the per-host cache (no browser, no network). Returns JSON `{meta, forms}` (no `status` key on success).",
       "inputs": {
@@ -387,7 +480,7 @@
     },
     {
       "name": "perform",
-      "description": "PERFORM a how-to LIVE: resolve the shortest path to a download / create trigger OFFLINE, then RUN the compiled PinchTab block through the browser (navigate the path → download, or open a form). Needs a running PinchTab bridge. Safe by default: navigation + downloads run, but a form field with no supplied value is SKIPPED and the SUBMIT is NOT run (use the CLI's --set / --allow-submit for those). Returns JSON with a `status` in {ok, no_match, unreachable, invalid_args}.",
+      "description": "PERFORM a how-to LIVE: resolve the shortest path to a download / create trigger OFFLINE, then RUN the compiled PinchTab block through the browser (navigate the path \u2192 download, or open a form). Needs a running PinchTab bridge. Safe by default: navigation + downloads run, but a form field with no supplied value is SKIPPED and the SUBMIT is NOT run (use the CLI's --set / --allow-submit for those). Returns JSON with a `status` in {ok, no_match, unreachable, invalid_args}.",
       "inputs": {
         "type": "object",
         "properties": {

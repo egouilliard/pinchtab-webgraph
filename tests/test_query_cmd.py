@@ -152,6 +152,30 @@ def test_list_content_empty(monkeypatch, capsys, sample_link_graph_path):
     assert out["status"] == "empty"
 
 
+# --- find_content_hosts / list_content_hosts (cross-host, all cached hosts) --
+
+def test_find_content_hosts(monkeypatch, capsys, two_hosts_cache_home):
+    code, out = _run(monkeypatch, capsys, ["find_content_hosts", "--text", "alice"])
+    assert code == 0
+    assert out["status"] == "ok"
+    assert set(out["hosts_matched"]) == {"example.test", "shop.test"}
+    assert all("host" in v for v in out["views"])
+
+
+def test_find_content_hosts_missing_text_is_exit_2(monkeypatch, capsys,
+                                                   two_hosts_cache_home):
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, capsys, ["find_content_hosts"])
+    assert exc.value.code == 2
+
+
+def test_list_content_hosts(monkeypatch, capsys, two_hosts_cache_home):
+    code, out = _run(monkeypatch, capsys, ["list_content_hosts"])
+    assert code == 0
+    assert out["status"] == "ok"
+    assert set(out["hosts_with_content"]) == {"example.test", "shop.test"}
+
+
 # --- list_forms --------------------------------------------------------------
 
 def test_list_forms_keeps_no_status_shape(monkeypatch, capsys,

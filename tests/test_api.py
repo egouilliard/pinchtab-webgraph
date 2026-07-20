@@ -252,6 +252,130 @@ def test_list_content_empty(sample_link_graph_path):
     assert out["views"] == []
 
 
+# --- find_content_hosts / list_content_hosts (cross-host) --------------------
+
+def test_find_content_hosts_ranks_and_labels(sample_interaction_graph_path,
+                                             second_host_graph_path):
+    host_paths = [("example.test", str(sample_interaction_graph_path)),
+                  ("shop.test", str(second_host_graph_path))]
+    out = api.find_content_hosts(host_paths, "alice")
+    assert out["status"] == "ok"
+    # "alice" matches on BOTH hosts (Alice Martin / Alice Cooper).
+    assert set(out["hosts_matched"]) == {"example.test", "shop.test"}
+    assert out["total_matches"] == 2
+    # every returned view is tagged with its origin host, and reachable ones sort first.
+    assert all("host" in v for v in out["views"])
+    assert all(v["reachable"] for v in out["views"])
+    hosts = {v["host"] for v in out["views"]}
+    assert hosts == {"example.test", "shop.test"}
+
+
+def test_find_content_hosts_miss(sample_interaction_graph_path, second_host_graph_path):
+    host_paths = [("example.test", str(sample_interaction_graph_path)),
+                  ("shop.test", str(second_host_graph_path))]
+    out = api.find_content_hosts(host_paths, "Widget Zeta")
+    assert out["status"] == "ok"
+    # "Widget Zeta" is unique to shop.test.
+    assert out["hosts_matched"] == ["shop.test"]
+    assert {v["host"] for v in out["views"]} == {"shop.test"}
+    assert out["views"][0]["items"][0]["text"] == "Widget Zeta"
+
+
+def test_find_content_hosts_no_match(sample_interaction_graph_path,
+                                     second_host_graph_path):
+    host_paths = [("example.test", str(sample_interaction_graph_path)),
+                  ("shop.test", str(second_host_graph_path))]
+    out = api.find_content_hosts(host_paths, "nothinghere")
+    assert out["status"] == "no_match"
+    assert out["hosts_matched"] == []
+    assert out["views"] == []
+
+
+def test_find_content_hosts_resilient_to_bad_cache(sample_interaction_graph_path,
+                                                   tmp_path):
+    bad = tmp_path / "garbage.json"
+    bad.write_text("{ not json")
+    host_paths = [("example.test", str(sample_interaction_graph_path)),
+                  ("broken.test", str(bad))]
+    out = api.find_content_hosts(host_paths, "alice")
+    # the good host still answers; the bad one is recorded as an error, not a crash.
+    assert out["status"] == "ok"
+    assert out["hosts_matched"] == ["example.test"]
+    broken = next(h for h in out["per_host"] if h["host"] == "broken.test")
+    assert broken["status"] == "error"
+
+
+def test_find_content_hosts_global_limit_flags_truncation(
+        sample_interaction_graph_path, second_host_graph_path):
+    # REGRESSION (no silent caps): the cross-host budget drops whole ranked views, so
+    # the result must say so — views_omitted, plus truncated on the view it cut.
+    host_paths = [("example.test", str(sample_interaction_graph_path)),
+                  ("shop.test", str(second_host_graph_path))]
+    out = api.find_content_hosts(host_paths, "alice", limit=1)
+    assert out["status"] == "ok"
+    assert out["shown"] == 1
+    assert out["total_matches"] == 2          # the true total is still reported
+    assert out["views_matched"] == 2          # ... across two matching views ...
+    assert len(out["views"]) == 1             # ... of which only one fit the budget
+    assert out["views_omitted"] == 1
+    # the surviving view was NOT itself cut (its one item fit) — the loss is the
+    # DROPPED view, which is exactly what views_omitted exists to report.
+    assert out["views"][0]["truncated"] is False
+
+
+def test_find_content_hosts_flags_item_level_truncation(second_host_graph_path):
+    # The other half of "no silent caps": when the budget cuts items INSIDE a view,
+    # that view must carry truncated=True. "e" matches both of shop.test's items.
+    out = api.find_content_hosts([("shop.test", str(second_host_graph_path))],
+                                 "e", limit=1)
+    assert out["total_matches"] == 2
+    assert out["shown"] == 1
+    assert out["views_omitted"] == 0          # only one view existed ...
+    assert out["views"][0]["truncated"] is True   # ... and its items were cut
+
+
+def test_find_content_hosts_reports_errored_hosts(sample_interaction_graph_path,
+                                                  tmp_path):
+    # REGRESSION: an unreadable cache must be surfaced (not just skipped), so a caller
+    # can tell a partial answer from a complete one.
+    bad = tmp_path / "garbage.json"
+    bad.write_text("{ not json")
+    host_paths = [("example.test", str(sample_interaction_graph_path)),
+                  ("broken.test", str(bad))]
+    out = api.find_content_hosts(host_paths, "alice")
+    assert out["status"] == "ok"
+    assert out["hosts_errored"] == ["broken.test"]
+    assert out["hosts_matched"] == ["example.test"]
+
+
+def test_find_content_hosts_no_truncation_when_under_limit(
+        sample_interaction_graph_path, second_host_graph_path):
+    host_paths = [("example.test", str(sample_interaction_graph_path)),
+                  ("shop.test", str(second_host_graph_path))]
+    out = api.find_content_hosts(host_paths, "alice", limit=40)
+    assert out["views_omitted"] == 0
+    assert out["hosts_errored"] == []
+    assert all(v["truncated"] is False for v in out["views"])
+
+
+def test_list_content_hosts(sample_interaction_graph_path, second_host_graph_path):
+    host_paths = [("example.test", str(sample_interaction_graph_path)),
+                  ("shop.test", str(second_host_graph_path))]
+    out = api.list_content_hosts(host_paths)
+    assert out["status"] == "ok"
+    assert set(out["hosts_with_content"]) == {"example.test", "shop.test"}
+    assert [h["host"] for h in out["hosts"]] == ["example.test", "shop.test"]
+    shop = next(h for h in out["hosts"] if h["host"] == "shop.test")
+    assert shop["views"][0]["view_label"] == "Customers"
+
+
+def test_list_content_hosts_empty(sample_link_graph_path):
+    # a single link graph has no collections → empty across the board.
+    out = api.list_content_hosts([("links.test", str(sample_link_graph_path))])
+    assert out["status"] == "empty"
+    assert out["hosts_with_content"] == []
+
+
 # --- list_forms --------------------------------------------------------------
 
 def test_list_forms(sample_interaction_graph_path):

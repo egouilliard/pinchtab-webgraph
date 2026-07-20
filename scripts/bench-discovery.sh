@@ -21,7 +21,14 @@ cd "$ROOT"
 
 BUDGET_CHECK=0
 [ "${1:-}" = "--budget-check" ] && BUDGET_CHECK=1
-BUDGET_S=10          # the "<10s cold discovery" claim we guard for EASY + MEDIUM
+# Budget for the EASY + MEDIUM wall-clock guard. NOTE this is a CONSERVATIVE UPPER BOUND,
+# not a real-world figure: the fake bridge is a python script, so every round-trip forks a
+# python interpreter (~50-250ms depending on machine load) where the real `pinchtab` is a Go
+# binary at ~70ms. So this number runs HIGHER than production and drifts with machine load.
+# Treat ROUND_TRIPS (below, load-independent — and what tests/test_discovery_bench.py pins)
+# as the real regression signal; the authoritative <10s cold-miss figure comes from a real
+# bridge (see README). Override for a loaded box: BENCH_BUDGET_S=20 scripts/bench-discovery.sh --budget-check
+BUDGET_S="${BENCH_BUDGET_S:-10}"
 
 FAKE="$ROOT/tests/fixtures/fake_pinchtab.py"
 mkdir -p out/bench
@@ -42,6 +49,8 @@ REPORT="out/bench/discovery-$TS.json"
 FAIL=0
 
 printf '=== recipe.py OFFLINE discovery benchmark (fake bridge) ===\n'
+printf 'WALL_S is a conservative upper bound (python-fork per round-trip, load-sensitive);\n'
+printf 'ROUNDTR is the load-independent regression signal. Budget: %ss\n' "$BUDGET_S"
 printf '%-8s %-6s %8s %8s %8s\n' SCENARIO FOUND WALL_S CLICKS ROUNDTR
 json_rows=""
 

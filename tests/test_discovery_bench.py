@@ -71,3 +71,42 @@ def test_discovery_finds_trigger_within_round_trip_budget(
     assert round_trips <= max_round_trips, (
         "%s took %d round-trips (ceiling %d) — the single-round-trip settle may have "
         "regressed to per-poll settling" % (name, round_trips, max_round_trips))
+
+
+def test_settle_never_raises_on_bridge_timeout(monkeypatch):
+    """settle() must swallow a subprocess timeout instead of propagating it.
+
+    Folding the poll loop into ONE `eval --await-promise` put the whole wait behind a
+    single hard kill timeout, where the old Python-side loop structurally could not
+    raise. login.perform_login calls settle() with NO try/except of its own (and
+    interaction_crawl reaches it at crawl setup, before the crawl loop's scaffolding),
+    so a bridge hiccup must not take the process down."""
+    from pinchtab_webgraph import recipe
+
+    def timeout(args, server, timeout=60):
+        raise subprocess.TimeoutExpired(cmd=["pinchtab"], timeout=timeout)
+
+    monkeypatch.setattr(recipe, "pt", timeout)
+    recipe.settle("http://localhost:9871")      # must return, not raise
+
+
+def test_time_budget_stops_discovery_early(fake_bridge):
+    """--time-budget caps worst-case discovery: a trigger 3 clicks deep, a slow bridge,
+    and a budget far under the time it needs => discovery stops and says so, instead of
+    exploring to --max-discover. Default (0) is off and is covered by the scenarios above."""
+    env, tmp_path = fake_bridge
+    log = tmp_path / "calls-budget.log"
+    env = dict(env, FAKEPT_STATE=str(tmp_path / "state-budget.json"),
+               FAKEPT_LOG=str(log), FAKEPT_TRIGGER_TAB="2",
+               FAKEPT_NAV_MS="400", FAKEPT_CLICK_MS="400")   # slow enough to trip the cap
+    r = subprocess.run(
+        [sys.executable, "-m", "pinchtab_webgraph.recipe", "--goal", "add widget",
+         "--start", "https://synthetic.test/", "--time-budget", "0.5",
+         "--out", str(tmp_path / "recipe-budget")],
+        env=env, capture_output=True, text=True, timeout=60)
+
+    assert "time budget" in r.stderr, (
+        "discovery did not report hitting the budget:\n%s" % r.stderr)
+    # it stopped before reaching the 3-clicks-deep trigger, so it reports a miss (rc!=0)
+    assert r.returncode != 0
+    assert "Could not find" in r.stderr

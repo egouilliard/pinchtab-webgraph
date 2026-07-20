@@ -383,30 +383,49 @@ NETIDLE_MS = 0        # networkidle wait: 0 = skip it (this realtime app never i
                       # so it just burns ~0.7s/state; the render-poll handles readiness)
 
 
+# One-round-trip render settle. The old settle polled the control count with ONE
+# `pinchtab eval` subprocess PER poll (N spawns + Python sleeps per settle); on a
+# multi-state discovery that dominated cold wall-clock. Fold the whole poll loop into
+# ONE `eval --await-promise` whose injected JS does the stability wait IN-PAGE and
+# resolves when the count is stable (>3 and unchanged across a poll) or the render cap
+# hits — same heuristic and same tunables, ~N→1 round-trips. Generic, no app vocab.
+# It counts the SAME control families CONTROLS_JS enumerates — crucially incl.
+# role=tab/menuitem, else tab-heavy pages read 0 controls and the poll stalls to
+# its deadline.
+_SETTLE_JS = r"""
+(async (renderMs, pollMs, delayMs) => {
+  const sel = 'a[href],button,[role=button],[role=tab],[role=menuitem],summary';
+  const deadline = Date.now() + renderMs; let last = -1;
+  while (Date.now() < deadline) {
+    const c = document.querySelectorAll(sel).length;
+    if (c > 3 && c === last) break;
+    last = c;
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+  if (delayMs > 0) await new Promise(r => setTimeout(r, delayMs));
+  return last;
+})(%d, %d, %d)
+"""
+
+
 def settle(server, render_ms=None, delay=None):
     render_ms = RENDER_MS if render_ms is None else render_ms
     delay = SETTLE_DELAY if delay is None else delay
     if NETIDLE_MS > 0:    # optional networkidle wait (off by default — see above)
         pt(["wait", "--load", "networkidle", "--timeout", str(NETIDLE_MS)],
            server, timeout=max(3, NETIDLE_MS / 1000.0 + 2))
-    deadline = time.time() + render_ms / 1000.0
-    last = -1
-    while time.time() < deadline:
-        # count the SAME control families CONTROLS_JS enumerates — crucially incl.
-        # role=tab/menuitem, else tab-heavy pages read 0 controls and the
-        # poll stalls to its deadline.
-        rc, out, _ = pt(["eval", 'document.querySelectorAll('
-                                 '"a[href],button,[role=button],[role=tab],[role=menuitem],summary"'
-                                 ').length'], server)
-        try:
-            c = int(out.strip().strip('"'))
-        except ValueError:
-            c = 0
-        if c > 3 and c == last:
-            break
-        last = c
-        time.sleep(SETTLE_POLL)
-    time.sleep(delay)
+    # ONE round-trip: the stability poll runs IN-PAGE (see _SETTLE_JS), so a settle is
+    # a single `eval --await-promise` instead of N `eval` subprocesses + Python sleeps.
+    js = _SETTLE_JS % (render_ms, int(SETTLE_POLL * 1000), int(delay * 1000))
+    try:
+        pt(["eval", "--await-promise", js], server,
+           timeout=max(5, render_ms / 1000.0 + 3))
+    except subprocess.TimeoutExpired:
+        # The old per-poll settle bounded itself in Python and could not raise; folding the
+        # wait into one subprocess call adds a hard kill timeout. Swallow it so settle keeps
+        # its "never throws, worst case it just took a while" contract — several callers
+        # (login.perform_login) invoke settle() with no try/except of their own.
+        pass
 
 
 def nav(url, server):
@@ -494,6 +513,10 @@ def main():
     ap.add_argument("--data-list-min", type=int, default=3,
                     help="N sibling links sharing a section root = a repeated data "
                          "list (e.g. /items/*); skip exploring it entirely (default 3)")
+    ap.add_argument("--time-budget", type=float, default=0.0,
+                    help="soft wall-clock cap (seconds) on discovery; 0 = off (default). "
+                         "When exceeded, stop exploring and report best-effort — bounds "
+                         "worst-case cold discovery without changing the default behavior.")
     ap.add_argument("--render-ms", type=int, default=RENDER_MS,
                     help="cap on the per-state render-stability poll (default %d)" % RENDER_MS)
     ap.add_argument("--settle-poll", type=float, default=SETTLE_POLL,
@@ -596,7 +619,12 @@ def main():
     seen_states, enq_links, enq_clicks = set(), set(), set()
     section_counts = {}
     budget = a.max_discover
+    disco_start = time.time()
     while frontier and budget > 0 and trigger is None:
+        if a.time_budget and time.time() - disco_start > a.time_budget:
+            print("· time budget %.1fs exceeded — stopping discovery early"
+                  % a.time_budget, file=sys.stderr)
+            break
         _depth, _rel, _nav, _s, path = heapq.heappop(frontier)
         if not materialize(path):
             continue

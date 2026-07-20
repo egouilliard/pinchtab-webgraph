@@ -23,7 +23,7 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - **Safe by construction** — discovery opens and reads forms, then presses Escape. It never submits, saves, or deletes anything. Destructive-looking controls are skipped and recorded, not clicked.
 - **Never loses progress** — atomic checkpoints every N states plus a SIGINT/SIGTERM handler; a crash, OOM, or Ctrl-C keeps the partial graph. `meta.stopped` always says *why* a crawl ended (complete vs. truncated) — no silent truncation.
 - **Spans app boundaries** — `--cross-host` follows links and `iframe[src]` into other hosts as graph nodes, so an embedded/linked app becomes part of the same graph. App-shell SPAs (e.g. Teams-style apps that swap views without changing the URL) are **auto-detected** and driven in single-URL mode — no flag needed; `--single-url` / `--no-single-url` force it either way. Their create-forms are read **in place** (a JS-dispatch click, never a navigation that would blank the shell; a trigger that can't open without navigating is recorded form-less and the crawl recovers in place).
-- **Cache-first workflow** — `ask.py` answers from a per-host cache when it can, falls back to a live discovery on a miss, and writes the result back so the next ask is an offline hit.
+- **Cache-first workflow** — `ask.py` answers from a per-host cache when it can, falls back to a live discovery on a miss, and writes the result back so the next ask is an offline hit. A cache *hit* answers in milliseconds (measured: **0.4s**); a cold *miss* stays fast too — a shallow "how do I X" (trigger 0–2 clicks deep) discovers in **under 10s** end-to-end (measured against a real bridge: **7.5s** cold, including the live crawl and the cache write-back) because each state costs one bridge round-trip to settle, not a poll loop of them. `scripts/bench-discovery.sh` regression-guards that offline with no live app — compare its `ROUNDTR` column, which is load-independent, rather than its wall-clock, which is inflated by the fake bridge's per-call python fork. `recipe.py --time-budget SECONDS` caps the worst case for deep, blind multi-step discovery.
 - **No LLM in the runtime** — indexing and path-finding are pure Python + the PinchTab CLI. Predictable, reproducible, free to re-run.
 - **Three ways to call it** — the exact same graph queries are reachable from a full **CLI**, a **Model Context Protocol (MCP)** server, and a **Universal Tool Calling Protocol (UTCP)** manual — all over one shared, importable core API. See [Three ways to call it](#-three-ways-to-call-it).
 
@@ -524,7 +524,7 @@ UNWIND $g.edges AS e
 
 - ✅ ~~Auto-detect single-URL app-shell mode (no `--single-url` flag).~~ Shipped — the crawler now detects app-shell SPAs structurally at crawl start; `--single-url` / `--no-single-url` force the mode either way.
 - ✅ ~~Form-reading inside single-URL apps.~~ Shipped — create-forms are opened in place via JS-dispatch clicks with a shell-blank guard; a trigger that can't open without navigating is recorded form-less and the crawl recovers in place.
-- Sub-10s cold-start live discovery for cache misses.
+- ✅ ~~Sub-10s cold-start live discovery for cache misses.~~ Shipped — one bridge round-trip per state to settle (not a poll loop); measured 7.5s cold end-to-end, regression-guarded offline by `scripts/bench-discovery.sh`.
 - Richer content queries surfaced through `ask.py` (cross-host collections).
 
 ## 🤝 Contributing

@@ -22,7 +22,7 @@ The whole pipeline is **deterministic** — structural heuristics only (ARIA rol
 - **File-upload discovery** — the crawl also finds where you can upload a document. File inputs (including ones hidden behind a styled `<label>`/button) and `ondrop` dropzones become read-only `upload` nodes tagged with the file types they accept (e.g. `.pdf,.docx`, `image/*`), so "how do I upload a … ?" is answerable — and the crawler never clicks them (that would pop a native OS file dialog).
 - **Safe by construction** — discovery opens and reads forms, then presses Escape. It never submits, saves, or deletes anything. Destructive-looking controls are skipped and recorded, not clicked.
 - **Never loses progress** — atomic checkpoints every N states plus a SIGINT/SIGTERM handler; a crash, OOM, or Ctrl-C keeps the partial graph. `meta.stopped` always says *why* a crawl ended (complete vs. truncated) — no silent truncation.
-- **Spans app boundaries** — `--cross-host` follows links and `iframe[src]` into other hosts as graph nodes, so an embedded/linked app becomes part of the same graph. App-shell SPAs (e.g. Teams-style apps that swap views without changing the URL) are **auto-detected** and driven in single-URL mode — no flag needed; `--single-url` / `--no-single-url` force it either way.
+- **Spans app boundaries** — `--cross-host` follows links and `iframe[src]` into other hosts as graph nodes, so an embedded/linked app becomes part of the same graph. App-shell SPAs (e.g. Teams-style apps that swap views without changing the URL) are **auto-detected** and driven in single-URL mode — no flag needed; `--single-url` / `--no-single-url` force it either way. Their create-forms are read **in place** (a JS-dispatch click, never a navigation that would blank the shell; a trigger that can't open without navigating is recorded form-less and the crawl recovers in place).
 - **Cache-first workflow** — `ask.py` answers from a per-host cache when it can, falls back to a live discovery on a miss, and writes the result back so the next ask is an offline hit.
 - **No LLM in the runtime** — indexing and path-finding are pure Python + the PinchTab CLI. Predictable, reproducible, free to re-run.
 - **Three ways to call it** — the exact same graph queries are reachable from a full **CLI**, a **Model Context Protocol (MCP)** server, and a **Universal Tool Calling Protocol (UTCP)** manual — all over one shared, importable core API. See [Three ways to call it](#-three-ways-to-call-it).
@@ -523,7 +523,7 @@ UNWIND $g.edges AS e
 ## 🛣️ Roadmap
 
 - ✅ ~~Auto-detect single-URL app-shell mode (no `--single-url` flag).~~ Shipped — the crawler now detects app-shell SPAs structurally at crawl start; `--single-url` / `--no-single-url` force the mode either way.
-- Form-reading inside single-URL apps (currently disabled there for safety).
+- ✅ ~~Form-reading inside single-URL apps.~~ Shipped — create-forms are opened in place via JS-dispatch clicks with a shell-blank guard; a trigger that can't open without navigating is recorded form-less and the crawl recovers in place.
 - Sub-10s cold-start live discovery for cache misses.
 - Richer content queries surfaced through `ask.py` (cross-host collections).
 

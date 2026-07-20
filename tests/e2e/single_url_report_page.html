@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>New Report</title></head>
+<body>
+  <!-- A DELIBERATELY BARE page: NO [role=tablist], NO app-shell chrome. Reaching it
+       means the single-URL app-shell "blanked" (a real full-page navigation happened),
+       which is exactly the condition the crawler's shell_blank guard must detect so it
+       NEVER scrapes this page's DOM as if it were the trigger's in-place form. -->
+  <h1>Report builder</h1>
+  <p>This is a separate full page reached by a real location.href navigation.</p>
+  <form>
+    <label for="rep-title">Report title</label>
+    <input id="rep-title" type="text" name="title" />
+    <label for="rep-range">Date range</label>
+    <select id="rep-range" name="range">
+      <option>Last 7 days</option>
+      <option>Last 30 days</option>
+    </select>
+    <button type="submit">Generate report</button>
+  </form>
+</body>
+</html>

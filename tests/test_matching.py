@@ -85,3 +85,12 @@ def test_form_confidence_real_form_is_high():
     assert howto.form_confidence({"form": {"fieldCount": 2}}) == "high"
     # fieldCount missing → fall back to counting fields
     assert howto.form_confidence({"form": {"fields": [{"label": "x"}]}}) == "high"
+
+
+def test_form_confidence_single_url_unread_form_is_low():
+    # a single-URL trigger whose form couldn't be safely opened records form=None
+    assert howto.form_confidence({"kind": "form", "form": None, "opensAt": None}) == "low"
+
+
+def test_form_confidence_download_is_high_without_form():
+    assert howto.form_confidence({"kind": "download", "form": None}) == "high"

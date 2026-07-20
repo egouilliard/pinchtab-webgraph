@@ -24,6 +24,8 @@ import json
 import os
 import shutil
 import socket
+import subprocess
+import sys
 import threading
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -100,3 +102,35 @@ def test_multipage_fixture_detected_as_nav_mode(fixture_server):
     url = "%s/multi/index.html" % fixture_server
     ic.nav(url, SERVER)
     assert ic.detect_single_url(SERVER, url) is False
+
+
+# --- crawler-level: the mode must actually change what gets crawled --------------------
+
+def _run_crawler(start, out_stem, *flags):
+    """Run the REAL crawler subprocess; return (stderr, graph-dict)."""
+    ic.nav(start, SERVER)                       # seed/adopt a tab (single-URL never navs)
+    argv = [sys.executable, "-m", "pinchtab_webgraph.interaction_crawl",
+            "--start", start, "--server", SERVER, "--out", out_stem,
+            "--max-states", "10", "--max-depth", "2",
+            "--no-capture-content", "--no-read-forms", "--no-dump-controls", *flags]
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    with open(out_stem + ".json") as fh:
+        return proc.stderr, json.load(fh)
+
+
+def test_crawler_auto_detects_appshell_and_splits_its_views(fixture_server, tmp_path):
+    # The payoff: with NO flag, the app-shell's in-place views become DISTINCT states.
+    # Before auto-detection this required the operator to know to pass --single-url.
+    stderr, graph = _run_crawler("%s/appshell.html" % fixture_server,
+                                 str(tmp_path / "appshell_auto"))
+    assert "single-URL app-shell mode: on (auto-detected)" in stderr, stderr[-800:]
+    assert graph["meta"]["states"] > 1, "views collapsed to one state: %r" % graph["meta"]
+
+
+def test_crawler_no_single_url_forces_nav_mode_and_collapses_views(fixture_server, tmp_path):
+    # The escape hatch, and the proof the mode matters: the SAME app-shell forced into nav
+    # mode keys every view by one unchanging URL, so it collapses to exactly one state.
+    stderr, graph = _run_crawler("%s/appshell.html" % fixture_server,
+                                 str(tmp_path / "appshell_forceoff"), "--no-single-url")
+    assert "single-URL app-shell mode: off (explicit)" in stderr, stderr[-800:]
+    assert graph["meta"]["states"] == 1, "expected 1 collapsed state: %r" % graph["meta"]

@@ -370,14 +370,24 @@ def find_content_hosts(host_paths, text, limit=40):
         if shown >= limit:
             break
         vv = dict(vv)
-        take = vv["items"][:limit - shown]
+        items = vv["items"]
+        take = items[:limit - shown]
         vv["items"] = take
+        # `truncated` must reflect BOTH trims: the per-host one (already flagged by
+        # find_content) and the GLOBAL one applied here — otherwise a view cut by the
+        # cross-host budget would report truncated=False and the cap would be silent.
+        vv["truncated"] = bool(vv.get("truncated")) or len(take) < len(items)
         views.append(vv)
         shown += len(take)
+    # NO SILENT CAPS: a caller must be able to tell that ranked views were dropped
+    # entirely by the budget, and that some host caches never contributed at all.
+    hosts_errored = [h["host"] for h in per_host if h["status"] == "error"]
     return {"status": "ok" if hosts_matched else "no_match", "query": text,
             "hosts_searched": hosts_searched, "hosts_matched": hosts_matched,
-            "per_host": per_host, "total_matches": total,
-            "views_matched": len(merged), "views": views, "shown": shown}
+            "hosts_errored": hosts_errored, "per_host": per_host,
+            "total_matches": total, "views_matched": len(merged),
+            "views_omitted": len(merged) - len(views),
+            "views": views, "shown": shown}
 
 
 def list_content_hosts(host_paths):

@@ -60,6 +60,14 @@ def _mark_stale(host, goal):
         cache_store.atomic_write(host, graph)
 
 
+def _warn_errored(hosts):
+    # An unreadable cache contributes nothing; saying so keeps a partial answer from
+    # reading as a complete one (a silent skip would understate the real result set).
+    if hosts:
+        print("\n⚠ %d cache(s) could not be read and were skipped: %s"
+              % (len(hosts), ", ".join(hosts)))
+
+
 def _print_find_hosts(res):
     q = res["query"]
     n_hosts = len(res["hosts_matched"])
@@ -67,6 +75,7 @@ def _print_find_hosts(res):
         print("✗ No captured data matches %r across %d host cache(s)."
               % (q, len(res["hosts_searched"])))
         print("  (searched every host's data collections; re-crawl with --capture-content if stale)")
+        _warn_errored(res.get("hosts_errored"))
         return
     print("=== FOUND %d item(s) matching %r across %d host(s), %d view(s) ==="
           % (res["total_matches"], q, n_hosts, res["views_matched"]))
@@ -81,6 +90,12 @@ def _print_find_hosts(res):
                      "  →  ".join(v["steps"])))
         for it in v["items"]:
             print("     • [%s] %s" % (it.get("kind"), (it.get("text") or "")[:110]))
+    # NO SILENT CAPS: say so when --limit dropped items or whole views, otherwise the
+    # header ("N items across M views") reads as complete when it isn't.
+    if res.get("views_omitted") or any(v.get("truncated") for v in res["views"]):
+        print("\n   … showing %d of %d item(s) across %d of %d view(s) — raise --limit to see more"
+              % (res["shown"], res["total_matches"], len(res["views"]), res["views_matched"]))
+    _warn_errored(res.get("hosts_errored"))
     print("\n(answered offline from %d host cache(s) — 0 browser calls)"
           % len(res["hosts_searched"]))
 

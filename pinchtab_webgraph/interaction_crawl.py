@@ -4,7 +4,8 @@ Build an INTERACTION-GRAPH CACHE for a web app, via PinchTab.
 
 Crawls the live UI ONCE, thoroughly (no per-query time pressure):
   - follows navigation controls (links + tabs/menus/sidebar), recording STATES
-    (deduped by URL + visible-control signature) and ACTION EDGES between them,
+    (deduped by URL AND by a structural screen fingerprint, so one screen reached
+    under many URLs — sticky query params — is crawled once) and ACTION EDGES between them,
   - for every CREATE-style trigger it encounters, opens the form, introspects its
     fields, and presses Escape — it NEVER submits/saves/deletes,
   - writes a single graph JSON that `howto.py` queries OFFLINE in milliseconds
@@ -35,6 +36,7 @@ BFS resumed (partial output is still written if recovery gives up):
 """
 import argparse
 import atexit
+import hashlib
 import heapq
 import json
 import os
@@ -244,6 +246,150 @@ def nav_state_key(url):
     # limitation: hash-router SPAs ('/#/route') collapse to one state here since norm()
     # drops '#' (single-URL app-shells keep the structural state_sig instead).
     return "u::" + norm(url)
+
+
+# ---- SCREEN IDENTITY: "is this URL a screen we've already crawled?" -------------------
+# Nav-mode states are keyed by URL (nav_state_key). That breaks on apps that keep UI
+# state in STICKY query params: switching the main tab leaves the previous sub-tab's
+# params in the URL, so `/p?tab=b&sub=x` and `/p?tab=b` render the SAME screen under
+# different URLs, and every combination was crawled as a new state (one real crawl: 243
+# URLs for ~20 screens on one path, 186 of the first 200 states). The fix keys a state
+# by WHAT THE SCREEN IS as well: a structural fingerprint of the rendered view. Two
+# URLs on the same path that render the same fingerprint are ONE state — the second URL
+# is recorded as an ALIAS (edge + state_index entry) and is not expanded, content-
+# captured or form-read again. Generic: no param names, nothing configured; the
+# fingerprint is built only from structure the page already exposes.
+#
+# SCREEN_JS gathers the parts of the fingerprint CONTROLS_JS doesn't carry (one extra
+# key in the same state-read eval — no extra round-trip):
+#   view   active ARIA markers (selected tab, pressed toggle, current nav item)
+#   heads  visible headings
+#   data   the first visible data items (rows/list items/options/articles) — this is
+#          what keeps two list pages with the same toolbar but DIFFERENT data apart
+#   fields visible form fields (name + non-secret value) — keeps ?id=1 vs ?id=2 edit
+#          screens apart when they only differ by the values they load
+SCREEN_JS = r"""(() => {
+  const n=s=>(s||'').replace(/\s+/g,' ').trim();
+  const vis=el=>{const r=el.getBoundingClientRect();return r.width>0&&r.height>0;};
+  const view=[...document.querySelectorAll('[aria-selected="true"],[aria-pressed="true"],'+
+    '[aria-current]:not([aria-current="false"]),[aria-expanded="true"]')].filter(vis)
+    .map(e=>n(e.getAttribute('aria-label')||e.innerText).slice(0,40)).filter(Boolean).slice(0,40);
+  const heads=[...document.querySelectorAll('h1,h2,h3,[role=heading]')].filter(vis)
+    .map(e=>n(e.innerText).slice(0,80)).filter(Boolean).slice(0,12);
+  const data=[...document.querySelectorAll('[role=row],[role=treeitem],[role=listitem],'+
+    '[role=option],[role=article],tr,li')].filter(vis).slice(0,60).map(e=>n(e.innerText).slice(0,80));
+  const fields=[...document.querySelectorAll('input,select,textarea')].filter(vis).slice(0,40)
+    .map(e=>(e.name||e.id||e.type||'')+'='+((e.type||'')==='password'?'':String(e.value||'').slice(0,40)));
+  return {view, heads, data, fields};
+})()"""
+
+
+def _page_key(u):
+    """scheme://host/path of a URL (query + fragment dropped) — the scope a screen
+    alias is allowed within. Two different PATHS are never merged, however alike."""
+    p = urlsplit(norm(u))
+    return urlunsplit((p.scheme, p.netloc, p.path, "", ""))
+
+
+def _strip_echo(href, cur):
+    """Normalise a control's href for the fingerprint: drop the query pairs it merely
+    ECHOES from the current URL. Apps that keep state in the query often propagate it
+    into every link, so without this two aliases of one screen would carry different
+    hrefs. A pair that differs from the current URL (the link's real target) is kept."""
+    if not href:
+        return None
+    if not href.startswith("http"):
+        return href
+    here = set(parse_qsl(urlsplit(cur).query, keep_blank_values=True))
+    p = urlsplit(norm(href))
+    kept = [kv for kv in parse_qsl(p.query, keep_blank_values=True) if kv not in here]
+    return urlunsplit((p.scheme, p.netloc, p.path, urlencode(sorted(kept)), ""))
+
+
+def control_key(c):
+    """Identity of a control for chrome learning: (tag, role, label). No selector — a
+    sidebar item's nth-of-type path can shift when a banner renders above it."""
+    return (c.get("tag") or "", c.get("role") or "", (c.get("text") or "")[:60])
+
+
+# A control seen on at least this many DIFFERENT page paths is site CHROME (sidebar,
+# header, account menu). Chrome says nothing about which screen this is, and it is the
+# part most prone to render-timing jitter (a sidebar entry that appears once a feature
+# flag loads) — observed on a real crawl: identical screens split only because a sidebar
+# link/button had or hadn't rendered yet. Learned at runtime, not configured.
+CHROME_MIN_PAGES = 3
+
+# Controls whose visible text is their current VALUE, not their identity (a select shows
+# the chosen option). The value is data — and loads late — so only the role counts.
+VALUE_ROLES = ("combobox", "listbox", "spinbutton", "slider", "searchbox", "textbox")
+
+
+def screen_fingerprint(url, controls, screen, chrome=frozenset()):
+    """Structural fingerprint of a rendered view, or None when there isn't enough to
+    judge (no SCREEN_JS result → never alias; the crawler then behaves exactly as the
+    URL-keyed crawler always did). Built from: the page path, every non-bulk control
+    that is not learned site chrome (role, tag, label, echo-stripped href), the active
+    ARIA markers, headings, the first visible data items and visible form fields.
+    Ignores the query string itself — the point is to recognise one screen reached under
+    several URLs. Anything IN the screen that differs (a different tab selected, other
+    rows, another heading, an extra in-page control) yields a different fingerprint, so
+    screens that look different are never merged; the only things deliberately left out
+    are chrome shared with other pages (`chrome`, see CHROME_MIN_PAGES) and the current
+    value shown by a select-like control (its role still counts)."""
+    if not isinstance(screen, dict):
+        return None
+    ctl = sorted("%s|%s|%s|%s" % (c.get("role") or "", c.get("tag") or "",
+                                  "" if (c.get("role") or "") in VALUE_ROLES
+                                  else (c.get("text") or "")[:60],
+                                  _strip_echo(c.get("href"), url) or "")
+                 for c in controls
+                 if not c.get("bulk") and control_key(c) not in chrome)
+    parts = {"page": _page_key(url), "controls": ctl,
+             "view": sorted(screen.get("view") or []),
+             "heads": list(screen.get("heads") or []),
+             "data": list(screen.get("data") or []),
+             "fields": list(screen.get("fields") or [])}
+    return hashlib.sha1(json.dumps(parts, sort_keys=True, ensure_ascii=False)
+                        .encode("utf-8")).hexdigest()[:20]
+
+
+def query_diff(alias_url, canon_url):
+    """Query params of `alias_url` that are absent from / different in `canon_url` —
+    the params that did NOT change the screen. Reported (meta.dedupe.inertParams) as a
+    diagnostic; deliberately NOT used to pre-canonicalise unvisited URLs, because a
+    param inert on one screen can be meaningful on another (a sub-tab param only
+    matters while its parent tab is showing)."""
+    a = dict(parse_qsl(urlsplit(alias_url).query, keep_blank_values=True))
+    c = dict(parse_qsl(urlsplit(canon_url).query, keep_blank_values=True))
+    return sorted(k for k, v in a.items() if c.get(k) != v)
+
+
+# The guard that makes a recurrence of the sticky-URL explosion VISIBLE: if one page
+# path holds a large share of the recorded states, the crawl is probably spending its
+# budget on URL variants of the same screens that the fingerprint could NOT collapse
+# (e.g. a volatile clock/counter inside the data). Structural thresholds only.
+HOT_PATH_SHARE = 0.5      # ≥50% of all states on one path …
+HOT_PATH_MIN = 40         # … and at least this many of them (a real settings page
+                          # can legitimately hold 20-30 screens; the 2026-09-22
+                          # explosion put 186 of 200 states on one path)
+
+
+def hot_paths(state_urls, alias_counts=None, share=HOT_PATH_SHARE, min_states=HOT_PATH_MIN):
+    """[(page, n_states, n_aliases, is_hot)] sorted by n_states desc. `state_urls` = the
+    recorded states' URLs; `alias_counts` = {page: aliases collapsed on that page}."""
+    alias_counts = alias_counts or {}
+    per = {}
+    for u in state_urls:
+        k = _page_key(u)
+        per[k] = per.get(k, 0) + 1
+    total = max(1, len(state_urls))
+    rows = [(k, n, alias_counts.get(k, 0), n >= min_states and n / total >= share)
+            for k, n in per.items()]
+    for k, n in alias_counts.items():
+        if k not in per:
+            rows.append((k, 0, n, False))
+    rows.sort(key=lambda r: (-r[1], -r[2], r[0]))
+    return rows
 
 
 def shell_blanked(before_url, after_url):
@@ -461,6 +607,25 @@ def main():
                     help="open+read each create form (default on)")
     ap.add_argument("--no-read-forms", dest="read_forms", action="store_false",
                     help="record triggers but skip opening their forms (faster, no form specs)")
+    ap.add_argument("--screen-dedupe", dest="screen_dedupe", action="store_true", default=True,
+                    help="recognise an already-crawled SCREEN reached under a new URL (e.g. "
+                         "sticky query params left over from another tab) by its structural "
+                         "fingerprint, record the URL as an alias and do NOT re-expand, "
+                         "re-capture or re-read its forms (default ON; nav mode only)")
+    ap.add_argument("--no-screen-dedupe", dest="screen_dedupe", action="store_false",
+                    help="key states by URL only (the pre-2026-09-22 behaviour)")
+    ap.add_argument("--chrome-evidence", type=int, default=2,
+                    help="predict a click-only nav control's target without clicking once "
+                         "the SAME control (selector+label) led to the SAME state from this "
+                         "many distinct parent states with no disagreement — persistent "
+                         "chrome such as a tab bar (default 2; 0 = always click)")
+    ap.add_argument("--hot-path-share", type=float, default=HOT_PATH_SHARE,
+                    help="warn when one URL path holds at least this share of all states "
+                         "(and >= %d of them): the budget is probably going to URL variants "
+                         "of the same screens (default %.1f)" % (HOT_PATH_MIN, HOT_PATH_SHARE))
+    ap.add_argument("--hot-path-min", type=int, default=HOT_PATH_MIN,
+                    help="minimum states on one path before the hot-path warning can fire "
+                         "(default %d)" % HOT_PATH_MIN)
     ap.add_argument("--capture-form-states", dest="capture_form_states",
                     action="store_true", default=True,
                     help="ALSO register a state that structurally IS a form (input/select/"
@@ -578,8 +743,14 @@ def main():
             print("  ! materialize failed (%s)" % str(e)[:80], file=sys.stderr)
             return False
 
+    dedupe_on = a.screen_dedupe and not a.single_url    # single-URL is structural already
+
     def read_state():
-        st = pt_json("({href:location.href, controls:%s})" % CONTROLS_JS, a.server)
+        # The screen-fingerprint inputs ride in the SAME eval as the controls (no extra
+        # round-trip). A reader that doesn't return them just disables aliasing.
+        js = ("({href:location.href, controls:%s, screen:%s})" % (CONTROLS_JS, SCREEN_JS)
+              if dedupe_on else "({href:location.href, controls:%s})" % CONTROLS_JS)
+        st = pt_json(js, a.server)
         cur = (st.get("href") or "").strip().strip('"')
         view = None
         if a.single_url:
@@ -587,7 +758,9 @@ def main():
                 view = pt_json(VIEW_JS, a.server)
             except Exception:
                 view = None
+        read_state.screen = st.get("screen") if dedupe_on else None
         return cur, (st.get("controls") or []), view
+    read_state.screen = None
 
     # ---- graph accumulators ----
     states = {}            # sig -> {id, url, label, depth}
@@ -596,6 +769,53 @@ def main():
     forms_by_label = {}    # trigger-label -> (form, opensAt): read each unique form ONCE
     form_state_urls = set()  # norm(url) already registered as a form-bearing trigger (dedup)
     order = [0]
+    # ---- screen dedupe bookkeeping (see SCREEN_JS / screen_fingerprint) ----
+    fp_inputs = {}         # canonical sig -> (url, controls, screen): re-fingerprinted as
+    #                        chrome is learned, so early states benefit from later evidence
+    page_states = {}       # page (scheme://host/path) -> [canonical sigs on that page]
+    chrome_pages = {}      # control_key -> {pages it was seen on}
+    chrome = {"set": frozenset(), "ver": 0}
+    fp_cache = {}          # sig -> (chrome version, fingerprint)
+
+    def learn_chrome(url, controls):
+        page, grew = _page_key(url), False
+        for c in controls:
+            if c.get("bulk"):
+                continue
+            pages = chrome_pages.setdefault(control_key(c), set())
+            if page not in pages:
+                pages.add(page)
+                grew = grew or len(pages) == CHROME_MIN_PAGES
+        if grew:
+            chrome["set"] = frozenset(k for k, p in chrome_pages.items()
+                                      if len(p) >= CHROME_MIN_PAGES)
+            chrome["ver"] += 1
+
+    def fp_of(sig):
+        hit = fp_cache.get(sig)
+        if hit and hit[0] == chrome["ver"]:
+            return hit[1]
+        u, ctl, scr = fp_inputs[sig]
+        f = screen_fingerprint(u, ctl, scr, chrome["set"])
+        fp_cache[sig] = (chrome["ver"], f)
+        return f
+
+    def same_screen_as(url, controls, screen):
+        """The canonical state on the same page that renders this screen, or None."""
+        f = screen_fingerprint(url, controls, screen, chrome["set"])
+        if not f:
+            return None, None
+        for s in page_states.get(_page_key(url), ()):
+            if s in states and fp_of(s) == f:
+                return s, f
+        return None, f
+    aliases = {}           # canonical sig -> [alias urls] (other URLs that render it)
+    alias_sigs = {}        # alias nav_state_key -> canonical sig (feeds state_index)
+    alias_by_page = {}     # page (scheme://host/path) -> aliases collapsed there
+    inert_params = {}      # page -> {param: times it did NOT change the screen}
+    click_outcomes = {}    # (selector, label) of a click-only control -> {targets, parents}
+    dstats = {"aliases": 0, "predicted": 0, "hot_warned": set(),
+              "form_reads": 0, "content_captures": 0}
 
     def register(sig, url, label, depth):
         if sig not in states:
@@ -655,6 +875,7 @@ def main():
                 triggers.append(rec)                         # record the trigger, form=None,
                 continue                                     # don't poison the label cache
             if a.read_forms:
+                dstats["form_reads"] += 1
                 if not a.single_url and need_remat:          # normal mode: re-anchor BEFORE
                     materialize(path)                        # reading 'before' — a prior full-
                     need_remat = False                       # page form left us off-position
@@ -759,6 +980,7 @@ def main():
         form = None
         if a.read_forms:
             try:
+                dstats["form_reads"] += 1
                 form = pt_json(FORM_JS, a.server)            # the form IS the page — no click
             except Exception as e:
                 print("  ! form-state read failed @ %s (%s)" % (nurl, str(e)[:50]),
@@ -863,6 +1085,42 @@ def main():
     # from the signal handler below — so a crash, OOM, 2-min kill or Ctrl-C NEVER loses the
     # crawl (the exact failure mode that lost a 50-state run before). ----
     path_out = os.path.abspath("%s.json" % a.out)
+
+    def hot_rows():
+        return hot_paths([st["url"] for st in states.values()], alias_by_page,
+                         share=a.hot_path_share, min_states=a.hot_path_min)
+
+    def hot_warnings():
+        return ["%d of %d states (%d%%) are on %s — likely URL variants of the same "
+                "screens that the screen fingerprint could not collapse (volatile content "
+                "inside the view?). Check meta.dedupe and the state URLs on that path."
+                % (n, len(states), round(100.0 * n / max(1, len(states))), page)
+                for page, n, _, hot in hot_rows() if hot]
+
+    def dedupe_meta():
+        # What the dedupe skipped, and where — so a sticky-URL explosion is visible in
+        # the output itself, not only in a 40-minute log.
+        return {"enabled": bool(dedupe_on), "screenAliases": dstats["aliases"],
+                "predictedEdges": dstats["predicted"],
+                "formReads": dstats["form_reads"],
+                "contentCaptures": dstats["content_captures"],
+                "aliasesPerState": {states[c]["id"]: len(v) for c, v in aliases.items()
+                                    if c in states},
+                "hotPaths": [{"page": p, "states": n, "aliases": al, "hot": hot}
+                             for p, n, al, hot in hot_rows()[:10]],
+                "inertParams": inert_params,
+                "warnings": hot_warnings()}
+
+    def warn_hot(final=False):
+        # Loud, once per page (and again in the final summary): the recurrence guard.
+        for page, n, al, hot in hot_rows():
+            if hot and (final or page not in dstats["hot_warned"]):
+                dstats["hot_warned"].add(page)
+                print("  ⚠ HOT PATH: %d of %d states (%d%%) are on %s (%d more URLs already "
+                      "collapsed as aliases) — the state budget is concentrating on one "
+                      "screen family; see meta.dedupe.warnings"
+                      % (n, len(states), round(100.0 * n / max(1, len(states))), page, al),
+                      file=sys.stderr, flush=True)
     persist_flags = {"final_done": False}
 
     def persist(final=False, reason="in-progress"):
@@ -870,12 +1128,19 @@ def main():
             "meta": {"start": start_url, "host": urlparse(start_url).hostname,
                      "states": len(states), "edges": len(edges), "triggers": len(triggers),
                      "max_depth": a.max_depth, "tool": "interaction_crawl.py",
-                     "complete": bool(final), "stopped": reason},
+                     "complete": bool(final), "stopped": reason,
+                     "dedupe": dedupe_meta()},
             "states": list(states.values()),
-            "state_index": {sig: st["id"] for sig, st in states.items()},
-            "edges": [{"from": states[e["from"]]["id"] if e["from"] in states else None,
-                       "to": states[e["to"]]["id"] if e["to"] in states else None,
-                       "label": e["label"], "selector": e["selector"], "kind": e["kind"]}
+            # alias URLs resolve to their canonical state's id (additive: every original
+            # sig -> id entry is still there, the aliases are extra keys)
+            "state_index": dict({s: states[c]["id"] for s, c in alias_sigs.items()
+                                 if c in states},
+                                **{sig: st["id"] for sig, st in states.items()}),
+            "edges": [dict({"from": states[e["from"]]["id"] if e["from"] in states else None,
+                            "to": states[e["to"]]["id"] if e["to"] in states else None,
+                            "label": e["label"], "selector": e["selector"], "kind": e["kind"]},
+                           # additive flag: target inferred from persistent-chrome evidence
+                           **({"predicted": True} if e.get("predicted") else {}))
                       for e in edges if e["from"] in states],
             "triggers": [serialize_trigger(
                 t, states[t["state"]]["id"] if t["state"] in states else None)
@@ -939,6 +1204,23 @@ def main():
             path, psig, pact = retry_queue.popleft()
         else:
             _, _, _, (path, psig, pact) = heapq.heappop(queue)
+        # PERSISTENT-CHROME PREDICTION (checked at POP time, when the most evidence is in):
+        # a click-only nav control that — from `--chrome-evidence` distinct parents — always
+        # led to the same state is shared chrome (a tab bar, a sidebar button). Record the
+        # edge without clicking it again. Any disagreement ever observed disables this for
+        # that control, so context-dependent buttons keep being clicked.
+        if (dedupe_on and a.chrome_evidence > 0 and pact is not None and psig is not None
+                and not pact.get("href")):
+            rec = click_outcomes.get((pact.get("selector"), (pact.get("label") or "").lower()))
+            if (rec and len(rec["targets"]) == 1 and psig not in rec["parents"]
+                    and len(rec["parents"]) >= a.chrome_evidence):
+                tgt = next(iter(rec["targets"]))
+                if tgt in states:
+                    edges.append({"from": psig, "to": tgt, "label": pact["label"],
+                                  "selector": pact["selector"], "kind": pact["kind"],
+                                  "predicted": True})
+                    dstats["predicted"] += 1
+                    continue
         # Process this state's browser I/O (materialize + DOM read) under one guard:
         # a wedged bridge often passes materialize() (nav/settle swallow errors) and
         # only surfaces at read_state(), so BOTH must route to the same recovery.
@@ -971,15 +1253,51 @@ def main():
         # below, killing over-noding); structural signature + ARIA view ONLY for
         # single-URL app-shells (Teams etc.) where the URL never changes.
         sig = state_sig(cur, controls, view) if a.single_url else nav_state_key(cur)
+        # SCREEN DEDUPE: a URL we haven't seen, rendering a screen we HAVE seen on the same
+        # path (sticky query params, echoed state, default-tab URLs) resolves to the
+        # canonical state. Nothing about it is re-crawled.
+        fp = None
+        is_alias = False
+        if dedupe_on:
+            learn_chrome(cur, controls)
+            if sig in alias_sigs:
+                sig, is_alias = alias_sigs[sig], True
+            elif sig not in states:
+                canon, fp = same_screen_as(cur, controls, read_state.screen)
+                if canon is not None:
+                    alias_sigs[sig] = canon
+                    url_to_sig[norm(cur)] = canon
+                    aliases.setdefault(canon, []).append(norm(cur))
+                    page = _page_key(cur)
+                    alias_by_page[page] = alias_by_page.get(page, 0) + 1
+                    ip = inert_params.setdefault(page, {})
+                    for k in query_diff(norm(cur), norm(states[canon]["url"])):
+                        ip[k] = ip.get(k, 0) + 1
+                    dstats["aliases"] += 1
+                    node = states[canon]
+                    if len(node.setdefault("aliases", [])) < 50:  # additive, capped field
+                        node["aliases"].append(norm(cur))
+                    print("  ≡ alias %s → %s (%s) — same screen, not re-crawled"
+                          % (cur, node["id"], node["url"]), file=sys.stderr)
+                    sig, is_alias = canon, True
 
         # record the edge that brought us here (even to an already-known state)
         if psig is not None and pact is not None:
             edges.append({"from": psig, "to": sig, "label": pact["label"],
                           "selector": pact["selector"], "kind": pact["kind"]})
+            if dedupe_on and not pact.get("href"):   # evidence for chrome prediction
+                rec = click_outcomes.setdefault(
+                    (pact.get("selector"), (pact.get("label") or "").lower()),
+                    {"targets": set(), "parents": set()})
+                rec["targets"].add(sig)
+                rec["parents"].add(psig)
 
-        if sig in states:
+        if sig in states or is_alias:
             continue                            # already expanded this state
         node = register(sig, cur, label_for(cur, path), len(path))
+        if fp:                                  # a fingerprintable screen: future URLs on
+            fp_inputs[sig] = (cur, controls, read_state.screen)   # this page compare to it
+            page_states.setdefault(_page_key(cur), []).append(sig)
         if a.dump_controls:                     # full per-state control inventory (generic)
             node["controls"] = [{"text": c.get("text"), "role": c.get("role"),
                                  "tag": c.get("tag"), "href": c.get("href"),
@@ -987,6 +1305,7 @@ def main():
                                 for c in controls]
         if a.capture_content:                   # data collections (tables/grids/trees/lists)
             try:
+                dstats["content_captures"] += 1
                 node["collections"] = capture_collections(a.server)
             except Exception as e:              # a wedge here must not kill the crawl: keep
                 node["collections"] = []        # the nav/controls we already have and move on
@@ -1004,6 +1323,7 @@ def main():
 
         if a.checkpoint_every > 0 and len(states) % a.checkpoint_every == 0:
             persist()                           # incremental flush — never lose progress
+            warn_hot()                          # recurrence guard (once per hot page)
 
         if len(path) >= a.max_depth:
             continue
@@ -1072,6 +1392,15 @@ def main():
             % (reason, len(queue) + len(retry_queue)))
     print("\nWrote %s: %d states, %d edges, %d triggers  [stopped: %s]%s"
           % (path_out, len(states), nedges, len(triggers), reason, note), file=sys.stderr)
+    if dedupe_on:
+        per = sorted(((states[c]["url"], len(v)) for c, v in aliases.items() if c in states),
+                     key=lambda r: -r[1])
+        print("Screen dedupe: %d URL aliases collapsed into %d states, %d chrome edges "
+              "predicted without clicking; %d form reads, %d content captures%s"
+              % (dstats["aliases"], len(per), dstats["predicted"], dstats["form_reads"],
+                 dstats["content_captures"],
+                 ("  (most: %s ×%d)" % per[0]) if per else ""), file=sys.stderr)
+        warn_hot(final=True)
 
     if gave_up:                                            # gave up mid-crawl after a wedge:
         sys.exit(1)                                        # output written, but signal incomplete

@@ -376,9 +376,18 @@ def pt_json(js, server):
 # settle tunables — overridable from the CLI (see main()). Defaults tuned for
 # this realtime SPA: with images/media blocked, the DOM stabilizes in <0.5s, so
 # a tight poll + short trailing delay beats the old 0.4s/0.3s cadence by ~2x.
-RENDER_MS = 3000      # hard cap on the render-stability poll
+RENDER_MS = 15000     # hard cap on the render-stability poll (only a page that never
+                      # settles pays it — a settled page returns as soon as it is stable)
 SETTLE_POLL = 0.1     # interval between control-count reads
 SETTLE_DELAY = 0.1    # trailing settle after the count is stable
+SETTLE_STABLE_MS = 1500  # how long the render signature must hold still to count as settled.
+                      # SPAs render in steps — shell, then a widget, then the page, then its
+                      # data — and a step can sit still for a few hundred ms (measured on a
+                      # real app: 36 controls at 0.75s, 49 at 1.0s; 61 → 652 → 698 over 3s).
+                      # Two equal reads 100ms apart (the old rule) stopped on the first
+                      # plateau, so states were read — and clicked, by positional selector —
+                      # on a half-drawn page. That recorded a link as "stays here" and cost
+                      # every screen behind it.
 NETIDLE_MS = 0        # networkidle wait: 0 = skip it (this realtime app never idles,
                       # so it just burns ~0.7s/state; the render-poll handles readiness)
 
@@ -393,18 +402,31 @@ NETIDLE_MS = 0        # networkidle wait: 0 = skip it (this realtime app never i
 # role=tab/menuitem, else tab-heavy pages read 0 controls and the poll stalls to
 # its deadline.
 _SETTLE_JS = r"""
-(async (renderMs, pollMs, delayMs) => {
+(async (renderMs, pollMs, delayMs, stableMs) => {
   const sel = 'a[href],button,[role=button],[role=tab],[role=menuitem],summary';
-  const deadline = Date.now() + renderMs; let last = -1;
+  // Two kinds of loading indicator. PENDING content (aria-busy, skeleton placeholders)
+  // means the real page is still on its way: never settled while one is showing (the
+  // cap still bounds it). ACTIVITY (spinners, progress bars) is part of the signature
+  // only — an icon that spins forever is common and must not stall every read, but a
+  // spinner appearing or going away is still the page changing.
+  const pending = '[aria-busy="true"],[class*="skeleton" i]';
+  const activity = '[role="progressbar"],.animate-spin,[class*="spinner" i]';
+  const shown = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const count = (q) => [...document.querySelectorAll(q)].filter(shown).length;
+  const deadline = Date.now() + renderMs;
+  let last = -1, lastSig = '', since = Date.now();
   while (Date.now() < deadline) {
     const c = document.querySelectorAll(sel).length;
-    if (c > 3 && c === last) break;
+    const p = count(pending);
+    const sig = c + '|' + p + '|' + count(activity);
+    if (sig !== lastSig) { lastSig = sig; since = Date.now(); }
+    else if (c > 0 && p === 0 && Date.now() - since >= stableMs) { last = c; break; }
     last = c;
     await new Promise(r => setTimeout(r, pollMs));
   }
   if (delayMs > 0) await new Promise(r => setTimeout(r, delayMs));
   return last;
-})(%d, %d, %d)
+})(%d, %d, %d, %d)
 """
 
 
@@ -416,7 +438,8 @@ def settle(server, render_ms=None, delay=None):
            server, timeout=max(3, NETIDLE_MS / 1000.0 + 2))
     # ONE round-trip: the stability poll runs IN-PAGE (see _SETTLE_JS), so a settle is
     # a single `eval --await-promise` instead of N `eval` subprocesses + Python sleeps.
-    js = _SETTLE_JS % (render_ms, int(SETTLE_POLL * 1000), int(delay * 1000))
+    js = _SETTLE_JS % (render_ms, int(SETTLE_POLL * 1000), int(delay * 1000),
+                       int(SETTLE_STABLE_MS))
     try:
         pt(["eval", "--await-promise", js], server,
            timeout=max(5, render_ms / 1000.0 + 3))
@@ -488,7 +511,7 @@ def find_trigger_pages(graph, needle_re):
 
 
 def main():
-    global RENDER_MS, SETTLE_POLL, SETTLE_DELAY
+    global RENDER_MS, SETTLE_POLL, SETTLE_DELAY, SETTLE_STABLE_MS
     ap = argparse.ArgumentParser(description="Generate a how-to for an action in a web app")
     ap.add_argument("--goal", required=True, help='what to do, e.g. "add cae" / "create team"')
     ap.add_argument("--page", help="page URL that has the trigger button (skip auto-locate)")
@@ -523,6 +546,9 @@ def main():
                     help="interval between control-count reads while settling (default %.2f)" % SETTLE_POLL)
     ap.add_argument("--settle-delay", type=float, default=SETTLE_DELAY,
                     help="trailing settle delay after the DOM is stable (default %.2f)" % SETTLE_DELAY)
+    ap.add_argument("--settle-stable-ms", type=int, default=SETTLE_STABLE_MS,
+                    help="how long the render signature must hold still to count as "
+                         "settled (default %d)" % SETTLE_STABLE_MS)
     ap.add_argument("--screenshot", action="store_true",
                     help="also save a PNG of the opened form (off by default for speed)")
     ap.add_argument("--out", default="out/recipe")
@@ -531,6 +557,7 @@ def main():
 
     # apply settle tunables globally (settle() reads these module-level knobs)
     RENDER_MS, SETTLE_POLL, SETTLE_DELAY = a.render_ms, a.settle_poll, a.settle_delay
+    SETTLE_STABLE_MS = a.settle_stable_ms
 
     # auth token for the isolated instance
     try:

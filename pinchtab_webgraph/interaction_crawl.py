@@ -653,10 +653,12 @@ def main():
     ap.add_argument("--render-ms", type=int, default=recipe.RENDER_MS)
     ap.add_argument("--settle-poll", type=float, default=recipe.SETTLE_POLL)
     ap.add_argument("--settle-delay", type=float, default=recipe.SETTLE_DELAY)
+    ap.add_argument("--settle-stable-ms", type=int, default=recipe.SETTLE_STABLE_MS)
     a = ap.parse_args()
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
 
     recipe.RENDER_MS, recipe.SETTLE_POLL, recipe.SETTLE_DELAY = a.render_ms, a.settle_poll, a.settle_delay
+    recipe.SETTLE_STABLE_MS = a.settle_stable_ms
     try:
         os.environ.setdefault("PINCHTAB_TOKEN", json.load(open(a.config))["server"]["token"])
     except Exception:

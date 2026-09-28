@@ -1104,6 +1104,7 @@ def main():
         # the output itself, not only in a 40-minute log.
         return {"enabled": bool(dedupe_on), "screenAliases": dstats["aliases"],
                 "predictedEdges": dstats["predicted"],
+                "predictedStays": dstats.get("predicted_stay", 0),
                 "formReads": dstats["form_reads"],
                 "contentCaptures": dstats["content_captures"],
                 "aliasesPerState": {states[c]["id"]: len(v) for c, v in aliases.items()
@@ -1223,6 +1224,20 @@ def main():
                                   "predicted": True})
                     dstats["predicted"] += 1
                     continue
+            # A control that, from every parent it was clicked on, LEFT US WHERE WE
+            # WERE (a header menu, a sidebar toggle, "report a bug": popovers that do
+            # not change the screen's identity) is chrome too -- but its "target" is a
+            # different state per parent, so the single-target rule above never fires
+            # and it was clicked from every screen (measured: ~half of all visits on a
+            # dashboard app, every one a self-loop that taught the graph nothing).
+            if (rec and not rec["moved"] and psig not in rec["parents"]
+                    and len(rec["parents"]) >= a.chrome_evidence and psig in states):
+                edges.append({"from": psig, "to": psig, "label": pact["label"],
+                              "selector": pact["selector"], "kind": pact["kind"],
+                              "predicted": True})
+                dstats["predicted"] += 1
+                dstats["predicted_stay"] = dstats.get("predicted_stay", 0) + 1
+                continue
         # Process this state's browser I/O (materialize + DOM read) under one guard:
         # a wedged bridge often passes materialize() (nav/settle swallow errors) and
         # only surfaces at read_state(), so BOTH must route to the same recovery.
@@ -1290,9 +1305,11 @@ def main():
             if dedupe_on and not pact.get("href"):   # evidence for chrome prediction
                 rec = click_outcomes.setdefault(
                     (pact.get("selector"), (pact.get("label") or "").lower()),
-                    {"targets": set(), "parents": set()})
+                    {"targets": set(), "parents": set(), "moved": False})
                 rec["targets"].add(sig)
                 rec["parents"].add(psig)
+                if sig != psig:
+                    rec["moved"] = True          # it went somewhere once: never assume it stays
 
         if sig in states or is_alias:
             continue                            # already expanded this state

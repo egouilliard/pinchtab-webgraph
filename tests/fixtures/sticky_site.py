@@ -44,13 +44,16 @@ FORM = {"title": "New item", "isDialog": True,
 
 class StickySite:
     def __init__(self, n_tabs=8, n_sub=3, n_mode=3, n_pages=3, volatile=False,
-                 screen_info=True, chrome_jitter=False):
+                 screen_info=True, chrome_jitter=False, header_menu=False):
         self.n_tabs, self.n_sub, self.n_mode, self.n_pages = n_tabs, n_sub, n_mode, n_pages
         self.volatile = volatile          # a ticking clock inside the view's data
         self.screen_info = screen_info    # False = a reader that returns no `screen`
         # render-timing jitter seen on a real app: a sidebar entry that is only there on
         # some reads, and a select whose shown VALUE is sometimes still "Loading…"
         self.chrome_jitter = chrome_jitter
+        # an account menu in the header: click-only, opens a popover, never changes
+        # the URL -- the control that used to be re-clicked from every screen
+        self.header_menu = header_menu
         self.reads = 0
         self.url = BASE + "/home"
         self.modal = False
@@ -80,6 +83,8 @@ class StickySite:
                   _ctl("nav>a:nth-of-type(4)", "Other", tag="a", href=BASE + "/other")]
         p = self._path()
         out = list(chrome)
+        if self.header_menu:
+            out.append(_ctl("header>button", "Account menu", role="button"))
         if self.chrome_jitter:
             self.reads += 1
             if self.reads % 3:
@@ -149,6 +154,8 @@ class StickySite:
         elif sel.startswith("#add"):
             self.modal = True
             self.forms_opened.append((self.url, sel))
+        elif sel == "header>button":
+            pass                                  # a popover opens; the screen is the same
         elif sel == "#next":
             self.url = next(c["href"] for c in self.controls() if c["selector"] == sel)
         else:

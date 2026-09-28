@@ -271,3 +271,21 @@ def test_trigger_paths_replay_on_the_fixture(monkeypatch, tmp_path):
             else:
                 assert probe.click(hop["selector"]), (t["label"], hop)
         assert any(c["selector"] == t["selector"] for c in probe.controls()), t["label"]
+
+
+def test_a_control_that_always_stays_put_is_predicted_not_reclicked(monkeypatch, tmp_path):
+    """A header menu is clicked from every screen and never goes anywhere (a popover).
+    Its "target" is a different state per parent, so single-target chrome prediction
+    never fired; on a real dashboard app that was about half of all visits."""
+    base = StickySite(header_menu=True)
+    g0 = run_crawl(monkeypatch, tmp_path, base, *ARGS, "--chrome-evidence", "0")
+    tmp2 = tmp_path / "pred"
+    tmp2.mkdir()
+    site = StickySite(header_menu=True)
+    g1 = run_crawl(monkeypatch, tmp2, site, *ARGS)
+    assert g1["meta"]["dedupe"]["predictedStays"] > 0
+    assert site.calls.get("click", 0) < base.calls.get("click", 0)
+    assert sorted(s["url"] for s in g1["states"]) == sorted(s["url"] for s in g0["states"])
+    stays = [e for e in g1["edges"] if e.get("predicted") and e["label"] == "Account menu"]
+    assert stays and all(e["from"] == e["to"] for e in stays)
+

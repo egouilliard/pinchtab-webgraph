@@ -354,8 +354,35 @@ def active_tab(server, url=None):
         return None
 
 
+def live_tabs(server):
+    """Ids of the bridge's live page tabs, or None when it can't tell."""
+    try:
+        rc, out, _ = pt(["tab", "--json"], server, timeout=15)
+        if rc != 0:
+            return None
+        tabs = json.loads(out)
+        if isinstance(tabs, dict):
+            tabs = tabs.get("tabs", [])
+        return {t["id"] for t in tabs if t.get("type") == "page" and t.get("id")}
+    except Exception:
+        return None
+
+
 def pin_tab(server, url=None):
-    """Point $PINCHTAB_TAB at a live tab so subsequent pt()/eval calls hit it (0.10.0)."""
+    """Point $PINCHTAB_TAB at a live tab so subsequent pt()/eval calls hit it (0.10.0).
+
+    A tab that is already pinned and still open WINS. Matching by URL is only for
+    recovering from a stale id: re-pinning a live tab by URL jumps to whichever other
+    tab happens to sit on that address whenever the page redirected -- and tab-scoped
+    state goes with it. (Measured: a caller that signed in and set sessionStorage in
+    its own tab, then got redirected from the start URL, was silently crawled in a
+    leftover tab still on the start URL, as somebody else.)
+    """
+    pinned = os.environ.get("PINCHTAB_TAB")
+    if pinned:
+        live = live_tabs(server)
+        if live is not None and pinned in live:
+            return pinned
     tid = active_tab(server, url)
     if tid:
         os.environ["PINCHTAB_TAB"] = tid

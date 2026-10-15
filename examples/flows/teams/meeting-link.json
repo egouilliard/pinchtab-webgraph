@@ -1,0 +1,22 @@
+{
+  "name": "teams-meeting-link",
+  "host": "teams.cloud.microsoft",
+  "inputs": {
+    "subject": {"type": "string", "required": true, "description": "the meeting title, exactly as saved"},
+    "day": {"type": "string", "required": true, "description": "the meeting day as the calendar's date picker labels it, e.g. 'October 16, 2026' (must be in the month the picker opens on)"}
+  },
+  "capabilities": {"allow_submit": false, "allow_download": false},
+  "steps": [
+    {"op": "goto", "url": "https://teams.cloud.microsoft/", "new_tab": true},
+    {"op": "wait", "selector": "#ef56c0de-36fc-4ef8-b417-3d82ba9d073c", "timeout_ms": 60000},
+    {"op": "click", "selector": "#ef56c0de-36fc-4ef8-b417-3d82ba9d073c", "js": true},
+    {"op": "wait", "selector": "[aria-label*='Jump to a specific date']", "timeout_ms": 30000},
+    {"op": "click", "selector": "[aria-label*='Jump to a specific date']"},
+    {"op": "wait", "selector": "[aria-label='${day}']", "timeout_ms": 10000},
+    {"op": "click", "selector": "[aria-label='${day}']"},
+    {"op": "wait", "selector": "[role=group][aria-label^='${subject},']", "timeout_ms": 20000},
+    {"op": "click", "selector": "[role=group][aria-label^='${subject},']"},
+    {"op": "wait", "selector": "[data-tid=peek-body-container]", "timeout_ms": 10000},
+    {"op": "extract", "into": "join_url", "selector": "[data-tid=peek-body-container] button", "pattern": "^https://teams\\.microsoft\\.com/meet/"}
+  ]
+}

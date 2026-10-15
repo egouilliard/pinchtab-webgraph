@@ -275,6 +275,27 @@ def test_list_runs_summaries_omit_heavy_payloads(isolated_cache_home):
     assert flow_store.load_run(HOST, fid, rid)["steps"]
 
 
+def test_outputs_are_persisted_on_the_run_record_but_not_in_the_summary(isolated_cache_home):
+    # `extract` results are the run's ANSWER — they must survive the round trip to disk, and
+    # (like collected) stay out of the cheap list view.
+    rec = flow_store.create(HOST, _doc())
+    fid, rid = rec["id"], flow_store.new_run_id()
+    started = flow_store.start_run(HOST, fid, rid, dry_run=False, capabilities={}, inputs={})
+    assert started["outputs"] == {}
+    flow_store.finish_run(HOST, fid, rid, {"status": "ok", "steps": [], "stats": {},
+                                           "outputs": {"title": "Q3", "ids": ["a", "b"]}})
+    assert flow_store.load_run(HOST, fid, rid)["outputs"] == {"title": "Q3", "ids": ["a", "b"]}
+    assert "outputs" not in flow_store.list_runs(HOST, fid)[0]
+
+
+def test_a_run_with_no_outputs_key_persists_an_empty_map(isolated_cache_home):
+    rec = flow_store.create(HOST, _doc())
+    fid, rid = rec["id"], flow_store.new_run_id()
+    flow_store.start_run(HOST, fid, rid, dry_run=False, capabilities={}, inputs={})
+    flow_store.finish_run(HOST, fid, rid, {"status": "ok", "steps": [], "stats": {}})
+    assert flow_store.load_run(HOST, fid, rid)["outputs"] == {}
+
+
 def test_load_run_absent_is_none(isolated_cache_home):
     rec = flow_store.create(HOST, _doc())
     assert flow_store.load_run(HOST, rec["id"], flow_store.new_run_id()) is None

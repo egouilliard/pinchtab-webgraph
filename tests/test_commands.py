@@ -233,3 +233,42 @@ def test_checkbox_step_needs_input_but_has_no_value_index():
 ])
 def test_is_truthy_reads_a_checkbox_value_as_a_boolean(value, expect):
     assert cm.is_truthy(value) is expect
+
+
+# --- cli_argv: the terminator-safe argv every executor runs ------------------------
+
+@pytest.mark.parametrize("argv, want", [
+    (["nav", "https://x/"], ["nav", "--", "https://x/"]),
+    (["nav", "https://x/", "--new-tab", "--print-tab-id"],
+     ["nav", "--new-tab", "--print-tab-id", "--", "https://x/"]),
+    (["click", "--css", "#c", "--wait-nav"], ["click", "--css=#c", "--wait-nav"]),
+    (["fill", "#f", "--tab=OTHER"], ["fill", "--", "#f", "--tab=OTHER"]),
+    (["select", "#s", "-1"], ["select", "--", "#s", "-1"]),
+    (["check", "#k"], ["check", "--", "#k"]),
+    (["upload", "/f.pdf", "-s", "#u"], ["upload", "-s=#u", "--", "/f.pdf"]),
+    (["download", "https://x/f", "-o", "f"], ["download", "-o=f", "--", "https://x/f"]),
+    (["keyboard", "type", "--help"], ["keyboard", "type", "--", "--help"]),
+    (["press", "-"], ["press", "--", "-"]),
+    (["tab", "--json"], ["tab", "--json"]),                 # takes no caller value: unchanged
+    (["eval", "JSON.stringify(1)"], ["eval", "JSON.stringify(1)"]),
+])
+def test_cli_argv_makes_every_value_positional(argv, want):
+    assert cm.cli_argv(argv) == want
+
+
+def test_cli_argv_keeps_a_flag_looking_selector_a_value():
+    assert cm.cli_argv(["click", "--css", "--wait-nav", "--wait-nav"]) == \
+        ["click", "--css=--wait-nav", "--wait-nav"]
+
+
+def test_rendered_values_are_always_quoted_even_when_they_start_with_a_dash():
+    # a value left bare would paste into a shell as-is (`-x; rm -rf ~`)
+    line = cm.render_step(cm._cmd(["fill", "#f", "-x; rm -rf ~"]))
+    assert line == "pinchtab fill -- '#f' '-x; rm -rf ~'"
+
+
+def test_a_rendered_glued_flag_quotes_its_value():
+    line = cm.render_step(cm._cmd(["click", "--css", "div > a", "--wait-nav"]))
+    assert line == "pinchtab click --css 'div > a' --wait-nav"      # ordinary values: unchanged form
+    line = cm.render_step(cm._cmd(["click", "--css", "div > a", "--wait-nav", "-v"]))
+    assert line == "pinchtab click --css='div > a' --wait-nav -- '-v'"

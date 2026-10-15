@@ -156,6 +156,206 @@ def test_declared_submit_is_accepted():
                         steps=[{"op": "do", "goal": "create team", "submit": True}]))
 
 
+# --- goto query (deep links) ---------------------------------------------------
+
+def test_goto_query_with_url_is_accepted():
+    flow.validate(_flow(steps=[{"op": "goto", "url": "https://x.test/l",
+                                "query": {"q": "hello world", "n": 3, "ok": True}}]))
+
+
+@pytest.mark.parametrize("step, needle", [
+    ({"op": "goto", "goal": "invoices", "query": {"q": "x"}}, "only together with `url`"),
+    ({"op": "goto", "match": "Invoices", "query": {"q": "x"}}, "only together with `url`"),
+    ({"op": "goto", "url": "https://x.test/", "query": "q=x"}, "an object"),
+    ({"op": "goto", "url": "https://x.test/", "query": ["q"]}, "an object"),
+    ({"op": "goto", "url": "https://x.test/", "query": {"q": {"a": 1}}}, "string, number"),
+    ({"op": "goto", "url": "https://x.test/", "query": {"q": None}}, "string, number"),
+    ({"op": "goto", "url": "https://x.test/", "query": {"": "x"}}, "empty name"),
+])
+def test_goto_query_rejections(step, needle):
+    with pytest.raises(flow.FlowError, match=needle):
+        flow.validate(_flow(steps=[step]))
+
+
+def test_goto_query_values_are_checked_as_variable_references():
+    # the values are substituted at run time, so an unknown ${ref} must fail HERE.
+    with pytest.raises(flow.FlowError, match=r"\$\{nope\}"):
+        flow.validate(_flow(steps=[{"op": "goto", "url": "https://x.test/",
+                                    "query": {"q": "${nope}"}}]))
+    flow.validate(_flow(inputs={"subject": {"type": "string"}},
+                        steps=[{"op": "goto", "url": "https://x.test/",
+                                "query": {"q": "${subject}"}}]))
+
+
+def test_with_query_percent_encodes_spaces_amp_and_unicode():
+    url = flow.with_query("https://x.test/l", {"subject": "Q3 review & plan", "who": "Zoë/Ana"})
+    assert url == "https://x.test/l?subject=Q3%20review%20%26%20plan&who=Zo%C3%AB%2FAna"
+    assert "+" not in url                         # %20, never the form-encoding `+`
+
+
+def test_with_query_appends_with_an_ampersand_when_the_url_already_has_a_query():
+    assert flow.with_query("https://x.test/l?a=1", {"b": "2"}) == "https://x.test/l?a=1&b=2"
+    assert flow.with_query("https://x.test/l?", {"b": "2"}) == "https://x.test/l?b=2"
+
+
+def test_with_query_goes_before_the_fragment():
+    assert flow.with_query("https://x.test/l#top", {"b": "2"}) == "https://x.test/l?b=2#top"
+    assert flow.with_query("https://x.test/l?a=1#top", {"b": "2"}) == "https://x.test/l?a=1&b=2#top"
+
+
+def test_with_query_stringifies_scalars_and_keeps_param_order():
+    url = flow.with_query("https://x.test/", {"z": 1, "a": 1.5, "t": True, "f": False})
+    assert url == "https://x.test/?z=1&a=1.5&t=true&f=false"
+
+
+def test_with_query_with_no_params_returns_the_url_unchanged():
+    assert flow.with_query("https://x.test/l#h", {}) == "https://x.test/l#h"
+
+
+@pytest.mark.parametrize("value, needle", [(None, "has no value"), ([1], "string, number"),
+                                           ({"a": 1}, "string, number")])
+def test_with_query_refuses_a_value_that_resolved_to_a_non_scalar(value, needle):
+    with pytest.raises(flow.FlowError, match=needle):
+        flow.with_query("https://x.test/", {"q": value})
+
+
+# --- press ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("key", ["Enter", "Escape", "Backspace", "ArrowDown", "Tab"])
+def test_press_accepts_a_single_key_name(key):
+    flow.validate(_flow(steps=[{"op": "press", "key": key}]))
+    flow.validate(_flow(steps=[{"op": "press", "key": key, "selector": "#box"}]))
+
+
+@pytest.mark.parametrize("key", ["Control+a", "Shift+Tab", "Meta+Enter", "+"])
+def test_press_rejects_a_key_combination_with_a_clear_message(key):
+    with pytest.raises(flow.FlowError) as exc:
+        flow.validate(_flow(steps=[{"op": "press", "key": key}]))
+    assert "ONE key name" in str(exc.value) and repr(key) in str(exc.value)
+    assert "contains '+'" in str(exc.value)
+    assert exc.value.path == "steps[0]"
+
+
+def test_press_requires_a_key_and_a_non_empty_one():
+    with pytest.raises(flow.FlowError, match="requires 'key'"):
+        flow.validate(_flow(steps=[{"op": "press"}]))
+    for bad in ("", "  ", 7):
+        with pytest.raises(flow.FlowError, match="non-empty key name"):
+            flow.validate(_flow(steps=[{"op": "press", "key": bad}]))
+
+
+def test_press_with_a_variable_key_is_checked_at_run_time_not_here():
+    flow.validate(_flow(inputs={"k": {"type": "string"}},
+                        steps=[{"op": "press", "key": "${k}"}]))
+
+
+def test_press_selector_must_be_a_non_empty_string():
+    with pytest.raises(flow.FlowError, match="`selector` to be a non-empty string"):
+        flow.validate(_flow(steps=[{"op": "press", "key": "Enter", "selector": ""}]))
+
+
+# --- type ----------------------------------------------------------------------
+
+def test_type_needs_a_target_and_a_value():
+    flow.validate(_flow(steps=[{"op": "type", "selector": "#to", "value": "ana"}]))
+    flow.validate(_flow(steps=[{"op": "type", "label": "To", "value": "ana"}]))
+    with pytest.raises(flow.FlowError, match="requires 'value'"):
+        flow.validate(_flow(steps=[{"op": "type", "selector": "#to"}]))
+    with pytest.raises(flow.FlowError, match="requires one of: selector, label"):
+        flow.validate(_flow(steps=[{"op": "type", "value": "ana"}]))
+
+
+# --- extract ---------------------------------------------------------------------
+
+def test_extract_needs_into_and_selector():
+    flow.validate(_flow(steps=[{"op": "extract", "into": "title", "selector": "h1"}]))
+    with pytest.raises(flow.FlowError, match="requires 'into'"):
+        flow.validate(_flow(steps=[{"op": "extract", "selector": "h1"}]))
+    with pytest.raises(flow.FlowError, match="requires 'selector'"):
+        flow.validate(_flow(steps=[{"op": "extract", "into": "title"}]))
+
+
+def test_extract_into_is_a_defined_variable_for_later_steps():
+    flow.validate(_flow(steps=[{"op": "extract", "into": "link", "selector": "a",
+                                "attr": "href"},
+                               {"op": "goto", "url": "${link}"},
+                               {"op": "log", "message": "at ${link}"}]))
+    # …and only AFTER the extract, like set/collect.
+    with pytest.raises(flow.FlowError, match=r"\$\{link\}"):
+        flow.validate(_flow(steps=[{"op": "log", "message": "${link}"},
+                                   {"op": "extract", "into": "link", "selector": "a"}]))
+
+
+def test_extract_into_inside_a_body_does_not_leak_out_of_it():
+    with pytest.raises(flow.FlowError, match=r"\$\{row\}"):
+        flow.validate(_flow(steps=[
+            {"op": "for_each", "match": {}, "body": [
+                {"op": "extract", "into": "row", "selector": "td"}]},
+            {"op": "log", "message": "${row}"}]))
+
+
+@pytest.mark.parametrize("step, needle", [
+    ({"op": "extract", "into": "a b", "selector": "h1"}, "variable name"),
+    ({"op": "extract", "into": "a.b", "selector": "h1"}, "variable name"),
+    ({"op": "extract", "into": "1a", "selector": "h1"}, "variable name"),
+    ({"op": "extract", "into": "run", "selector": "h1"}, "reserved"),
+    ({"op": "extract", "into": "t", "selector": ""}, "`selector` to be a non-empty string"),
+    ({"op": "extract", "into": "t", "selector": "h1", "attr": ""}, "`attr`"),
+    ({"op": "extract", "into": "t", "selector": "h1", "pattern": 5}, "`pattern`"),
+    ({"op": "extract", "into": "t", "selector": "h1", "all": "yes"}, "`all` to be true or false"),
+    ({"op": "extract", "into": "t", "selector": "h1", "required": "false"},
+     "`required` to be true or false"),
+])
+def test_extract_rejections(step, needle):
+    with pytest.raises(flow.FlowError, match=needle):
+        flow.validate(_flow(steps=[step]))
+
+
+def test_extract_accepts_every_optional_key():
+    flow.validate(_flow(steps=[{"op": "extract", "into": "ids", "selector": "li a",
+                                "attr": "href", "all": True, "pattern": "^https://",
+                                "required": False}]))
+
+
+# --- submit / js flags on click and press ------------------------------------------
+
+@pytest.mark.parametrize("step", [
+    {"op": "click", "selector": "#send", "submit": True},
+    {"op": "click", "text": "Send", "submit": True, "js": True},
+    {"op": "press", "key": "Enter", "selector": "#box", "submit": True},
+])
+def test_a_submit_marked_click_or_press_needs_allow_submit(step):
+    with pytest.raises(flow.FlowError, match="allow_submit"):
+        flow.validate(_flow(steps=[step]))
+    with pytest.raises(flow.FlowError, match="allow_submit"):     # …even nested
+        flow.validate(_flow(steps=[{"op": "paginate", "body": [step]}]))
+    flow.validate(_flow(capabilities={"allow_submit": True}, steps=[step]))
+
+
+def test_submit_false_or_absent_is_not_a_write():
+    flow.validate(_flow(steps=[{"op": "click", "selector": "#a", "submit": False},
+                               {"op": "press", "key": "Enter"},
+                               {"op": "click", "selector": "#b", "js": True}]))
+
+
+@pytest.mark.parametrize("step, needle", [
+    ({"op": "click", "selector": "#a", "submit": "false"}, "`submit` to be true or false"),
+    ({"op": "click", "selector": "#a", "js": 1}, "`js` to be true or false"),
+    ({"op": "press", "key": "Enter", "submit": "yes"}, "`submit` to be true or false"),
+])
+def test_write_flags_must_be_real_booleans(step, needle):
+    # a string "false" is truthy: a flag that reads as OFF but behaves as ON is the bug.
+    with pytest.raises(flow.FlowError, match=needle):
+        flow.validate(_flow(capabilities={"allow_submit": True}, steps=[step]))
+
+
+def test_the_new_ops_are_in_the_op_tables():
+    assert {"press", "type", "extract"} <= set(flow.LEAF_OPS)
+    assert "query" in flow.LEAF_OPS["goto"]["opt"]
+    assert {"submit", "js"} <= set(flow.LEAF_OPS["click"]["opt"])
+    assert len(flow.LEAF_OPS) == 15 and len(flow.BODY_OPS) == 2
+
+
 # --- substitute --------------------------------------------------------------
 
 def test_substitute_whole_string_keeps_the_native_type():

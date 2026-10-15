@@ -22,7 +22,7 @@ load-bearing:
 | --- | --- |
 | Document model | [`pinchtab_webgraph/flow.py`](../pinchtab_webgraph/flow.py) — ops, `validate()`, `substitute()`, `bind_inputs()`, `json_schema()`, `capabilities()`. Pure: no I/O, no browser. |
 | Step VM | [`pinchtab_webgraph/runner.py`](../pinchtab_webgraph/runner.py) — the interpreter. Browser, artifact store and sleep are **injectable ports**. |
-| Browser port | [`pinchtab_webgraph/browser.py`](../pinchtab_webgraph/browser.py) — `PinchTabBrowser` + the live-DOM primitives (`query`, `next_page`, `page_signature`, `fetch_bytes`/`save_bytes`). |
+| Browser port | [`pinchtab_webgraph/browser.py`](../pinchtab_webgraph/browser.py) — `PinchTabBrowser` + the live-DOM primitives (`query`, `next_page`, `page_signature`, `extract`, `click_js`, `fetch_bytes`/`save_bytes`) and the keyboard (`focus`, `press`, `keyboard_type`). |
 | Artifact store | [`pinchtab_webgraph/artifacts.py`](../pinchtab_webgraph/artifacts.py) — content-addressed store + the persistent dedupe ledger. |
 | Resolvability | [`pinchtab_webgraph/flow_resolve.py`](../pinchtab_webgraph/flow_resolve.py) — does a step's `goal` name anything on the **real crawled site**? The one check `validate()` structurally cannot do (it needs a graph off disk). Produces **warnings**, never errors. See [Resolvability warnings](#resolvability-warnings). |
 | CLI | [`pinchtab_webgraph/flow_cmd.py`](../pinchtab_webgraph/flow_cmd.py) — `pwg flow run \| validate \| schema` (`--jsonl` streams the run as JSON Lines). |
@@ -36,6 +36,8 @@ load-bearing:
 - [The document format](#the-document-format)
   - [Top level](#top-level)
   - [The ops](#the-ops)
+  - [Deep links](#deep-links)
+  - [Reading values: `extract` and run outputs](#reading-values-extract-and-run-outputs)
   - [Variables and `${…}` substitution](#variables-and--substitution)
   - [Inputs → JSON Schema](#inputs--json-schema)
     - [A `file` input, and where its path comes from](#a-file-input-and-where-its-path-comes-from)
@@ -172,16 +174,19 @@ Leaf ops — `one of` means at least one of those keys must be present.
 
 | Op | Keys | What it does |
 | --- | --- | --- |
-| `goto` | one of `url` / `goal` / `match`; opt `start`, `match` | Position the browser. With `url`: navigate (host-guarded). With `goal`/`match`: resolve against the crawled graph and **walk the click-path** — it deliberately does **not** click the trigger. `goto` positions; `do` acts. |
+| `goto` | one of `url` / `goal` / `match`; opt `start`, `match`, `query` | Position the browser. With `url`: navigate (host-guarded; the guard checks the **final** url, `query` included). With `goal`/`match`: resolve against the crawled graph and **walk the click-path** — it deliberately does **not** click the trigger. `goto` positions; `do` acts. `query` (`{param: value}`, only valid together with `url`) is substituted, percent-encoded and appended — see [Deep links](#deep-links). |
 | `do` | one of `goal` / `match`; opt `set`, `file`, `submit`, `start`, `index` | Run a whole how-to as one step: resolve it offline, then execute the *same* compiled command block `perform` runs (walk the path, open the form, fill the fields from `set`, upload `file`). `submit: true` needs the capability. `index` picks among ambiguous matches. |
-| `click` | one of `selector` / `text` | Click a control. `text` is resolved live through the control query (exact, case-insensitive). |
-| `fill` | one of `selector` / `label`; req `value` | Type into a field. |
+| `click` | one of `selector` / `text`; opt `submit`, `js` | Click a control. `text` is resolved live through the control query (exact, case-insensitive). `submit: true` marks the click as a **write** that needs `allow_submit` — see [the submit flag](#the-submit-flag-on-click-and-press). `js: true` dispatches the click **inside the page** (`el.scrollIntoView({block:'center'}); el.click()` through `evaluate`) instead of `pinchtab click --css`: on some app-shell SPAs a CDP/coordinate click is swallowed by a transient overlay while `pinchtab click` still returns 0, so the step "succeeds" and nothing happened. A selector that matches nothing is a step-fatal error, exactly like a failed click. |
+| `press` | req `key`; opt `selector`, `submit` | Send ONE key (`Enter`, `Escape`, `Backspace`, `ArrowDown`, …) to the focused element, after focusing `selector` first when one is given. A combination such as `Control+a` is **rejected at validation**: `pinchtab press` takes one key name and would type the combination literally. Note `press Enter` does not activate a focused `<button>` (gotcha 10) — `click` it. `submit: true` marks the keypress as a **write**. |
+| `fill` | one of `selector` / `label`; req `value` | Set a field's value directly. Fast and reliable for plain inputs, but it fires none of the key events a widget may listen for — use `type` for those. |
+| `type` | one of `selector` / `label`; req `value` | Focus the field, then type with **real keystroke events** (`pinchtab keyboard type`). Comboboxes, people pickers, autocompletes and rich-text editors often only react to key events, so `fill` leaves their suggestions empty and `type` does not. `label` resolves exactly as it does for `fill`. |
 | `select` | one of `selector` / `label`; req `value` | Choose an option. |
 | `check` | one of `selector` / `label` | Tick a checkbox. |
 | `upload` | `selector`; req `file` | Attach a file. **Write op** — needs `allow_upload`. |
 | `download` | one of `href` / `selector`; opt `name`, `dedupe` | Fetch a file. With `href` the bytes are fetched, hashed and deduped (see below). With only a `selector` (a JS-triggered export) the control is clicked and the step is honestly reported as `triggered` — the browser session captures the file, so we cannot hash what we never touched. `dedupe: "none"` disables the ledger check for that step. |
 | `collect` | `into`; opt `kind` | Extract the current view's data collections (the crawler's generic content extractor) into `run.collected[into]`, and bind `${into}` for later steps. `kind` filters (e.g. `table`). |
-| `wait` | one of `ms` / `selector` / `text`; opt `timeout_ms` | Sleep, or poll until a control appears (default timeout 10 000 ms). |
+| `extract` | req `into`, `selector`; opt `attr`, `all`, `pattern`, `required` | Read a value out of the page into `${into}` **and** `run.outputs[into]`. `attr` is `text` (default, the trimmed `innerText`), `value` (the form value), `href` (the absolute url) or any attribute name. `all: true` binds a list of every match, otherwise the first. `pattern` is a case-insensitive regex the value must match. `required` (default `true`): nothing usable is a step error; `false` binds `null`. See [Reading values](#reading-values-extract-and-run-outputs). |
+| `wait` | one of `ms` / `selector` / `text`; opt `timeout_ms` | Sleep, or poll (default timeout 10 000 ms) until the element `selector` names exists and is visible (a non-zero box — the element itself, not its descendants), or until a control labelled `text` appears. |
 | `set` | `var`; req `value` | Bind a variable. |
 | `log` | `message` | Emit a message onto the event stream. |
 
@@ -205,6 +210,42 @@ Body ops — the control flow, and the reason this layer exists.
 > `recipe.CONTROLS_JS` (which skips row controls for crawl speed). A per-row "Download" button is
 > exactly what a bulk flow wants.
 
+### Deep links
+
+A deep link that carries free text — a message body, a subject line — cannot be built by interpolating the text into the `url`: a space, `&`, `#` or `=` in it would corrupt the link, and the DSL deliberately cannot compute an encoding. So `goto` takes the parameters as data in `query`, and the runner does the encoding.
+
+```json
+{
+  "name": "send-prefilled-message",
+  "host": "app.example.com",
+  "inputs": {
+    "to":   {"type": "string", "required": true},
+    "text": {"type": "string", "required": true}
+  },
+  "capabilities": {"allow_submit": true},
+  "steps": [
+    {"op": "goto", "url": "https://app.example.com/compose", "query": {"to": "${to}", "text": "${text}"}},
+    {"op": "wait", "text": "Send", "timeout_ms": 5000},
+    {"op": "click", "text": "Send", "submit": true}
+  ]
+}
+```
+
+Run with `--input to=ana@example.com --input "text=Q3 plan & review"` and the step navigates to `https://app.example.com/compose?to=ana%40example.com&text=Q3%20plan%20%26%20review`.
+
+The rules: `query` is only valid together with `url` (validation refuses it with a `goal`/`match`). Values are `${}`-substituted first, then percent-encoded with spaces as `%20` (never `+`), so every character of the text survives as part of one parameter. A value must be a string, number or boolean (booleans encode as `true`/`false`); an optional input that was not supplied resolves to `null`, and the step aborts rather than put a literal `None` in a link. The parameters are appended with `?`, or with `&` when the `url` already has a query, and go before any `#fragment`. The host guard checks the **final** url, so a `${input}` can never steer the step off the flow's declared `host`.
+
+### Reading values: `extract` and run outputs
+
+`extract` is the read side of a flow. It evaluates one generic primitive in the page — a CSS `selector`, an `attr` to read, an optional case-insensitive `pattern` — and binds the result as `${into}` for later steps (so a scraped link can feed a `goto`, where it is still host-guarded) and as `outputs[into]` on the run record. Elements with no value (a missing attribute, empty text) are skipped exactly like a pattern miss. The page is read as it is at that moment: `extract` does not wait for a late render, so put a `wait` on the element it reads (or on a control that appears with it) just before it.
+
+```json
+{"op": "extract", "into": "latest", "selector": "a.item", "attr": "href", "pattern": "/m/\\d+$"},
+{"op": "extract", "into": "titles", "selector": "h2", "all": true, "required": false}
+```
+
+When nothing usable matched, the step is recorded as an `error` — with the reason (*no element matches selector…* versus *N element(s) matched … but none had a usable href matching /…/*) — and binds nothing, so a later step that needs `${latest}` aborts with *unknown variable* instead of acting on a guess. With `required: false` it binds `null` (also for `all`) and carries on.
+
 ### Variables and `${…}` substitution
 
 `${a.b}` — a plain dotted lookup into the run's variable map. That is **all** it is: not a
@@ -214,7 +255,7 @@ with a logged-in browser session, so the document must never be able to *compute
 - A string that is **exactly one** reference resolves to the referent's native type
   (`"${item.index}"` stays an int); a reference embedded in text interpolates as a string
   (`"${item.text}.pdf"`).
-- Every reference is checked at **validation time** against declared inputs, `set`/`collect`
+- Every reference is checked at **validation time** against declared inputs, `set`/`collect`/`extract`
   variables, loop variables in scope, and the built-in `${run}` (`{name, host}`). A typo is a
   rejected document, not a 3am abort.
 - `${page}` and `${index}` exist **only inside** a `paginate` / `for_each` body — that is
@@ -313,6 +354,12 @@ Enforcement happens in two places, on purpose:
    step; a denied step is recorded as `skipped` with a reason, never silently dropped. The `do`
    op's compiled block honours the same grants — a `do` cannot smuggle a download or an upload
    past a withheld capability.
+
+#### The `submit` flag on `click` and `press`
+
+`do` has always taken `submit: true`; `click` and `press` take it too, so a flow can press Send without going through a `do`. It declares the step a **write** (it sends or saves something), and it is gated exactly like one. Validation refuses it unless `capabilities.allow_submit` is true — *"a step submits a form, but capabilities.allow_submit is false"*, the same refusal an undeclared `upload` gets — even when the step is nested in a loop. At run time, without the caller's `--allow-submit` the step never touches the page and is recorded `skipped` with `reason: "submit not permitted (capabilities.allow_submit)"` (not even the by-`text` control lookup runs), so it is never silently dropped.
+
+`--dry-run` applies the same gate, so it previews what a live run would do under the same grant: a gated write shows as `skipped` with its reason, and as a `dry-run` event carrying `submit: true` once granted. `submit` must be a real `true`/`false`; a string such as `"false"` is truthy and is rejected at validation. `js: true` composes with it and leaves the gate unchanged.
 
 The pre-existing safety rules still hold underneath: the crawl never submits, a form field with
 no supplied value is **skipped** rather than filled with placeholder junk, and `--dry-run`
@@ -532,7 +579,7 @@ Every per-op edit form is **derived from `GET /api/flows/op_schema`**, which is 
 ```console
 $ curl -s localhost:8765/api/flows/op_schema | python3 -m json.tool
 {
-  "leaf_ops": {"goto": {"one_of": ["url", "goal", "match"], "opt": ["start", "match"]}, …},
+  "leaf_ops": {"goto": {"one_of": ["url", "goal", "match"], "opt": ["start", "match", "query"]}, …},
   "body_ops": {"for_each": {"req": ["match"], "opt": ["as", "max"]}, …},
   "capabilities": {"allow_submit": false, "allow_download": true, "allow_upload": false},
   "write_ops": ["upload"],
@@ -542,7 +589,7 @@ $ curl -s localhost:8765/api/flows/op_schema | python3 -m json.tool
 }
 ```
 
-**There is deliberately NO op list in the JavaScript.** 12 leaf ops + 2 body ops, one table, one
+**There is deliberately NO op list in the JavaScript.** 15 leaf ops + 2 body ops, one table, one
 place. Add an op to `flow.LEAF_OPS` and it appears in the UI's op picker and gets an edit form —
 a second copy of the DSL in JS would drift the first time an op changed. (The same tables also
 generate the agent's system prompt, so the prompt cannot drift from the validator either.)
@@ -662,6 +709,7 @@ record:
 | `steps` | The event log, in order. Statuses: `ok` · `new` · `dupe` · `triggered` · `skipped` · `dry-run` · `page` · `error`. |
 | `artifacts` | One record per accepted download: `{status, sha256, name, path, size, source}`. |
 | `collected` | The `collect` buckets. |
+| `outputs` | `{into: value}` for every `extract` that bound a value: a string, a list for `all`, or `null` for a `required: false` miss. Also on `--json`, in the `--jsonl` result frame and in the persisted UI run record. The plain progress output prints it after the summary line. A dry run reads nothing, so it is `{}`. |
 | `stats` | `{steps_executed, artifacts_new, artifacts_dupe}`. |
 
 A `skipped` step always carries a `reason` (usually a withheld capability or a form field with no
@@ -937,6 +985,8 @@ notes in [ui.md → Operational notes](ui.md#operational-notes-developing--e2e-t
 11. **A flow authored in the UI and re-run from the CLI does not share its dedupe ledger** unless
     you pass `--scope <flow_id>` — see [the caveat
     above](#caveat-the-artifact-scope-diverges-between-cli-and-ui).
+12. **`pinchtab focus <x>` treats a positional argument as a *ref*.** The browser port passes a CSS selector with `--css` (`pinchtab focus --css <selector>`), the same convention as `click`; `type` and `press` with a `selector` go through it.
+13. **`wait {selector}` waits for the element the selector NAMES, not for something inside it.** It used to poll the control query, which treats a selector as a *root* and returns only actionable *descendants*, so a wait on a button or an input (no actionable children) could never succeed. It now checks the matched element itself exists and has a non-zero box; `wait {text}` still polls the control query by label. `extract` does not wait, so `wait` first.
 
 ## Verified end-to-end
 
@@ -968,7 +1018,7 @@ the agent preserving a human's hand-added `wait` step and changed `max_pages` ac
 (`tests/test_flow_resolve.py`), and the propose-only fence is nailed down by
 `test_propose_flow_is_pure_no_disk_no_subprocess` + `test_no_flow_save_or_run_tool_exists_anywhere`.
 
-Whole suite: **817 passed, 2 skipped**.
+Whole suite: **1085 passed, 1 skipped**.
 
 ---
 

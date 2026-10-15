@@ -112,6 +112,44 @@ def is_truthy(value):
     return bool(value)
 
 
+# --- the argv to EXECUTE ---------------------------------------------------------
+# A step's `argv` is the canonical, readable form the command block prints. Executed
+# verbatim, a VALUE that starts with "-" (a flow input, a `--set` value, a message body) is
+# parsed by the pinchtab CLI as a FLAG — a message "--tab=<id>" would retarget the action to
+# another tab. `cli_argv` rewrites it terminator-safe: a flag's value is glued on with "=",
+# and every positional value goes after "--" (both forms verified against the pinchtab 0.10
+# CLI). Every executor runs it: perform.execute_steps and browser.PinchTabBrowser.run.
+_FLAG_TAKES_VALUE = {"--css", "-o", "-s"}
+_BARE_FLAGS = {"--wait-nav", "--new-tab", "--print-tab-id"}
+_SAFE_SUBCOMMANDS = {"nav", "click", "fill", "select", "check", "focus", "press",
+                     "keyboard", "upload", "download"}
+
+
+def cli_argv(argv):
+    """The terminator-safe argv to hand the pinchtab CLI for one step. Subcommands that take
+    no caller value (`tab`, `eval`, …) pass through unchanged."""
+    argv = list(argv)
+    if not argv or argv[0] not in _SAFE_SUBCOMMANDS:
+        return argv
+    head, rest = argv[:1], argv[1:]
+    if head == ["keyboard"] and rest[:1] == ["type"]:      # a two-word subcommand
+        head, rest = ["keyboard", "type"], rest[1:]
+    flags, positional = [], []
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a in _FLAG_TAKES_VALUE and i + 1 < len(rest):
+            flags.append("%s=%s" % (a, rest[i + 1]))
+            i += 2
+        elif a in _BARE_FLAGS:
+            flags.append(a)
+            i += 1
+        else:
+            positional.append(a)
+            i += 1
+    return head + flags + (["--"] + positional if positional else [])
+
+
 def _note(text):
     return {"argv": None, "comment": None, "role": "note", "needs_input": False,
             "value_index": None, "disabled": True, "label": None, "text": text}
@@ -125,9 +163,28 @@ def _blank():
 def _render_cmd(argv):
     # argv[0] is the subcommand (nav/click/…): bare. Quote positional VALUES; leave
     # flags (-o, -s, --css) unquoted.
-    parts = ["pinchtab", argv[0]]
-    for a in argv[1:]:
-        parts.append(a if a.startswith("-") else shq(a))
+    # Only KNOWN flags stay bare: a value that merely starts with "-" is still a value, and
+    # left unquoted it would paste into a shell as-is. If any value starts with "-", print
+    # the terminator-safe form so the pasted line means what the executor runs.
+    if any(a.startswith("-") and a not in _FLAG_TAKES_VALUE and a not in _BARE_FLAGS
+           for a in argv[1:]):
+        argv = cli_argv(argv)
+    nhead = 2 if argv[:2] == ["keyboard", "type"] else 1
+    parts = ["pinchtab"] + argv[:nhead]
+    after_terminator = False
+    for a in argv[nhead:]:
+        flag, eq, val = a.partition("=")
+        if after_terminator:
+            parts.append(shq(a))
+        elif a == "--":
+            after_terminator = True
+            parts.append(a)
+        elif a in _BARE_FLAGS or a in _FLAG_TAKES_VALUE:
+            parts.append(a)
+        elif eq and flag in _FLAG_TAKES_VALUE:          # a glued flag: quote its value
+            parts.append(flag + "=" + shq(val))
+        else:
+            parts.append(shq(a))
     return " ".join(parts)
 
 

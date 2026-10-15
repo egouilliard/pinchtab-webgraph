@@ -45,16 +45,33 @@ def test_each_method_sends_the_exact_argv():
     b.check("#k")
     b.upload("#u", "/tmp/x.pdf")
     b.download("https://x.test/f.pdf", "out.pdf")
+    # terminator-safe (commands.cli_argv): flag values glued with "=", positionals after "--"
     assert run.calls == [
-        ["nav", "https://x.test/a"],
+        ["nav", "--", "https://x.test/a"],
         # --wait-nav: a click that navigates otherwise 409s ("unexpected page navigation")
         # after the page has already moved — which would abort a paginating flow.
-        ["click", "--css", "#c", "--wait-nav"],
-        ["fill", "#f", "v"],
-        ["select", "#s", "opt"],
-        ["check", "#k"],
-        ["upload", "/tmp/x.pdf", "-s", "#u"],
-        ["download", "https://x.test/f.pdf", "-o", "out.pdf"],
+        ["click", "--css=#c", "--wait-nav"],
+        ["fill", "--", "#f", "v"],
+        ["select", "--", "#s", "opt"],
+        ["check", "--", "#k"],
+        ["upload", "-s=#u", "--", "/tmp/x.pdf"],
+        ["download", "-o=out.pdf", "--", "https://x.test/f.pdf"],
+    ]
+
+
+def test_a_value_that_looks_like_a_flag_stays_a_value():
+    # a flow input / message body starting with "-" must never reach the CLI as a flag —
+    # "--tab=<id>" would otherwise retarget the action to another tab
+    b, run = _browser()
+    b.fill("#f", "--tab=OTHER")
+    b.keyboard_type("--help")
+    b.press("-")
+    b.click("--wait-nav")
+    assert run.calls == [
+        ["fill", "--", "#f", "--tab=OTHER"],
+        ["keyboard", "type", "--", "--help"],
+        ["press", "--", "-"],
+        ["click", "--css=--wait-nav", "--wait-nav"],
     ]
 
 
@@ -68,7 +85,7 @@ def test_fill_and_select_stringify_a_non_string_value():
     b, run = _browser()
     b.fill("#f", 7)
     b.select("#s", 2)
-    assert run.calls == [["fill", "#f", "7"], ["select", "#s", "2"]]
+    assert run.calls == [["fill", "--", "#f", "7"], ["select", "--", "#s", "2"]]
 
 
 def test_subprocess_argv_carries_the_server_and_env():
@@ -109,6 +126,138 @@ def test_step_fatal_is_true_only_for_nav_and_click(argv, fatal):
         b.run(argv)
     assert exc.value.step_fatal is fatal
     assert "boom" in str(exc.value)
+
+
+# --- focus / press / keyboard_type / click_js ---------------------------------------
+
+def test_focus_press_and_keyboard_type_send_the_exact_argv():
+    b, run = _browser()
+    b.focus("#to")
+    b.press("Enter")
+    b.keyboard_type("hello world & more")
+    assert run.calls == [
+        # a positional arg to `pinchtab focus` is a REF; a CSS selector needs --css (as in click)
+        ["focus", "--css=#to"],
+        ["press", "--", "Enter"],
+        ["keyboard", "type", "--", "hello world & more"],   # ONE argv token, however odd the text
+    ]
+
+
+def test_keyboard_type_stringifies_a_non_string_value():
+    b, run = _browser()
+    b.keyboard_type(42)
+    assert run.calls == [["keyboard", "type", "--", "42"]]
+
+
+@pytest.mark.parametrize("method, args", [("focus", ("#x",)), ("press", ("Enter",)),
+                                          ("keyboard_type", ("t",))])
+def test_a_failed_focus_press_or_type_raises_a_non_fatal_browser_error(method, args):
+    b, _ = _browser(rc=1, err="no such element")
+    with pytest.raises(B.BrowserError, match="no such element") as exc:
+        getattr(b, method)(*args)
+    assert exc.value.step_fatal is False         # only nav/click strand the flow on a wrong page
+
+
+def test_click_js_clicks_inside_the_page_and_never_uses_the_cli_click():
+    b, run = _browser(out=json.dumps({"ok": True}))
+    b.click_js("#go")
+    assert len(run.calls) == 1 and run.calls[0][0] == "eval"      # no `click` argv at all
+    js = run.calls[0][1]
+    assert "el.click()" in js and "scrollIntoView({block: 'center'})" in js
+    assert json.dumps("#go") in js
+
+
+def test_click_js_selector_is_a_json_literal_never_spliced_in_raw():
+    sel = 'a"); alert(1); (".x'
+    js = B.dom_click_js(sel)
+    assert json.dumps(sel) in js
+    assert sel not in js
+    assert js.count("document.querySelector") == 1
+
+
+@pytest.mark.parametrize("out", [json.dumps({"ok": False, "reason": "no element matches selector"}),
+                                 "null", json.dumps("surprise")])
+def test_click_js_that_hits_nothing_is_a_step_fatal_failure_naming_the_selector(out):
+    b, _ = _browser(out=out)
+    with pytest.raises(B.BrowserError) as exc:
+        b.click_js("#gone")
+    assert exc.value.step_fatal is True            # same as a failed `click`
+    assert "'#gone'" in str(exc.value)
+
+
+def test_click_js_eval_failure_is_step_fatal_too():
+    b, _ = _browser(rc=1, err="eval blew up")
+    with pytest.raises(B.BrowserError, match="eval blew up") as exc:
+        b.click_js("#go")
+    assert exc.value.step_fatal is True
+
+
+# --- element_visible (wait {selector}'s probe) ---------------------------------------------
+
+def test_element_visible_js_checks_the_matched_element_itself_not_its_descendants():
+    # regression: the old probe was QUERY_JS, whose `selector` is a ROOT searched for actionable
+    # DESCENDANTS (`root.querySelectorAll(CANDIDATES)`) — it could never match the element the
+    # selector names. The new probe must look at THE element's own box.
+    js = B.element_visible_js("#some-button")
+    assert "document.querySelector(" in js and "getBoundingClientRect()" in js
+    assert "querySelectorAll" not in js                    # no descendant search
+    assert json.dumps("#some-button") in js
+    assert "querySelectorAll" in B.query_js({"selector": "#some-button"})   # the bug's source
+
+
+def test_element_visible_js_selector_is_a_json_literal_never_spliced_in_raw():
+    sel = 'a"); alert(1); (".x'
+    js = B.element_visible_js(sel)
+    assert json.dumps(sel) in js and sel not in js
+    assert js.count("document.querySelector") == 1
+
+
+@pytest.mark.parametrize("out, expected", [("true", True), ("false", False), ("null", False)])
+def test_element_visible_returns_a_bool(out, expected):
+    b, run = _browser(out=out)
+    assert b.element_visible("#x") is expected
+    assert run.calls[0][0] == "eval" and len(run.calls) == 1
+
+
+def test_element_visible_raises_on_a_bad_selector():
+    b, _ = _browser(out=json.dumps({"error": "SyntaxError: '((' is not a valid selector"}))
+    with pytest.raises(B.BrowserError, match="bad selector '\\(\\(': .*not a valid selector"):
+        b.element_visible("((")
+
+
+# --- extract ----------------------------------------------------------------------------
+
+def test_extract_returns_matched_and_values():
+    b, run = _browser(out=json.dumps({"matched": 3, "values": ["a", "b"]}))
+    assert b.extract({"selector": "li", "attr": "text", "all": True, "pattern": None}) == {
+        "matched": 3, "values": ["a", "b"]}
+    assert run.calls[0][0] == "eval"
+
+
+def test_extract_js_json_escapes_a_hostile_selector_and_pattern():
+    spec = {"selector": 'a"); alert(1); //', "attr": "text", "all": False,
+            "pattern": '"); alert(2); //'}
+    js = B.extract_js(spec)
+    assert "JSON.parse(" in js
+    assert json.dumps(json.dumps(spec)) in js
+    assert 'alert(1); //"' not in js and 'alert(2); //"' not in js    # no raw, unescaped form
+
+
+@pytest.mark.parametrize("out, needle", [
+    (json.dumps({"error": "SyntaxError: '((' is not a valid selector"}), "not a valid selector"),
+    ("null", "not a result object"),
+    (json.dumps([1, 2]), "not a result object"),
+])
+def test_extract_surfaces_a_page_side_error_as_browsererror(out, needle):
+    b, _ = _browser(out=out)
+    with pytest.raises(B.BrowserError, match=needle):
+        b.extract({"selector": "((", "attr": "text", "all": False, "pattern": None})
+
+
+def test_extract_tolerates_missing_keys():
+    b, _ = _browser(out=json.dumps({}))
+    assert b.extract({"selector": "p", "attr": "text", "all": False, "pattern": None}) == {
+        "matched": 0, "values": []}
 
 
 # --- evaluate: ONE decode, every type ------------------------------------------
@@ -254,8 +403,47 @@ def test_resolve_tab_falls_back_to_the_last_page_when_none_is_active():
 def test_resolve_tab_opens_a_new_tab_at_the_url_when_there_are_none():
     run = FakeRun(script={"tab": (0, "[]", ""), "nav": (0, "opened\nnewtab", "")})
     assert B.resolve_tab("http://s", "tok", "https://x.test/a", _run=run) == "newtab"
-    assert run.calls[-1][:2] == ["nav", "https://x.test/a"]
+    assert run.calls[-1] == ["nav", "--new-tab", "--print-tab-id", "--", "https://x.test/a"]
     assert "--new-tab" in run.calls[-1] and "--print-tab-id" in run.calls[-1]
+
+
+_RESTORED = json.dumps({"tabs": [            # a restored session, most-recently-used first
+    {"id": "odoo", "type": "page", "status": "active", "url": "https://other.test/login"},
+    {"id": "hung", "type": "page", "status": "active", "url": "https://x.test/deep?a=1"},
+    {"id": "app", "type": "page", "status": "active", "url": "https://X.test/"},
+    {"id": "old", "type": "page", "status": "active", "url": "https://login.test/auth"},
+]})
+
+
+def test_resolve_tab_adopts_a_responsive_tab_on_the_urls_host(monkeypatch):
+    monkeypatch.setattr(B, "_responsive", lambda s, t, tab, _run=None: tab != "hung")
+    run = FakeRun(script={"tab": (0, _RESTORED, "")})
+    assert B.resolve_tab("http://s", "tok", "https://x.test/l/new", _run=run) == "app"
+    assert not any(c[0] == "nav" for c in run.calls)       # nothing hijacked, nothing opened
+
+
+def test_resolve_tab_never_hijacks_another_hosts_tab(monkeypatch):
+    # the old rule ("the last active page") adopted whatever the bridge restored — here a
+    # stale login page — and the run navigated it away
+    monkeypatch.setattr(B, "_responsive", lambda s, t, tab, _run=None: True)
+    run = FakeRun(script={"tab": (0, _RESTORED, ""), "nav": (0, "opened\nnewtab", "")})
+    assert B.resolve_tab("http://s", "tok", "https://elsewhere.test/a", _run=run) == "newtab"
+    assert run.calls[-1] == ["nav", "--new-tab", "--print-tab-id", "--",
+                             "https://elsewhere.test/a"]
+
+
+def test_resolve_tab_opens_its_own_tab_when_every_same_host_tab_is_hung(monkeypatch):
+    monkeypatch.setattr(B, "_responsive", lambda s, t, tab, _run=None: False)
+    run = FakeRun(script={"tab": (0, _RESTORED, ""), "nav": (0, "newtab", "")})
+    assert B.resolve_tab("http://s", "tok", "https://x.test/a", _run=run) == "newtab"
+
+
+def test_responsive_is_a_trivial_eval_with_a_short_timeout():
+    run = FakeRun(script={"eval": (0, "1", "")})
+    assert B._responsive("http://s", "tok", "t1", _run=run) is True
+    assert run.calls[-1][0] == "eval" and run.timeouts[-1] <= 5
+    assert B._responsive("http://s", "tok", "t1",
+                         _run=FakeRun(script={"eval": (1, "", "context deadline exceeded")})) is False
 
 
 def test_resolve_tab_returns_none_with_no_tabs_and_no_url():
@@ -314,8 +502,8 @@ def test_nav_retries_in_a_new_tab_and_pins_it_when_the_tab_is_missing():
     b = ref["b"] = B.PinchTabBrowser("http://s", "tok", None, _run=run)
     b.nav("https://x.test/a")
     # retried at the SAME url, with --new-tab --print-tab-id
-    assert run.calls == [["nav", "https://x.test/a"],
-                         ["nav", "https://x.test/a", "--new-tab", "--print-tab-id"]]
+    assert run.calls == [["nav", "--", "https://x.test/a"],
+                         ["nav", "--new-tab", "--print-tab-id", "--", "https://x.test/a"]]
     assert b.tab == "fresh"                       # the printed id is pinned on the instance
     # and a SUBSEQUENT command now carries that tab (it succeeds against the zero-tab bridge)
     b.click("#c")
@@ -328,5 +516,36 @@ def test_nav_does_not_retry_a_genuine_failure():
     b = B.PinchTabBrowser("http://s", "tok", "tab1", _run=run)
     with pytest.raises(B.BrowserError):
         b.nav("not-a-url")
-    assert run.calls == [["nav", "not-a-url"]]    # no --new-tab retry: the error must surface
+    assert run.calls == [["nav", "--", "not-a-url"]]    # no --new-tab retry: the error must surface
     assert b.tab == "tab1"
+
+
+# --- open_tab / close_opened_tabs ------------------------------------------------------
+
+def test_open_tab_opens_pins_and_remembers_the_new_tab():
+    run = FakeRun(script={"nav": (0, "navigated\nNEWTAB", "")})
+    b = B.PinchTabBrowser("http://s", "tok", "old", _run=run)
+    b.open_tab("https://x.test/l/a")
+    assert run.calls[-1] == ["nav", "--new-tab", "--print-tab-id", "--", "https://x.test/l/a"]
+    assert b.tab == "NEWTAB" and b._opened == ["NEWTAB"]
+
+
+def test_open_tab_without_a_printed_id_is_step_fatal():
+    b = B.PinchTabBrowser("http://s", "tok", "old", _run=FakeRun(script={"nav": (0, "", "")}))
+    with pytest.raises(B.BrowserError) as exc:
+        b.open_tab("https://x.test/")
+    assert exc.value.step_fatal
+
+
+def test_close_opened_tabs_closes_each_and_never_raises(monkeypatch):
+    b = B.PinchTabBrowser("http://s", "tok", None, _run=FakeRun())
+    b._opened = ["T1", "T2"]
+    closed = []
+
+    def fake_close(tab):
+        closed.append(tab)
+        if tab == "T1":
+            raise OSError("bridge gone")
+    monkeypatch.setattr(b, "_close_tab", fake_close)
+    b.close_opened_tabs()
+    assert closed == ["T1", "T2"] and b._opened == []

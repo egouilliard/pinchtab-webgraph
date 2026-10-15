@@ -127,8 +127,11 @@ function allOps(schema) {
 // op_schema — this only decides how to draw the box, and anything unlisted falls back to a
 // text input, so a new key added server-side still edits fine (as a string).
 const CANVAS_NUMBER_KEYS = ["ms", "timeout_ms", "max", "max_pages", "index"];
-const CANVAS_OBJECT_KEYS = ["match", "set"];
-const CANVAS_FLAG_KEYS = ["submit", "dedupe"];
+const CANVAS_OBJECT_KEYS = ["match", "set", "query"];
+const CANVAS_FLAG_KEYS = ["submit", "dedupe", "js", "all", "required"];
+// A flag whose ABSENCE means true (`extract.required`): the box starts ticked, and unticking
+// it must write an explicit `false` — omitting the key would silently mean "required".
+const CANVAS_DEFAULT_TRUE_KEYS = ["required"];
 
 function keyKind(key) {
   if (CANVAS_NUMBER_KEYS.indexOf(key) !== -1) return "number";
@@ -287,6 +290,10 @@ function buildValueInput(key, value, required) {
   if (kind === "flag") {
     const input = document.createElement("input");
     input.type = "checkbox";
+    if (CANVAS_DEFAULT_TRUE_KEYS.indexOf(key) !== -1) {
+      input.checked = value !== false;
+      return { el: input, read: () => ({ ok: true, value: input.checked ? undefined : false }) };
+    }
     input.checked = value === true;
     return { el: input, read: () => ({ ok: true, value: input.checked ? true : (required ? false : undefined) }) };
   }
@@ -299,7 +306,7 @@ function buildValueInput(key, value, required) {
     if (value !== undefined) {
       try { ta.value = JSON.stringify(value); } catch (e) { ta.value = ""; }
     }
-    ta.placeholder = '{"kind": "download"}';
+    ta.placeholder = key === "query" ? '{"q": "hello world"}' : '{"kind": "download"}';
     return {
       el: ta,
       read: () => {
@@ -588,7 +595,8 @@ function buildNode(ctx, doc, step, path) {
 
   const head = fcEl("div", "flow-node-head");
   head.appendChild(fcEl("span", "flow-node-op", op));   // model/user string — textContent
-  if (isWriteOp(ctx.opSchema, op)) {
+  // a write op, or any step that declared itself one with `submit: true`
+  if (isWriteOp(ctx.opSchema, op) || (step && step.submit === true)) {
     head.appendChild(fcEl("span", "flow-node-write", "writes"));
   }
   head.appendChild(fcEl("span", "flow-node-summary", stepSummary(step)));

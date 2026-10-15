@@ -23,11 +23,20 @@ did not yet have (see generality.md — structural signals only, no app vocabula
                first (rel=next, aria-label, aria-disabled), UI-verb regex second — the same
                class of heuristic as crawl.DOWNLOAD_ACTIONS, which is already accepted as
                generic.
+  EXTRACT_JS   read a value (text / form value / attribute) out of the elements a CSS
+               selector matches. Pure DOM, no vocabulary — the selector and the optional
+               regex are the caller's.
+  VISIBLE_JS   is the element a selector names ITSELF present and visible? (`wait`). Not
+               QUERY_JS: that takes a selector as a ROOT and only returns actionable
+               DESCENDANTS, so it can never see the element the selector names.
 """
 import base64
 import json
 import os
 import subprocess
+from urllib.parse import urlparse
+
+from . import commands
 
 DEFAULT_SERVER = "http://localhost:9871"
 
@@ -134,6 +143,84 @@ _NEXT_JS = r"""
 """
 
 
+# EXTRACT_JS — the extract primitive. Takes {selector, attr, all, pattern} and returns
+# {matched, values}: `matched` is how many elements the selector hit (so a miss can say WHY —
+# "nothing matched" vs "matched, but none carried a value / fitted the pattern"), `values` the
+# usable ones in document order (just the first unless `all`).
+#   attr 'text'  -> trimmed innerText          attr 'value' -> the form value
+#   attr 'href'  -> the ABSOLUTE url           anything else -> that attribute
+# An element with no value (a missing attribute, empty text) is skipped like a pattern miss.
+# Errors (a bad selector or regex) come back as {error} so the caller can name them, instead
+# of surfacing as an opaque eval failure.
+EXTRACT_JS = r"""
+(spec => {
+  try {
+    const re = spec.pattern ? new RegExp(spec.pattern, 'i') : null;
+    const nodes = document.querySelectorAll(spec.selector);
+    const values = [];
+    for (const el of nodes) {
+      let v;
+      if (spec.attr === 'text') {
+        v = el.innerText != null ? el.innerText : el.textContent;
+        v = v == null ? null : v.trim();
+      } else if (spec.attr === 'value') {
+        v = el.value != null ? el.value : el.getAttribute('value');
+      } else if (spec.attr === 'href') {
+        v = el.getAttribute('href');
+        if (v != null) { try { v = new URL(v, document.baseURI).href; } catch (e) {} }
+      } else {
+        v = el.getAttribute(spec.attr);
+      }
+      if (v == null || v === '') continue;
+      v = String(v);
+      if (re && !re.test(v)) continue;
+      values.push(v);
+      if (!spec.all) break;
+    }
+    return {matched: nodes.length, values: values};
+  } catch (e) {
+    return {error: String((e && e.message) || e)};
+  }
+})(JSON.parse(%(spec)s))
+"""
+
+# DOM_CLICK_JS — click an element FROM THE PAGE (`el.click()`) rather than through CDP.
+# `pinchtab click` dispatches a real coordinate click, which a transient overlay (a toast, a
+# loading scrim) can swallow while the CLI still exits 0 — the step "succeeds" and nothing
+# happened. A DOM click hits the element itself, whatever sits on top of it.
+_DOM_CLICK_JS = r"""
+(() => {
+  try {
+    const el = document.querySelector(%(selector)s);
+    if (!el) return {ok: false, reason: 'no element matches selector'};
+    el.scrollIntoView({block: 'center'});
+    el.click();
+    return {ok: true};
+  } catch (e) {
+    return {ok: false, reason: String((e && e.message) || e)};
+  }
+})()
+"""
+
+
+# VISIBLE_JS — does the element this selector names exist and occupy space? Same visibility
+# rule as QUERY_JS (a zero-size box is not visible), but applied to the MATCHED ELEMENT, not
+# to its descendants. A bad selector comes back as {error}, so a wait fails at once instead of
+# polling a selector that can never match until its timeout.
+_VISIBLE_JS = r"""
+(() => {
+  try {
+    const el = document.querySelector(%(selector)s);
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    return !(r.width === 0 && r.height === 0);
+  } catch (e) {
+    return {error: String((e && e.message) || e)};
+  }
+})()
+"""
+
+
 def query_js(spec):
     """The QUERY_JS expression for a match spec. The spec crosses into JS as a JSON string
     (never string-concatenated into the source) so a label regex can't break out."""
@@ -142,6 +229,22 @@ def query_js(spec):
 
 def next_page_js():
     return _NEXT_JS % {"sel": _SEL_JS}
+
+
+def extract_js(spec):
+    """The EXTRACT_JS expression for {selector, attr, all, pattern}. Same discipline as
+    query_js: the spec crosses as a JSON string, so a selector or regex can't break out."""
+    return EXTRACT_JS % {"spec": json.dumps(json.dumps(spec))}
+
+
+def element_visible_js(selector):
+    """The VISIBLE_JS expression for a selector (a JSON literal, never spliced in raw)."""
+    return _VISIBLE_JS % {"selector": json.dumps(selector)}
+
+
+def dom_click_js(selector):
+    """The DOM_CLICK_JS expression for a selector (a JSON literal, never spliced in raw)."""
+    return _DOM_CLICK_JS % {"selector": json.dumps(selector)}
 
 
 # A page's identity, for the pagination no-progress guard: if clicking "next" leaves the
@@ -238,7 +341,9 @@ class PinchTabBrowser:
             return 124, "", "timeout"
 
     def run(self, argv, timeout=None):
-        rc, out, err = self._run(list(argv), timeout or self.timeout)
+        # terminator-safe: a value starting with "-" must never reach the CLI as a flag
+        argv = commands.cli_argv(argv)
+        rc, out, err = self._run(argv, timeout or self.timeout)
         if rc != 0:
             raise BrowserError(err or out or ("pinchtab %s failed (rc=%d)" % (argv[0], rc)),
                                step_fatal=argv[0] in ("nav", "click"))
@@ -269,6 +374,38 @@ class PinchTabBrowser:
         if tab:
             self.tab = tab                 # every later command now targets the live tab
 
+    def open_tab(self, url):
+        """Load `url` in a FRESH tab and target it from now on (`goto {new_tab}`). An app
+        shell can hang forever on a same-tab navigation to its own deep link — the url
+        changes, the document never commits, every eval times out — while a fresh load works.
+        The tab is remembered so `close_opened_tabs` can close it when the run ends."""
+        tab = _printed_tab_id(self.run(["nav", url, "--new-tab", "--print-tab-id"]))
+        if not tab:
+            raise BrowserError("opened %s in a new tab but the bridge printed no tab id" % url,
+                               step_fatal=True)
+        self.tab = tab
+        self._opened = getattr(self, "_opened", []) + [tab]
+
+    def close_opened_tabs(self):
+        """Close every tab `open_tab` opened. The CLI has no close command; the bridge's
+        HTTP API does (`POST /tab {"action":"close","tabId":…}`). Best effort: a tab that
+        will not close is left, never an error that would mask the run's real outcome."""
+        for tab in getattr(self, "_opened", []):
+            try:
+                self._close_tab(tab)
+            except Exception:              # noqa: BLE001 — cleanup must not raise
+                pass
+        self._opened = []
+
+    def _close_tab(self, tab):
+        import urllib.request
+        req = urllib.request.Request(
+            self.server.rstrip("/") + "/tab", method="POST",
+            data=json.dumps({"action": "close", "tabId": tab}).encode(),
+            headers={"Content-Type": "application/json",
+                     **({"Authorization": "Bearer " + self.token} if self.token else {})})
+        urllib.request.urlopen(req, timeout=10).read()
+
     def click(self, selector):
         """Click, and TOLERATE a navigation.
 
@@ -289,6 +426,35 @@ class PinchTabBrowser:
 
     def check(self, selector):
         self.run(["check", selector])
+
+    def click_js(self, selector):
+        """Click from inside the page (`el.click()`) — for a click CDP would lose to an overlay.
+
+        A selector that matches nothing, or an eval that fails, is a FAILED CLICK and so
+        step-fatal exactly like `click`: every later step is aimed at the wrong page."""
+        try:
+            res = self.evaluate(dom_click_js(selector))
+        except BrowserError as exc:
+            raise BrowserError(str(exc), step_fatal=True)
+        if not (isinstance(res, dict) and res.get("ok")):
+            reason = res.get("reason") if isinstance(res, dict) else None
+            raise BrowserError("js click failed: %s %r" % (reason or "no result", selector),
+                               step_fatal=True)
+
+    def focus(self, selector):
+        """Focus an element. `pinchtab focus` takes a REF positionally; a CSS selector needs
+        `--css` (the same convention as `click`)."""
+        self.run(["focus", "--css", selector])
+
+    def press(self, key):
+        """Send ONE key (Enter, Escape, ArrowDown, …) to the focused element. A combination
+        like "Control+a" is typed literally by the CLI, so the flow layer refuses it."""
+        self.run(["press", key])
+
+    def keyboard_type(self, text):
+        """Type text at the current focus with REAL keystroke events (unlike `fill`, which
+        sets the value directly and fires none of the key events a combobox listens for)."""
+        self.run(["keyboard", "type", str(text)])
 
     def upload(self, selector, path):
         self.run(["upload", path, "-s", selector])
@@ -356,6 +522,25 @@ class PinchTabBrowser:
         """Controls on the current page matching a spec → [{selector, text, kind, href}]."""
         return self.evaluate(query_js(spec)) or []
 
+    def element_visible(self, selector):
+        """Does the element `selector` NAMES exist and occupy space? (`wait`'s probe.) A bad
+        selector raises BrowserError — it can never become true, so there is nothing to poll."""
+        res = self.evaluate(element_visible_js(selector))
+        if isinstance(res, dict) and res.get("error"):
+            raise BrowserError("bad selector %r: %s" % (selector, res["error"]))
+        return res is True
+
+    def extract(self, spec):
+        """{matched, values} for {selector, attr, all, pattern} (see EXTRACT_JS). A bad
+        selector or regex raises BrowserError naming the problem."""
+        res = self.evaluate(extract_js(spec))
+        if not isinstance(res, dict):
+            raise BrowserError("extract returned %s, not a result object"
+                               % type(res).__name__)
+        if res.get("error"):
+            raise BrowserError("extract failed: %s" % res["error"])
+        return {"matched": int(res.get("matched") or 0), "values": list(res.get("values") or [])}
+
     def next_page(self):
         """{found, exhausted, selector, text} for the current page's paginator."""
         return self.evaluate(next_page_js()) or {"found": False, "exhausted": True}
@@ -372,6 +557,21 @@ class PinchTabBrowser:
         return self.evaluate("location.href") or ""
 
 
+def _hostname(url):
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _responsive(server, token, tab, _run=None):
+    """Does this tab still answer a trivial eval? A hung page times out every command."""
+    try:
+        return PinchTabBrowser(server, token, tab, timeout=5, _run=_run).evaluate("1") == 1
+    except BrowserError:
+        return False
+
+
 def resolve_tab(server, token, url=None, _run=None):
     """Pin a live page tab. PinchTab stores a DEFAULT tab id which goes stale, after which
     every command 404s with 'tab not found' — so a run resolves one up front.
@@ -381,6 +581,11 @@ def resolve_tab(server, token, url=None, _run=None):
     is the ONLY way to create a tab, and it needs a REAL url (the bridge rejects a blank-page
     url with `400 invalid url`, so there is no blank-tab fallback to fall back to).
 
+    When `url` is known, only a tab already on THAT host is adopted, and only one that still
+    answers an eval: a bridge restores every tab of its last session, so "any page tab" can be
+    another site entirely (the run would navigate it away) or a hung page (every eval times
+    out). With no such tab we open our own at `url` rather than hijack one.
+
     Returning None is SAFE: `PinchTabBrowser.nav` self-heals a missing tab at its target url."""
     probe = PinchTabBrowser(server, token, None, timeout=15, _run=_run)
     try:
@@ -388,7 +593,13 @@ def resolve_tab(server, token, url=None, _run=None):
         if isinstance(tabs, dict):
             tabs = tabs.get("tabs", [])
         pages = [t for t in tabs if t.get("type") == "page" and t.get("id")]
-        if pages:
+        if pages and url:
+            host = _hostname(url)
+            for t in pages:                  # the bridge lists tabs most-recently-used first
+                if host and _hostname(t.get("url") or "") == host and \
+                        _responsive(server, token, t["id"], _run):
+                    return t["id"]
+        elif pages:
             active = [t for t in pages if t.get("status") == "active"] or pages
             return active[-1]["id"]
     except (BrowserError, ValueError, TypeError):

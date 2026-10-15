@@ -1,0 +1,18 @@
+{
+  "name": "teams-send-message",
+  "host": "teams.cloud.microsoft",
+  "inputs": {
+    "to": {"type": "string", "required": true, "description": "recipient email address(es), comma-separated; several = a group chat"},
+    "message": {"type": "string", "required": true, "description": "the message text"}
+  },
+  "capabilities": {"allow_submit": true, "allow_download": false},
+  "steps": [
+    {"op": "goto", "url": "https://teams.cloud.microsoft/l/chat/0/0", "new_tab": true, "query": {"users": "${to}", "message": "${message}"}},
+    {"op": "wait", "selector": "[data-tid=newMessageCommands-send]", "timeout_ms": 45000},
+    {"op": "wait", "ms": 2000},
+    {"op": "extract", "into": "draft", "selector": "[data-tid=ckeditor][contenteditable=true]", "required": false},
+    {"op": "click", "selector": "[data-tid=newMessageCommands-send]", "js": true, "submit": true},
+    {"op": "wait", "ms": 3000},
+    {"op": "extract", "into": "composer_after_send", "selector": "[data-tid=ckeditor][contenteditable=true]", "required": false}
+  ]
+}

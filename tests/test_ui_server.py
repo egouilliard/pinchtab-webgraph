@@ -966,6 +966,20 @@ def test_flows_op_schema_is_the_real_tables():
     assert body["max_steps"] == flow_mod.MAX_STEPS
 
 
+def test_flows_op_schema_publishes_the_new_ops_and_keys():
+    # the canvas forms (and the flow agent's prompt) derive from this — so the new ops and the
+    # new keys on goto/click must be IN it, verbatim from the tables.
+    body = client.get("/api/flows/op_schema").json()
+    leaf = body["leaf_ops"]
+    assert leaf["press"] == {"req": ["key"], "opt": ["selector", "submit"]}
+    assert leaf["type"] == {"one_of": ["selector", "label"], "req": ["value"], "opt": []}
+    assert leaf["extract"] == {"req": ["into", "selector"],
+                               "opt": ["attr", "all", "pattern", "required"]}
+    assert "query" in leaf["goto"]["opt"]
+    assert leaf["click"]["opt"] == ["submit", "js"]
+    assert len(leaf) == 15 and len(body["body_ops"]) == 2
+
+
 def test_flows_schema_stateless():
     r = client.post("/api/flows/schema",
                     json=_flow_doc(inputs={"since": {"type": "string", "required": True},

@@ -276,13 +276,14 @@ def _persisted_run(record):
         "steps": record.get("steps") or [],
         "artifacts": record.get("artifacts") or [],
         "collected": record.get("collected") or {},
+        "outputs": record.get("outputs") or {},
     }
 
 
 def run_summary(record):
-    """The chip view of a run — OMITS steps/artifacts/collected (the heavy payloads)."""
+    """The chip view of a run — OMITS steps/artifacts/collected/outputs (the heavy payloads)."""
     return {k: v for k, v in _persisted_run(record).items()
-            if k not in ("steps", "artifacts", "collected")}
+            if k not in ("steps", "artifacts", "collected", "outputs")}
 
 
 def start_run(host, flow_id, run_id, *, dry_run, capabilities, inputs):
@@ -298,7 +299,7 @@ def start_run(host, flow_id, run_id, *, dry_run, capabilities, inputs):
               "capabilities": capabilities or {}, "inputs": inputs or {},
               "started_at": _now_iso(), "finished_at": None, "duration_s": None,
               "detail": None, "aborted": None,
-              "stats": {}, "steps": [], "artifacts": [], "collected": {}}
+              "stats": {}, "steps": [], "artifacts": [], "collected": {}, "outputs": {}}
     atomic_write(run_path(host, flow_id, run_id), _persisted_run(record))
     return record
 
@@ -354,6 +355,7 @@ def finish_run(host, flow_id, run_id, result, *, cancelled=False):
         "steps": steps,
         "artifacts": result.get("artifacts") or [],
         "collected": result.get("collected") or {},
+        "outputs": result.get("outputs") or {},
     })
     if "dry_run" in result:
         record["dry_run"] = bool(result["dry_run"])

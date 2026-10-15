@@ -38,6 +38,7 @@ a clear rejection before anything is leased.
 import json
 import os
 import re
+import urllib.parse
 
 SCHEMA_VERSION = 1
 
@@ -59,15 +60,27 @@ INPUT_TYPES = ("string", "number", "integer", "boolean", "file")
 LEAF_OPS = {
     # `goto` accepts `match` as well as `goal`: the runner forwards it to api.resolve_action,
     # which resolves on a trigger-label regex ALONE — so a flow must be able to say so.
-    "goto":     {"one_of": ("url", "goal", "match"), "opt": ("start", "match")},
+    # `query` ({param: value}) is only legal with `url`: the runner substitutes, percent-encodes
+    # and appends it, because a deep link that carries free text cannot be built by string
+    # interpolation and the DSL deliberately cannot compute. `new_tab: true` (with `url`)
+    # loads it in a fresh tab the runner pins and closes at the end of the run: an app shell
+    # can hang on a same-tab navigation to its own deep link while a fresh load works.
+    "goto":     {"one_of": ("url", "goal", "match"), "opt": ("start", "match", "query", "new_tab")},
     "do":       {"one_of": ("goal", "match"), "opt": ("set", "file", "submit", "start", "index")},
-    "click":    {"one_of": ("selector", "text"), "opt": ()},
+    # `submit: true` declares the click a WRITE (it sends something); `js: true` dispatches it
+    # in the page instead of through CDP, for a click a transient overlay would swallow.
+    "click":    {"one_of": ("selector", "text"), "opt": ("submit", "js")},
+    # `press` sends ONE key (Enter, Escape, ArrowDown…) to the focused element.
+    "press":    {"req": ("key",), "opt": ("selector", "submit")},
     "fill":     {"one_of": ("selector", "label"), "req": ("value",), "opt": ()},
+    # `type` is `fill` with REAL keystroke events — see runner._op_type.
+    "type":     {"one_of": ("selector", "label"), "req": ("value",), "opt": ()},
     "select":   {"one_of": ("selector", "label"), "req": ("value",), "opt": ()},
     "check":    {"one_of": ("selector", "label"), "opt": ()},
     "upload":   {"one_of": ("selector",), "req": ("file",), "opt": ()},
     "download": {"one_of": ("href", "selector"), "opt": ("name", "dedupe")},
     "collect":  {"one_of": ("into",), "opt": ("kind",)},
+    "extract":  {"req": ("into", "selector"), "opt": ("attr", "all", "pattern", "required")},
     "wait":     {"one_of": ("ms", "selector", "text"), "opt": ("timeout_ms",)},
     "set":      {"one_of": ("var",), "req": ("value",), "opt": ()},
     "log":      {"one_of": ("message",), "opt": ()},
@@ -84,6 +97,11 @@ OPS = set(LEAF_OPS) | set(BODY_OPS)
 # `capabilities` opts in — the same safe-by-default posture perform.py already enforces
 # for a form submit, lifted to the flow level so a scheduled run can't surprise anyone.
 WRITE_OPS = {"upload"}
+
+# Ops that are not writes by default but can DECLARE themselves one with `submit: true` — a
+# click or a keypress that sends a form. `do` has always had its own `submit`; these two get
+# the same gate (capabilities.allow_submit) so a flow can press Send without a `do`.
+SUBMIT_FLAG_OPS = {"click", "press"}
 
 MAX_DEPTH = 6          # nesting guard: a hand-written or LLM-authored flow can't run away
 MAX_STEPS = 500        # total steps in the document
@@ -162,7 +180,105 @@ def substitute(value, scope):
     return value
 
 
+# --- deep-link query strings ----------------------------------------------------
+# A deep link that carries free text (a message body, a subject line) cannot be built by
+# interpolating it into the url: a space, `&` or `#` in the text would corrupt the link. The
+# DSL cannot compute, so `goto` takes the parameters as DATA and this does the encoding.
+
+def with_query(url, params):
+    """`url` with `params` ({name: value}) appended as a percent-encoded query string.
+
+    Spaces become `%20` (not `+`), and `&` `=` `#` `/` and non-ASCII are all escaped, so any
+    text survives as ONE parameter. Appends with `&` when the url already has a `?`, and goes
+    BEFORE a `#fragment`. A bool encodes as `true`/`false`. A value that is not a string, number
+    or bool (an unset input resolves to None) raises FlowError — a silent `None` in a link is
+    worse than a refused step."""
+    pairs = []
+    for name, value in params.items():
+        if value is None:
+            raise FlowError("query param %r has no value" % name)
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        elif not isinstance(value, (str, int, float)):
+            raise FlowError("query param %r must be a string, number or boolean (got %s)"
+                            % (name, type(value).__name__))
+        pairs.append((str(name), str(value)))
+    if not pairs:
+        return url
+    qs = urllib.parse.urlencode(pairs, quote_via=urllib.parse.quote)
+    base, hash_, fragment = url.partition("#")
+    sep = "" if base.endswith(("?", "&")) else ("&" if "?" in base else "?")
+    return base + sep + qs + hash_ + fragment
+
+
+def press_key_error(key):
+    """Why `key` is not a usable `press` key, or None. `pinchtab press` takes ONE key name, and
+    a combination such as "Control+a" would be typed literally, so a `+` is refused rather than
+    silently doing the wrong thing. Shared by validate() and the runner (the key may be a
+    `${…}` that only resolves at run time)."""
+    if not isinstance(key, str) or not key.strip():
+        return "requires `key` to be a non-empty key name such as Enter, Escape or ArrowDown"
+    if "+" in key:
+        return ("takes ONE key name, but %r is a combination (it contains '+') and `pinchtab "
+                "press` would type it literally — use `type` for text" % key)
+    return None
+
+
 # --- validation ----------------------------------------------------------------
+
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# Boolean keys that must be a real true/false: `"submit": "false"` is a truthy string, and a
+# write flag that reads as "off" but behaves as "on" is exactly the mistake validate() is for.
+_FLAG_KEYS = {"goto": ("new_tab",), "click": ("submit", "js"), "press": ("submit",), "extract": ("all", "required")}
+
+
+def _need_flag(op, step, key, path):
+    if key in step and not isinstance(step[key], bool):
+        raise FlowError("op %r requires `%s` to be true or false" % (op, key), path)
+
+
+def _need_text(op, step, key, path):
+    if key in step and (not isinstance(step[key], str) or not step[key].strip()):
+        raise FlowError("op %r requires `%s` to be a non-empty string" % (op, key), path)
+
+
+def _validate_args(op, step, path):
+    """The per-op checks the generic req/one_of table cannot express (types, combinations)."""
+    if op == "goto" and step.get("new_tab") and not step.get("url"):
+        raise FlowError("op 'goto' takes `new_tab` only together with `url`", path)
+    if op == "goto" and "query" in step:
+        query = step["query"]
+        if not step.get("url"):
+            raise FlowError("op 'goto' takes `query` only together with `url`", path)
+        if not isinstance(query, dict):
+            raise FlowError("op 'goto' requires `query` to be an object of {param: value}", path)
+        for name, value in query.items():
+            if not name:
+                raise FlowError("op 'goto' has a `query` param with an empty name", path)
+            if not isinstance(value, (str, int, float)):     # a bool is an int — fine too
+                raise FlowError("op 'goto' requires `query` param %r to be a string, number "
+                                "or boolean" % name, path)
+    for key in _FLAG_KEYS.get(op, ()):
+        _need_flag(op, step, key, path)
+    if op == "press":
+        key = step["key"]
+        # a `${…}` key only resolves at run time; the runner re-checks it then.
+        if not (isinstance(key, str) and _VAR_RE.search(key)):
+            problem = press_key_error(key)
+            if problem:
+                raise FlowError("op 'press' " + problem, path)
+        _need_text(op, step, "selector", path)
+    elif op == "extract":
+        into = step["into"]
+        if not isinstance(into, str) or not _IDENT_RE.fullmatch(into):
+            raise FlowError("op 'extract' requires `into` to be a variable name "
+                            "(letters, digits, underscore)", path)
+        if into == "run":
+            raise FlowError("op 'extract' cannot bind `into` 'run': that name is reserved", path)
+        for key in ("selector", "attr", "pattern"):
+            _need_text(op, step, key, path)
+
 
 def _validate_step(step, path, depth, counter):
     if not isinstance(step, dict):
@@ -185,6 +301,8 @@ def _validate_step(step, path, depth, counter):
     one_of = spec.get("one_of", ())
     if one_of and not any(k in step for k in one_of):
         raise FlowError("op %r requires one of: %s" % (op, ", ".join(one_of)), path)
+
+    _validate_args(op, step, path)
 
     if op in BODY_OPS:
         body = step.get("body")
@@ -282,8 +400,8 @@ BODY_VARS = {"for_each": {"index"}, "paginate": {"page"}}
 
 
 def _check_references(flow):
-    """Every `${var}` must resolve to a declared input, a loop var in scope, a `set`/`collect`
-    var, or a built-in. Catches the typo class of bug at save time rather than at 3am."""
+    """Every `${var}` must resolve to a declared input, a loop var in scope, a `set`/`collect`/
+    `extract` var, or a built-in. Catches the typo class of bug at save time rather than at 3am."""
     declared = set(flow.get("inputs") or {})
 
     def walk(steps, scope, path):
@@ -298,9 +416,9 @@ def _check_references(flow):
                         "in scope, or a built-in" % (ref, root), here)
             if step["op"] == "set":
                 scope.add(step["var"])
-            elif step["op"] == "collect":
-                # the runner writes the collection back to `run.vars[into]`, so a later
-                # `${into}` is legal — validate() must agree with what the VM does.
+            elif step["op"] in ("collect", "extract"):
+                # the runner writes the collection / extracted value back to `run.vars[into]`,
+                # so a later `${into}` is legal — validate() must agree with what the VM does.
                 scope.add(step["into"])
             if step["op"] == "for_each":
                 walk(step["body"],
@@ -375,7 +493,7 @@ def _check_capabilities(flow):
         for step in steps:
             if step["op"] in WRITE_OPS:
                 used.add(step["op"])
-            if step["op"] == "do" and step.get("submit"):
+            if (step["op"] == "do" or step["op"] in SUBMIT_FLAG_OPS) and step.get("submit"):
                 used.add("submit")
             for child in step.get("body") or []:
                 walk([child])

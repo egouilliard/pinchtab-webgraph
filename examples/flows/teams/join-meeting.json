@@ -1,0 +1,22 @@
+{
+  "name": "teams-join-meeting",
+  "host": "teams.cloud.microsoft",
+  "inputs": {
+    "meeting_id": {"type": "string", "required": true, "description": "the digits in a join URL https://teams.microsoft.com/meet/<meeting_id>?p=<passcode>"},
+    "passcode": {"type": "string", "required": true, "description": "the p= value of the join URL"},
+    "stay_ms": {"type": "integer", "required": false, "default": 5000, "description": "how long to stay in the meeting before leaving, in ms"}
+  },
+  "capabilities": {"allow_submit": true, "allow_download": false},
+  "steps": [
+    {"op": "goto", "url": "https://teams.cloud.microsoft/meet/${meeting_id}", "query": {"p": "${passcode}"}, "new_tab": true},
+    {"op": "wait", "text": "Continue without audio or video", "timeout_ms": 60000},
+    {"op": "click", "text": "Continue without audio or video", "js": true},
+    {"op": "wait", "selector": "#prejoin-join-button", "timeout_ms": 30000},
+    {"op": "click", "selector": "#prejoin-join-button", "js": true, "submit": true},
+    {"op": "wait", "selector": "#hangup-button", "timeout_ms": 60000},
+    {"op": "log", "message": "joined meeting ${meeting_id}"},
+    {"op": "wait", "ms": "${stay_ms}"},
+    {"op": "click", "selector": "#hangup-button", "js": true},
+    {"op": "wait", "ms": 3000}
+  ]
+}

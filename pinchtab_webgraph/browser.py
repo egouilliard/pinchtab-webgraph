@@ -34,6 +34,7 @@ import base64
 import json
 import os
 import subprocess
+from urllib.parse import urlparse
 
 from . import commands
 
@@ -524,6 +525,21 @@ class PinchTabBrowser:
         return self.evaluate("location.href") or ""
 
 
+def _hostname(url):
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _responsive(server, token, tab, _run=None):
+    """Does this tab still answer a trivial eval? A hung page times out every command."""
+    try:
+        return PinchTabBrowser(server, token, tab, timeout=5, _run=_run).evaluate("1") == 1
+    except BrowserError:
+        return False
+
+
 def resolve_tab(server, token, url=None, _run=None):
     """Pin a live page tab. PinchTab stores a DEFAULT tab id which goes stale, after which
     every command 404s with 'tab not found' — so a run resolves one up front.
@@ -533,6 +549,11 @@ def resolve_tab(server, token, url=None, _run=None):
     is the ONLY way to create a tab, and it needs a REAL url (the bridge rejects a blank-page
     url with `400 invalid url`, so there is no blank-tab fallback to fall back to).
 
+    When `url` is known, only a tab already on THAT host is adopted, and only one that still
+    answers an eval: a bridge restores every tab of its last session, so "any page tab" can be
+    another site entirely (the run would navigate it away) or a hung page (every eval times
+    out). With no such tab we open our own at `url` rather than hijack one.
+
     Returning None is SAFE: `PinchTabBrowser.nav` self-heals a missing tab at its target url."""
     probe = PinchTabBrowser(server, token, None, timeout=15, _run=_run)
     try:
@@ -540,7 +561,13 @@ def resolve_tab(server, token, url=None, _run=None):
         if isinstance(tabs, dict):
             tabs = tabs.get("tabs", [])
         pages = [t for t in tabs if t.get("type") == "page" and t.get("id")]
-        if pages:
+        if pages and url:
+            host = _hostname(url)
+            for t in pages:                  # the bridge lists tabs most-recently-used first
+                if host and _hostname(t.get("url") or "") == host and \
+                        _responsive(server, token, t["id"], _run):
+                    return t["id"]
+        elif pages:
             active = [t for t in pages if t.get("status") == "active"] or pages
             return active[-1]["id"]
     except (BrowserError, ValueError, TypeError):

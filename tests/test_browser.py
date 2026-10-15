@@ -407,6 +407,45 @@ def test_resolve_tab_opens_a_new_tab_at_the_url_when_there_are_none():
     assert "--new-tab" in run.calls[-1] and "--print-tab-id" in run.calls[-1]
 
 
+_RESTORED = json.dumps({"tabs": [            # a restored session, most-recently-used first
+    {"id": "odoo", "type": "page", "status": "active", "url": "https://other.test/login"},
+    {"id": "hung", "type": "page", "status": "active", "url": "https://x.test/deep?a=1"},
+    {"id": "app", "type": "page", "status": "active", "url": "https://X.test/"},
+    {"id": "old", "type": "page", "status": "active", "url": "https://login.test/auth"},
+]})
+
+
+def test_resolve_tab_adopts_a_responsive_tab_on_the_urls_host(monkeypatch):
+    monkeypatch.setattr(B, "_responsive", lambda s, t, tab, _run=None: tab != "hung")
+    run = FakeRun(script={"tab": (0, _RESTORED, "")})
+    assert B.resolve_tab("http://s", "tok", "https://x.test/l/new", _run=run) == "app"
+    assert not any(c[0] == "nav" for c in run.calls)       # nothing hijacked, nothing opened
+
+
+def test_resolve_tab_never_hijacks_another_hosts_tab(monkeypatch):
+    # the old rule ("the last active page") adopted whatever the bridge restored — here a
+    # stale login page — and the run navigated it away
+    monkeypatch.setattr(B, "_responsive", lambda s, t, tab, _run=None: True)
+    run = FakeRun(script={"tab": (0, _RESTORED, ""), "nav": (0, "opened\nnewtab", "")})
+    assert B.resolve_tab("http://s", "tok", "https://elsewhere.test/a", _run=run) == "newtab"
+    assert run.calls[-1] == ["nav", "--new-tab", "--print-tab-id", "--",
+                             "https://elsewhere.test/a"]
+
+
+def test_resolve_tab_opens_its_own_tab_when_every_same_host_tab_is_hung(monkeypatch):
+    monkeypatch.setattr(B, "_responsive", lambda s, t, tab, _run=None: False)
+    run = FakeRun(script={"tab": (0, _RESTORED, ""), "nav": (0, "newtab", "")})
+    assert B.resolve_tab("http://s", "tok", "https://x.test/a", _run=run) == "newtab"
+
+
+def test_responsive_is_a_trivial_eval_with_a_short_timeout():
+    run = FakeRun(script={"eval": (0, "1", "")})
+    assert B._responsive("http://s", "tok", "t1", _run=run) is True
+    assert run.calls[-1][0] == "eval" and run.timeouts[-1] <= 5
+    assert B._responsive("http://s", "tok", "t1",
+                         _run=FakeRun(script={"eval": (1, "", "context deadline exceeded")})) is False
+
+
 def test_resolve_tab_returns_none_with_no_tabs_and_no_url():
     # THE BUG: this used to `nav about:blank --new-tab`, which the bridge rejects with
     # `400 invalid url` — so on a fresh, zero-tab bridge resolve_tab returned None anyway and

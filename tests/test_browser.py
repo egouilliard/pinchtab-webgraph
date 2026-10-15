@@ -45,16 +45,33 @@ def test_each_method_sends_the_exact_argv():
     b.check("#k")
     b.upload("#u", "/tmp/x.pdf")
     b.download("https://x.test/f.pdf", "out.pdf")
+    # terminator-safe (commands.cli_argv): flag values glued with "=", positionals after "--"
     assert run.calls == [
-        ["nav", "https://x.test/a"],
+        ["nav", "--", "https://x.test/a"],
         # --wait-nav: a click that navigates otherwise 409s ("unexpected page navigation")
         # after the page has already moved — which would abort a paginating flow.
-        ["click", "--css", "#c", "--wait-nav"],
-        ["fill", "#f", "v"],
-        ["select", "#s", "opt"],
-        ["check", "#k"],
-        ["upload", "/tmp/x.pdf", "-s", "#u"],
-        ["download", "https://x.test/f.pdf", "-o", "out.pdf"],
+        ["click", "--css=#c", "--wait-nav"],
+        ["fill", "--", "#f", "v"],
+        ["select", "--", "#s", "opt"],
+        ["check", "--", "#k"],
+        ["upload", "-s=#u", "--", "/tmp/x.pdf"],
+        ["download", "-o=out.pdf", "--", "https://x.test/f.pdf"],
+    ]
+
+
+def test_a_value_that_looks_like_a_flag_stays_a_value():
+    # a flow input / message body starting with "-" must never reach the CLI as a flag —
+    # "--tab=<id>" would otherwise retarget the action to another tab
+    b, run = _browser()
+    b.fill("#f", "--tab=OTHER")
+    b.keyboard_type("--help")
+    b.press("-")
+    b.click("--wait-nav")
+    assert run.calls == [
+        ["fill", "--", "#f", "--tab=OTHER"],
+        ["keyboard", "type", "--", "--help"],
+        ["press", "--", "-"],
+        ["click", "--css=--wait-nav", "--wait-nav"],
     ]
 
 
@@ -68,7 +85,7 @@ def test_fill_and_select_stringify_a_non_string_value():
     b, run = _browser()
     b.fill("#f", 7)
     b.select("#s", 2)
-    assert run.calls == [["fill", "#f", "7"], ["select", "#s", "2"]]
+    assert run.calls == [["fill", "--", "#f", "7"], ["select", "--", "#s", "2"]]
 
 
 def test_subprocess_argv_carries_the_server_and_env():
@@ -120,16 +137,16 @@ def test_focus_press_and_keyboard_type_send_the_exact_argv():
     b.keyboard_type("hello world & more")
     assert run.calls == [
         # a positional arg to `pinchtab focus` is a REF; a CSS selector needs --css (as in click)
-        ["focus", "--css", "#to"],
-        ["press", "Enter"],
-        ["keyboard", "type", "hello world & more"],     # ONE argv token, however odd the text
+        ["focus", "--css=#to"],
+        ["press", "--", "Enter"],
+        ["keyboard", "type", "--", "hello world & more"],   # ONE argv token, however odd the text
     ]
 
 
 def test_keyboard_type_stringifies_a_non_string_value():
     b, run = _browser()
     b.keyboard_type(42)
-    assert run.calls == [["keyboard", "type", "42"]]
+    assert run.calls == [["keyboard", "type", "--", "42"]]
 
 
 @pytest.mark.parametrize("method, args", [("focus", ("#x",)), ("press", ("Enter",)),
@@ -386,7 +403,7 @@ def test_resolve_tab_falls_back_to_the_last_page_when_none_is_active():
 def test_resolve_tab_opens_a_new_tab_at_the_url_when_there_are_none():
     run = FakeRun(script={"tab": (0, "[]", ""), "nav": (0, "opened\nnewtab", "")})
     assert B.resolve_tab("http://s", "tok", "https://x.test/a", _run=run) == "newtab"
-    assert run.calls[-1][:2] == ["nav", "https://x.test/a"]
+    assert run.calls[-1] == ["nav", "--new-tab", "--print-tab-id", "--", "https://x.test/a"]
     assert "--new-tab" in run.calls[-1] and "--print-tab-id" in run.calls[-1]
 
 
@@ -446,8 +463,8 @@ def test_nav_retries_in_a_new_tab_and_pins_it_when_the_tab_is_missing():
     b = ref["b"] = B.PinchTabBrowser("http://s", "tok", None, _run=run)
     b.nav("https://x.test/a")
     # retried at the SAME url, with --new-tab --print-tab-id
-    assert run.calls == [["nav", "https://x.test/a"],
-                         ["nav", "https://x.test/a", "--new-tab", "--print-tab-id"]]
+    assert run.calls == [["nav", "--", "https://x.test/a"],
+                         ["nav", "--new-tab", "--print-tab-id", "--", "https://x.test/a"]]
     assert b.tab == "fresh"                       # the printed id is pinned on the instance
     # and a SUBSEQUENT command now carries that tab (it succeeds against the zero-tab bridge)
     b.click("#c")
@@ -460,5 +477,5 @@ def test_nav_does_not_retry_a_genuine_failure():
     b = B.PinchTabBrowser("http://s", "tok", "tab1", _run=run)
     with pytest.raises(B.BrowserError):
         b.nav("not-a-url")
-    assert run.calls == [["nav", "not-a-url"]]    # no --new-tab retry: the error must surface
+    assert run.calls == [["nav", "--", "not-a-url"]]    # no --new-tab retry: the error must surface
     assert b.tab == "tab1"

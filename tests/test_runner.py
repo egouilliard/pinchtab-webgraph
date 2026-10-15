@@ -186,6 +186,40 @@ def test_a_url_that_leaves_the_declared_host_aborts():
     assert fb.calls == []            # nothing was navigated
 
 
+@pytest.mark.parametrize("url", [
+    "https://evil.test\\@app.test/",     # Chrome: host evil.test; urlparse: host app.test
+    "https:\\\\evil.test/x",             # no host for urlparse — used to SKIP the guard
+    "javascript:alert(1)",
+    "data:text/html,<script>1</script>",
+    "https://app.test@evil.test/",       # userinfo hides the real host
+    "https://app.test/ x",               # whitespace — parsers disagree
+    "ftp://app.test/x",
+])
+def test_the_host_guard_refuses_urls_a_browser_could_read_differently(url):
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "goto", "url": url}], flow_kw={"host": "app.test"})
+    assert res["status"] == "aborted"
+    assert fb.calls == []            # nothing was navigated
+
+
+@pytest.mark.parametrize("host, url", [
+    ("app.test", "HTTPS://APP.test/x"),          # host match is case-insensitive
+    ("*.app.test", "https://eu.app.test/x"),
+    ("App.Test", "https://app.test/x"),
+])
+def test_the_host_guard_still_admits_its_own_host(host, url):
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "goto", "url": url}], flow_kw={"host": host})
+    assert res["status"] == "ok"
+    assert fb.calls == [("nav", url)]
+
+
+def test_a_flow_without_a_host_is_not_guarded():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "goto", "url": "https://anywhere.test/x"}])
+    assert res["status"] == "ok"
+
+
 def test_inputs_substitute_into_steps():
     fb = FakeBrowser()
     res = runner.execute(

@@ -104,7 +104,8 @@ def resolve_tab(server, token, url=None, _run=_pt):
             pass
     if not url:
         return None
-    rc, out, _ = _run(["nav", url, "--new-tab", "--print-tab-id"], server, token, None)
+    rc, out, _ = _run(commands.cli_argv(["nav", url, "--new-tab", "--print-tab-id"]),
+                      server, token, None)
     return _printed_tab_id(out) if rc == 0 else None
 
 
@@ -167,14 +168,16 @@ def execute_steps(steps, *, server=DEFAULT_SERVER, token=None, tab=None,
         if dry_run:
             out.append({"line": shown, "role": role, "status": "dry-run"})
             continue
-        rc, sout, serr = _run(argv, server, token, tab)
+        # terminator-safe: a --set value starting with "-" must never reach the CLI as a flag
+        rc, sout, serr = _run(commands.cli_argv(argv), server, token, tab)
         if rc != 0 and role == "nav" and _tab_is_missing(serr + sout):
             # SELF-HEAL a missing tab. `tab` is None (nothing to adopt on a fresh bridge, so
             # the bridge fell back to its STALE stored default) or its tab has since closed —
             # either way every later step would 404 the same way. Re-nav to the SAME url in a
             # new tab and pin the id it prints, so the rest of the plan lands on a live tab.
             # Only a "tab not found" failure is retried; a genuine nav error still errors.
-            rc, sout, serr = _run(argv + ["--new-tab", "--print-tab-id"], server, token, None)
+            rc, sout, serr = _run(commands.cli_argv(argv + ["--new-tab", "--print-tab-id"]),
+                                  server, token, None)
             if rc == 0:
                 tab = _printed_tab_id(sout) or tab
         rec = {"line": shown, "role": role, "status": "ok" if rc == 0 else "error", "rc": rc}

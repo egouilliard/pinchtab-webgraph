@@ -35,6 +35,8 @@ import json
 import os
 import subprocess
 
+from . import commands
+
 DEFAULT_SERVER = "http://localhost:9871"
 
 # Cap on an in-session fetch. The bytes cross the CDP boundary base64-encoded inside a JSON
@@ -338,7 +340,9 @@ class PinchTabBrowser:
             return 124, "", "timeout"
 
     def run(self, argv, timeout=None):
-        rc, out, err = self._run(list(argv), timeout or self.timeout)
+        # terminator-safe: a value starting with "-" must never reach the CLI as a flag
+        argv = commands.cli_argv(argv)
+        rc, out, err = self._run(argv, timeout or self.timeout)
         if rc != 0:
             raise BrowserError(err or out or ("pinchtab %s failed (rc=%d)" % (argv[0], rc)),
                                step_fatal=argv[0] in ("nav", "click"))

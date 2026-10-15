@@ -72,13 +72,6 @@ def _fatal(exc):
     return isinstance(exc, browser_mod.BrowserError) and exc.step_fatal
 
 
-def _host_of(url):
-    try:
-        return urlparse(url).hostname or ""
-    except ValueError:
-        return ""
-
-
 class Runner:
     def __init__(self, browser, *, graph_path=None, store=None, sleep=time.sleep):
         self.browser = browser
@@ -216,9 +209,25 @@ class Runner:
     def _guard_host(self, url, run):
         """A flow declares its `host`; a url step that leaves it is refused. Without this a
         saved flow is an open redirect the moment it takes a `${input}` in a url."""
-        host = run.flow.get("host")
-        target = _host_of(url)
-        if host and target and not (target == host or fnmatch.fnmatch(target, host)):
+        host = (run.flow.get("host") or "").lower()
+        if not host:
+            return
+        # The guard must judge the url the BROWSER will load, so refuse anything Python and a
+        # browser can parse differently, or that has no host to judge: a backslash (a path
+        # separator to Chrome, not to urlparse — `https://evil.com\@ok.host/`), whitespace or
+        # control characters, userinfo (`ok.host@evil.com`), and a host-less url
+        # (`javascript:`, `data:`, `https:\\evil.com`) — which used to skip the check entirely.
+        try:
+            p = urlparse(url)
+            target = (p.hostname or "").lower()
+        except ValueError:
+            p, target = None, ""
+        if (p is None or p.scheme.lower() not in ("http", "https") or not target
+                or "@" in p.netloc or "\\" in url
+                or any(ord(c) <= 0x20 or ord(c) == 0x7f for c in url)):
+            raise _Abort("step navigates to %r, which is not a plain http(s) url on the "
+                         "flow's host %r" % (url[:120], host))
+        if not (target == host or fnmatch.fnmatchcase(target, host)):
             raise _Abort("step navigates to %r but the flow declares host %r" % (target, host))
 
     # --- direct element ops ------------------------------------------------------

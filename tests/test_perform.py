@@ -42,14 +42,14 @@ def test_download_runs_nav_then_download():
     assert [r["status"] for r in res] == ["ok", "ok", "ok"]
     # nav home, nav reports, download
     assert run.calls[0][0] == "nav"
-    assert run.calls[-1][:2] == ["download", "https://app.test/files/q3.pdf"]
+    assert run.calls[-1] == ["download", "-o=q3.pdf", "--", "https://app.test/files/q3.pdf"]
 
 
 def test_download_out_dir_rewrites_output():
     run = FakeRunner()
     perform.execute_plan(_DL, _PATH, "https://app.test/home", out_dir="/tmp/dl", _run=run)
     dl = run.calls[-1]
-    assert dl[dl.index("-o") + 1] == "/tmp/dl/q3.pdf"
+    assert "-o=/tmp/dl/q3.pdf" in dl
 
 
 def test_form_skips_fields_without_values_and_gates_submit():
@@ -62,17 +62,17 @@ def test_form_skips_fields_without_values_and_gates_submit():
     assert {r["role"] for r in skipped} == {"fill", "select", "submit"}
     # crucially: no fill/select/submit was ever sent to the browser
     assert not any(c[0] in ("fill", "select") for c in run.calls)
-    assert not any(c[:2] == ["click", "--css"] and c[2] == "#save" for c in run.calls)
+    assert not any(c[0] == "click" and "--css=#save" in c for c in run.calls)
 
 
 def test_form_runs_fields_with_values_and_submit_when_allowed():
     run = FakeRunner()
     perform.execute_plan(_FORM, _PATH, "https://app.test/home", allow_submit=True,
                          values={"Name": "Acme", "Plan": "Pro"}, _run=run)
-    assert ["fill", "#n", "Acme"] in run.calls
-    assert ["select", "#p", "Pro"] in run.calls
+    assert ["fill", "--", "#n", "Acme"] in run.calls
+    assert ["select", "--", "#p", "Pro"] in run.calls
     # submit ran (allow_submit) — and carries --wait-nav (see below)
-    assert ["click", "--css", "#save", "--wait-nav"] in run.calls
+    assert ["click", "--css=#save", "--wait-nav"] in run.calls
 
 
 # --- regression: a click that NAVIGATES must not abort the run ------------------
@@ -128,7 +128,7 @@ def test_upload_field_needs_file():
     # with --file → runs with the real path
     run2 = FakeRunner()
     perform.execute_plan(trig, [], "https://app.test/x", upload_file="/x.pdf", _run=run2)
-    assert ["upload", "/x.pdf", "-s", "#d"] in run2.calls
+    assert ["upload", "-s=#d", "--", "/x.pdf"] in run2.calls
 
 
 def test_aborts_when_a_navigation_step_fails():
@@ -168,7 +168,7 @@ def test_resolve_tab_opens_the_first_tab_at_the_start_url():
     run = ZeroTabRunner()
     assert perform.resolve_tab("s", None, "https://app.test/home", _run=run) == "fresh"
     argv = run.calls[-1][0]
-    assert argv[:2] == ["nav", "https://app.test/home"]
+    assert argv == ["nav", "--new-tab", "--print-tab-id", "--", "https://app.test/home"]
     assert "--new-tab" in argv and "--print-tab-id" in argv
     assert not any("about:blank" in " ".join(c[0]) for c in run.calls)
 
@@ -191,10 +191,10 @@ def test_zero_tab_bridge_does_not_abort_the_run():
     # the first nav was retried at the SAME url with --new-tab, and every later call carried
     # the tab it printed.
     first, retry = run.calls[0], run.calls[1]
-    assert first[0] == ["nav", "https://app.test/home"] and first[1] is None
-    assert retry[0] == ["nav", "https://app.test/home", "--new-tab", "--print-tab-id"]
+    assert first[0] == ["nav", "--", "https://app.test/home"] and first[1] is None
+    assert retry[0] == ["nav", "--new-tab", "--print-tab-id", "--", "https://app.test/home"]
     assert [c[1] for c in run.calls[2:]] == ["fresh"] * len(run.calls[2:])
-    assert run.calls[-1][0][:2] == ["download", "https://app.test/files/q3.pdf"]
+    assert run.calls[-1][0] == ["download", "-o=q3.pdf", "--", "https://app.test/files/q3.pdf"]
 
 
 def test_a_genuine_nav_failure_is_not_retried_in_a_new_tab():
@@ -296,7 +296,7 @@ def test_checkbox_with_a_truthy_value_is_checked():
                                values={"Active": "true"}, _run=run)
     check = [r for r in res if r["role"] == "check"][0]
     assert check["status"] == "ok"
-    assert ["check", "#active"] in run.calls        # argv is UNCHANGED — no substitution
+    assert ["check", "--", "#active"] in run.calls        # argv is UNCHANGED — no substitution
 
 
 def test_checkbox_with_a_falsy_value_is_skipped_not_crashed():
@@ -307,3 +307,11 @@ def test_checkbox_with_a_falsy_value_is_skipped_not_crashed():
     assert check["status"] == "skipped"
     assert "falsy" in check["reason"]
     assert not any(c[0] == "check" for c in run.calls)
+
+
+def test_a_set_value_that_looks_like_a_flag_stays_a_value():
+    # `--set Name=--tab=OTHER` must fill the field, not retarget the CLI to another tab
+    run = FakeRunner()
+    perform.execute_plan(_FORM, _PATH, "https://app.test/home",
+                         values={"Name": "--tab=OTHER", "Plan": "Pro"}, _run=run)
+    assert ["fill", "--", "#n", "--tab=OTHER"] in run.calls

@@ -1,0 +1,21 @@
+{
+  "name": "teams-create-meeting",
+  "host": "teams.cloud.microsoft",
+  "inputs": {
+    "subject": {"type": "string", "required": true, "description": "meeting title"},
+    "start": {"type": "string", "required": true, "description": "start, ISO 8601 with an explicit offset, e.g. 2026-10-16T15:00:00+02:00"},
+    "end": {"type": "string", "required": true, "description": "end, ISO 8601 with an explicit offset"},
+    "attendees": {"type": "string", "required": false, "default": "", "description": "attendee email addresses, comma-separated (empty = only you, no invite is sent)"},
+    "details": {"type": "string", "required": false, "default": "", "description": "meeting description"}
+  },
+  "capabilities": {"allow_submit": true, "allow_download": false},
+  "steps": [
+    {"op": "goto", "url": "https://teams.cloud.microsoft/l/meeting/new", "query": {"subject": "${subject}", "startTime": "${start}", "endTime": "${end}", "attendees": "${attendees}", "content": "${details}"}},
+    {"op": "wait", "selector": "#cv2-sf-meeting-subject-input", "timeout_ms": 45000},
+    {"op": "wait", "ms": 2000},
+    {"op": "extract", "into": "form_subject", "selector": "#cv2-sf-meeting-subject-input", "attr": "value"},
+    {"op": "click", "selector": "[data-tid=calv2-sf-save]", "js": true, "submit": true},
+    {"op": "wait", "ms": 6000},
+    {"op": "log", "message": "saved '${subject}' — join-link extraction is added once the calendar loads (needs a fresh sign-in)"}
+  ]
+}

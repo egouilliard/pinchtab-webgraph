@@ -51,6 +51,7 @@ class Run:
         self.artifacts = []
         self.collected = {}
         self.outputs = {}          # `extract` results by `into`: the run's answer
+        self.opened_tabs = False   # did a `goto {new_tab}` open a tab the run must close?
         self.executed = 0
         self.started = time.time()
         self.aborted = None
@@ -102,6 +103,11 @@ class Runner:
             self._exec_steps(flow["steps"], run)
         except _Abort as stop:
             run.aborted = str(stop)
+        finally:
+            # tabs a `goto {new_tab}` opened are the run's own — close them, or every run
+            # leaves one behind
+            if run.opened_tabs:
+                self.browser.close_opened_tabs()
 
         status = "aborted" if run.aborted else (
             "error" if any(s.get("status") == "error" for s in run.steps) else "ok")
@@ -169,10 +175,15 @@ class Runner:
                     raise _Abort(str(exc))
             # the guard sees the FINAL url — the one that is actually navigated.
             self._guard_host(url, run)
+            new_tab = bool(r.get("new_tab"))
             if run.dry_run:
-                return run.record("goto", "dry-run", url=url)
-            self.browser.nav(url)
-            return run.record("goto", "ok", url=url)
+                return run.record("goto", "dry-run", url=url, new_tab=new_tab)
+            if new_tab:
+                run.opened_tabs = True
+                self.browser.open_tab(url)
+            else:
+                self.browser.nav(url)
+            return run.record("goto", "ok", url=url, new_tab=new_tab)
 
         plan = self._resolve(r.get("goal"), r, run)
         if run.dry_run:

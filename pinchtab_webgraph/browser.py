@@ -374,6 +374,38 @@ class PinchTabBrowser:
         if tab:
             self.tab = tab                 # every later command now targets the live tab
 
+    def open_tab(self, url):
+        """Load `url` in a FRESH tab and target it from now on (`goto {new_tab}`). An app
+        shell can hang forever on a same-tab navigation to its own deep link — the url
+        changes, the document never commits, every eval times out — while a fresh load works.
+        The tab is remembered so `close_opened_tabs` can close it when the run ends."""
+        tab = _printed_tab_id(self.run(["nav", url, "--new-tab", "--print-tab-id"]))
+        if not tab:
+            raise BrowserError("opened %s in a new tab but the bridge printed no tab id" % url,
+                               step_fatal=True)
+        self.tab = tab
+        self._opened = getattr(self, "_opened", []) + [tab]
+
+    def close_opened_tabs(self):
+        """Close every tab `open_tab` opened. The CLI has no close command; the bridge's
+        HTTP API does (`POST /tab {"action":"close","tabId":…}`). Best effort: a tab that
+        will not close is left, never an error that would mask the run's real outcome."""
+        for tab in getattr(self, "_opened", []):
+            try:
+                self._close_tab(tab)
+            except Exception:              # noqa: BLE001 — cleanup must not raise
+                pass
+        self._opened = []
+
+    def _close_tab(self, tab):
+        import urllib.request
+        req = urllib.request.Request(
+            self.server.rstrip("/") + "/tab", method="POST",
+            data=json.dumps({"action": "close", "tabId": tab}).encode(),
+            headers={"Content-Type": "application/json",
+                     **({"Authorization": "Bearer " + self.token} if self.token else {})})
+        urllib.request.urlopen(req, timeout=10).read()
+
     def click(self, selector):
         """Click, and TOLERATE a navigation.
 

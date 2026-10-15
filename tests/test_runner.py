@@ -46,6 +46,12 @@ class FakeBrowser:
     def nav(self, url):
         self._rec("nav", url)
 
+    def open_tab(self, url):
+        self._rec("open_tab", url)
+
+    def close_opened_tabs(self):
+        self._rec("close_opened_tabs")
+
     def click(self, selector):
         self._rec("click", selector)
 
@@ -147,7 +153,7 @@ def _names(fb):
     return [c[0] for c in fb.calls]
 
 
-MUTATING = {"nav", "click", "click_js", "fill", "select", "check", "upload", "download",
+MUTATING = {"nav", "open_tab", "click", "click_js", "fill", "select", "check", "upload", "download",
             "save_bytes", "fetch_bytes", "focus", "press", "keyboard_type"}
 
 
@@ -1183,3 +1189,45 @@ def test_click_js_dry_run_touches_nothing():
     res = _run(fb, [{"op": "click", "selector": "#go", "js": True}], dry_run=True)
     assert fb.calls == []
     assert _events(res, "click", "dry-run")[0]["js"] is True
+
+
+# --- goto {new_tab} ----------------------------------------------------------------
+
+def test_goto_new_tab_opens_a_fresh_tab_and_the_run_closes_it():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "goto", "url": "https://app.test/l/x", "new_tab": True},
+                    {"op": "click", "selector": "#b"}], flow_kw={"host": "app.test"})
+    assert res["status"] == "ok"
+    assert fb.calls == [("open_tab", "https://app.test/l/x"), ("click", "#b"),
+                        ("close_opened_tabs",)]
+    assert _events(res, "goto", "ok")[0]["new_tab"] is True
+
+
+def test_opened_tabs_are_closed_even_when_the_run_aborts():
+    fb = FakeBrowser(fail={"click": BrowserError("gone", step_fatal=True)})
+    res = _run(fb, [{"op": "goto", "url": "https://app.test/", "new_tab": True},
+                    {"op": "click", "selector": "#b"}])
+    assert res["status"] == "aborted"
+    assert fb.calls[-1] == ("close_opened_tabs",)
+
+
+def test_goto_new_tab_is_host_guarded_and_dry_run_touches_nothing():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "goto", "url": "https://evil.test/", "new_tab": True}],
+               flow_kw={"host": "app.test"})
+    assert res["status"] == "aborted" and ("open_tab", "https://evil.test/") not in fb.calls
+    fb = FakeBrowser()
+    res = runner.execute(_flow([{"op": "goto", "url": "https://app.test/", "new_tab": True}]),
+                         browser=fb, dry_run=True, sleep=lambda s: None)
+    assert fb.calls == []
+
+
+@pytest.mark.parametrize("step, msg", [
+    ({"op": "goto", "goal": "x", "new_tab": True}, "only together with `url`"),
+    ({"op": "goto", "url": "https://a.test/", "new_tab": "yes"}, "true or false"),
+])
+def test_goto_new_tab_validation(step, msg):
+    from pinchtab_webgraph import flow as flow_mod
+    with pytest.raises(flow_mod.FlowError) as exc:
+        flow_mod.validate(_flow([step]))
+    assert msg in str(exc.value)

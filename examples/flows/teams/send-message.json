@@ -7,7 +7,7 @@
   },
   "capabilities": {"allow_submit": true, "allow_download": false},
   "steps": [
-    {"op": "goto", "url": "https://teams.cloud.microsoft/l/chat/0/0", "query": {"users": "${to}", "message": "${message}"}},
+    {"op": "goto", "url": "https://teams.cloud.microsoft/l/chat/0/0", "new_tab": true, "query": {"users": "${to}", "message": "${message}"}},
     {"op": "wait", "selector": "[data-tid=newMessageCommands-send]", "timeout_ms": 45000},
     {"op": "wait", "ms": 2000},
     {"op": "extract", "into": "draft", "selector": "[data-tid=ckeditor][contenteditable=true]", "required": false},

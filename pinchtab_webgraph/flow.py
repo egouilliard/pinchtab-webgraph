@@ -62,8 +62,10 @@ LEAF_OPS = {
     # which resolves on a trigger-label regex ALONE — so a flow must be able to say so.
     # `query` ({param: value}) is only legal with `url`: the runner substitutes, percent-encodes
     # and appends it, because a deep link that carries free text cannot be built by string
-    # interpolation and the DSL deliberately cannot compute.
-    "goto":     {"one_of": ("url", "goal", "match"), "opt": ("start", "match", "query")},
+    # interpolation and the DSL deliberately cannot compute. `new_tab: true` (with `url`)
+    # loads it in a fresh tab the runner pins and closes at the end of the run: an app shell
+    # can hang on a same-tab navigation to its own deep link while a fresh load works.
+    "goto":     {"one_of": ("url", "goal", "match"), "opt": ("start", "match", "query", "new_tab")},
     "do":       {"one_of": ("goal", "match"), "opt": ("set", "file", "submit", "start", "index")},
     # `submit: true` declares the click a WRITE (it sends something); `js: true` dispatches it
     # in the page instead of through CDP, for a click a transient overlay would swallow.
@@ -228,7 +230,7 @@ _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # Boolean keys that must be a real true/false: `"submit": "false"` is a truthy string, and a
 # write flag that reads as "off" but behaves as "on" is exactly the mistake validate() is for.
-_FLAG_KEYS = {"click": ("submit", "js"), "press": ("submit",), "extract": ("all", "required")}
+_FLAG_KEYS = {"goto": ("new_tab",), "click": ("submit", "js"), "press": ("submit",), "extract": ("all", "required")}
 
 
 def _need_flag(op, step, key, path):
@@ -243,6 +245,8 @@ def _need_text(op, step, key, path):
 
 def _validate_args(op, step, path):
     """The per-op checks the generic req/one_of table cannot express (types, combinations)."""
+    if op == "goto" and step.get("new_tab") and not step.get("url"):
+        raise FlowError("op 'goto' takes `new_tab` only together with `url`", path)
     if op == "goto" and "query" in step:
         query = step["query"]
         if not step.get("url"):

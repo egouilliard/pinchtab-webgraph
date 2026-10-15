@@ -10,7 +10,7 @@
   },
   "capabilities": {"allow_submit": true, "allow_download": false},
   "steps": [
-    {"op": "goto", "url": "https://teams.cloud.microsoft/l/meeting/new", "query": {"subject": "${subject}", "startTime": "${start}", "endTime": "${end}", "attendees": "${attendees}", "content": "${details}"}},
+    {"op": "goto", "url": "https://teams.cloud.microsoft/l/meeting/new", "new_tab": true, "query": {"subject": "${subject}", "startTime": "${start}", "endTime": "${end}", "attendees": "${attendees}", "content": "${details}"}},
     {"op": "wait", "selector": "#cv2-sf-meeting-subject-input", "timeout_ms": 45000},
     {"op": "wait", "ms": 2000},
     {"op": "extract", "into": "form_subject", "selector": "#cv2-sf-meeting-subject-input", "attr": "value"},

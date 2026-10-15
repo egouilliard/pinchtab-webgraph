@@ -518,3 +518,34 @@ def test_nav_does_not_retry_a_genuine_failure():
         b.nav("not-a-url")
     assert run.calls == [["nav", "--", "not-a-url"]]    # no --new-tab retry: the error must surface
     assert b.tab == "tab1"
+
+
+# --- open_tab / close_opened_tabs ------------------------------------------------------
+
+def test_open_tab_opens_pins_and_remembers_the_new_tab():
+    run = FakeRun(script={"nav": (0, "navigated\nNEWTAB", "")})
+    b = B.PinchTabBrowser("http://s", "tok", "old", _run=run)
+    b.open_tab("https://x.test/l/a")
+    assert run.calls[-1] == ["nav", "--new-tab", "--print-tab-id", "--", "https://x.test/l/a"]
+    assert b.tab == "NEWTAB" and b._opened == ["NEWTAB"]
+
+
+def test_open_tab_without_a_printed_id_is_step_fatal():
+    b = B.PinchTabBrowser("http://s", "tok", "old", _run=FakeRun(script={"nav": (0, "", "")}))
+    with pytest.raises(B.BrowserError) as exc:
+        b.open_tab("https://x.test/")
+    assert exc.value.step_fatal
+
+
+def test_close_opened_tabs_closes_each_and_never_raises(monkeypatch):
+    b = B.PinchTabBrowser("http://s", "tok", None, _run=FakeRun())
+    b._opened = ["T1", "T2"]
+    closed = []
+
+    def fake_close(tab):
+        closed.append(tab)
+        if tab == "T1":
+            raise OSError("bridge gone")
+    monkeypatch.setattr(b, "_close_tab", fake_close)
+    b.close_opened_tabs()
+    assert closed == ["T1", "T2"] and b._opened == []

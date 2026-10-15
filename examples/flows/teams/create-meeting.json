@@ -16,6 +16,6 @@
     {"op": "extract", "into": "form_subject", "selector": "#cv2-sf-meeting-subject-input", "attr": "value"},
     {"op": "click", "selector": "[data-tid=calv2-sf-save]", "js": true, "submit": true},
     {"op": "wait", "ms": 6000},
-    {"op": "log", "message": "saved '${subject}' — join-link extraction is added once the calendar loads (needs a fresh sign-in)"}
+    {"op": "log", "message": "saved '${subject}' — get its join link with the meeting-link flow"}
   ]
 }

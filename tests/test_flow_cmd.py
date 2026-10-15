@@ -40,7 +40,8 @@ def fake_browser(monkeypatch):
     def make(server, token, tab):
         made["args"] = (server, token, tab)
         fb = FakeBrowser(query_results=[[{"selector": "#a", "text": "A", "kind": "download",
-                                          "href": "https://app.test/a.pdf"}]])
+                                          "href": "https://app.test/a.pdf"}]],
+                         extract_results=made.get("extract_results"))
         made["browser"] = fb
         return fb
 
@@ -295,6 +296,144 @@ def test_run_human_output_marks_an_abort(monkeypatch, capsys, tmp_path, fake_bro
     assert code == 1
     assert "✗ ABORTED" in out
     assert "--- aborted:" in out
+
+
+# --- extract outputs, submit grant, deep links ---------------------------------
+
+_EXTRACT_FLOW = {"name": "ex-flow", "steps": [
+    {"op": "goto", "url": "https://app.test/m"},
+    {"op": "extract", "into": "title", "selector": "h1"},
+    {"op": "extract", "into": "ids", "selector": "li a", "attr": "href", "all": True},
+    {"op": "log", "message": "read ${title}"},
+]}
+
+
+def _scripted(fake_browser):
+    fake_browser["extract_results"] = [{"matched": 1, "values": ["Quarterly plan"]},
+                                       {"matched": 2, "values": ["https://app.test/1",
+                                                                 "https://app.test/2"]}]
+
+
+def test_run_json_includes_the_outputs_map(monkeypatch, capsys, tmp_path, fake_browser):
+    _scripted(fake_browser)
+    code, out, _, _ = _cli(monkeypatch, capsys,
+                           ["run", _write(tmp_path, _EXTRACT_FLOW), "--json",
+                            "--artifacts-root", str(tmp_path / "art")])
+    assert code == 0
+    assert out["outputs"] == {"title": "Quarterly plan",
+                              "ids": ["https://app.test/1", "https://app.test/2"]}
+    assert [e for e in out["steps"] if e["op"] == "log"][0]["message"] == "read Quarterly plan"
+
+
+def test_run_json_outputs_is_present_and_empty_when_nothing_was_extracted(
+        monkeypatch, capsys, tmp_path, fake_browser):
+    code, out, _, _ = _cli(monkeypatch, capsys,
+                           ["run", _write(tmp_path, _DL_FLOW), "--json",
+                            "--artifacts-root", str(tmp_path / "art")])
+    assert code == 0 and out["outputs"] == {}
+
+
+def test_run_progress_output_prints_the_outputs_at_the_end(monkeypatch, capsys, tmp_path,
+                                                           fake_browser):
+    _scripted(fake_browser)
+    code, _, out, _ = _cli(monkeypatch, capsys,
+                           ["run", _write(tmp_path, _EXTRACT_FLOW),
+                            "--artifacts-root", str(tmp_path / "art")])
+    assert code == 0
+    assert "extract" in out and "into=title" in out        # the step shows on the progress feed
+    tail = out[out.index("--- ok:"):]
+    assert "outputs:" in tail
+    assert '  title = "Quarterly plan"' in tail
+    assert '  ids = ["https://app.test/1", "https://app.test/2"]' in tail
+
+
+def test_run_progress_output_has_no_outputs_block_without_extracts(monkeypatch, capsys,
+                                                                   tmp_path, fake_browser):
+    _code, _, out, _ = _cli(monkeypatch, capsys,
+                            ["run", _write(tmp_path, _DL_FLOW),
+                             "--artifacts-root", str(tmp_path / "art")])
+    assert "outputs:" not in out
+
+
+def test_run_jsonl_result_frame_carries_the_outputs(monkeypatch, capsys, tmp_path, fake_browser):
+    _scripted(fake_browser)
+    _code, _p, out, _err = _cli(monkeypatch, capsys,
+                                ["run", _write(tmp_path, _EXTRACT_FLOW), "--jsonl",
+                                 "--artifacts-root", str(tmp_path / "art")])
+    result = [f for f in _jsonl(out) if f["type"] == "result"][0]
+    assert result["outputs"]["title"] == "Quarterly plan"
+
+
+def test_run_dry_run_extract_reads_nothing_and_reports_no_outputs(monkeypatch, capsys,
+                                                                  tmp_path, fake_browser):
+    code, out, _, _ = _cli(monkeypatch, capsys,
+                           ["run", _write(tmp_path, _EXTRACT_FLOW), "--json", "--dry-run"])
+    assert code == 0 and out["outputs"] == {}
+    assert fake_browser["browser"].calls == []
+
+
+def test_run_allow_submit_flag_is_the_grant_for_a_submit_marked_click(
+        monkeypatch, capsys, tmp_path, fake_browser):
+    doc = {"name": "f", "capabilities": {"allow_submit": True},
+           "steps": [{"op": "click", "selector": "#send", "submit": True},
+                     {"op": "press", "key": "Enter", "submit": True}]}
+    path = _write(tmp_path, doc)
+    root = ["--artifacts-root", str(tmp_path / "art")]
+    # declared by the flow, not granted by the caller -> both skipped, with a reason
+    code, out, _, _ = _cli(monkeypatch, capsys, ["run", path, "--json"] + root)
+    assert code == 0
+    skipped = [e for e in out["steps"] if e["status"] == "skipped"]
+    assert [e["op"] for e in skipped] == ["click", "press"]
+    assert all("allow_submit" in e["reason"] for e in skipped)
+    assert fake_browser["browser"].calls == []
+    # --allow-submit is the caller's half of the AND
+    code, out, _, _ = _cli(monkeypatch, capsys, ["run", path, "--json", "--allow-submit"] + root)
+    assert [e["status"] for e in out["steps"] if e["op"] in ("click", "press")] == ["ok", "ok"]
+    assert fake_browser["browser"].calls == [("click", "#send"), ("press", "Enter")]
+
+
+def test_run_dry_run_lists_a_submit_marked_step_as_gated(monkeypatch, capsys, tmp_path,
+                                                         fake_browser):
+    doc = {"name": "f", "capabilities": {"allow_submit": True},
+           "steps": [{"op": "click", "selector": "#send", "submit": True}]}
+    code, _, out, _ = _cli(monkeypatch, capsys, ["run", _write(tmp_path, doc), "--dry-run"])
+    assert code == 0
+    assert "– click" in out and "submit not permitted" in out      # the skipped mark + reason
+    assert fake_browser["browser"].calls == []
+
+
+def test_run_submit_marked_click_in_an_undeclared_flow_is_rejected(monkeypatch, capsys,
+                                                                   tmp_path, fake_browser):
+    doc = {"name": "f", "steps": [{"op": "click", "selector": "#send", "submit": True}]}
+    code, out, _, _ = _cli(monkeypatch, capsys,
+                           ["run", _write(tmp_path, doc), "--allow-submit"])
+    assert code == 1 and out["status"] == "invalid"
+    assert "allow_submit" in out["error"]
+    assert "browser" not in fake_browser          # rejected before a browser was even built
+
+
+def test_run_goto_query_navigates_to_the_encoded_deep_link(monkeypatch, capsys, tmp_path,
+                                                           fake_browser):
+    doc = {"name": "f", "host": "app.test", "inputs": {"subject": {"type": "string"}},
+           "steps": [{"op": "goto", "url": "https://app.test/new",
+                      "query": {"subject": "${subject}"}}]}
+    code, _, _, _ = _cli(monkeypatch, capsys,
+                         ["run", _write(tmp_path, doc), "--input", "subject=Q3 plan & review",
+                          "--artifacts-root", str(tmp_path / "art")])
+    assert code == 0
+    assert ("nav", "https://app.test/new?subject=Q3%20plan%20%26%20review") in \
+        fake_browser["browser"].calls
+
+
+def test_validate_accepts_the_new_ops(monkeypatch, capsys, tmp_path):
+    doc = {"name": "all-new", "capabilities": {"allow_submit": True}, "steps": [
+        {"op": "goto", "url": "https://app.test/", "query": {"q": "x"}},
+        {"op": "type", "label": "To", "value": "ana"},
+        {"op": "press", "key": "Enter", "selector": "#to"},
+        {"op": "extract", "into": "t", "selector": "h1", "required": False},
+        {"op": "click", "selector": "#send", "submit": True, "js": True}]}
+    code, out, _, _ = _cli(monkeypatch, capsys, ["validate", _write(tmp_path, doc)])
+    assert code == 0 and out["status"] == "ok" and out["steps"] == 5
 
 
 # --- graph resolution ----------------------------------------------------------

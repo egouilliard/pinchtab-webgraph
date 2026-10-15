@@ -23,6 +23,12 @@ did not yet have (see generality.md — structural signals only, no app vocabula
                first (rel=next, aria-label, aria-disabled), UI-verb regex second — the same
                class of heuristic as crawl.DOWNLOAD_ACTIONS, which is already accepted as
                generic.
+  EXTRACT_JS   read a value (text / form value / attribute) out of the elements a CSS
+               selector matches. Pure DOM, no vocabulary — the selector and the optional
+               regex are the caller's.
+  VISIBLE_JS   is the element a selector names ITSELF present and visible? (`wait`). Not
+               QUERY_JS: that takes a selector as a ROOT and only returns actionable
+               DESCENDANTS, so it can never see the element the selector names.
 """
 import base64
 import json
@@ -134,6 +140,84 @@ _NEXT_JS = r"""
 """
 
 
+# EXTRACT_JS — the extract primitive. Takes {selector, attr, all, pattern} and returns
+# {matched, values}: `matched` is how many elements the selector hit (so a miss can say WHY —
+# "nothing matched" vs "matched, but none carried a value / fitted the pattern"), `values` the
+# usable ones in document order (just the first unless `all`).
+#   attr 'text'  -> trimmed innerText          attr 'value' -> the form value
+#   attr 'href'  -> the ABSOLUTE url           anything else -> that attribute
+# An element with no value (a missing attribute, empty text) is skipped like a pattern miss.
+# Errors (a bad selector or regex) come back as {error} so the caller can name them, instead
+# of surfacing as an opaque eval failure.
+EXTRACT_JS = r"""
+(spec => {
+  try {
+    const re = spec.pattern ? new RegExp(spec.pattern, 'i') : null;
+    const nodes = document.querySelectorAll(spec.selector);
+    const values = [];
+    for (const el of nodes) {
+      let v;
+      if (spec.attr === 'text') {
+        v = el.innerText != null ? el.innerText : el.textContent;
+        v = v == null ? null : v.trim();
+      } else if (spec.attr === 'value') {
+        v = el.value != null ? el.value : el.getAttribute('value');
+      } else if (spec.attr === 'href') {
+        v = el.getAttribute('href');
+        if (v != null) { try { v = new URL(v, document.baseURI).href; } catch (e) {} }
+      } else {
+        v = el.getAttribute(spec.attr);
+      }
+      if (v == null || v === '') continue;
+      v = String(v);
+      if (re && !re.test(v)) continue;
+      values.push(v);
+      if (!spec.all) break;
+    }
+    return {matched: nodes.length, values: values};
+  } catch (e) {
+    return {error: String((e && e.message) || e)};
+  }
+})(JSON.parse(%(spec)s))
+"""
+
+# DOM_CLICK_JS — click an element FROM THE PAGE (`el.click()`) rather than through CDP.
+# `pinchtab click` dispatches a real coordinate click, which a transient overlay (a toast, a
+# loading scrim) can swallow while the CLI still exits 0 — the step "succeeds" and nothing
+# happened. A DOM click hits the element itself, whatever sits on top of it.
+_DOM_CLICK_JS = r"""
+(() => {
+  try {
+    const el = document.querySelector(%(selector)s);
+    if (!el) return {ok: false, reason: 'no element matches selector'};
+    el.scrollIntoView({block: 'center'});
+    el.click();
+    return {ok: true};
+  } catch (e) {
+    return {ok: false, reason: String((e && e.message) || e)};
+  }
+})()
+"""
+
+
+# VISIBLE_JS — does the element this selector names exist and occupy space? Same visibility
+# rule as QUERY_JS (a zero-size box is not visible), but applied to the MATCHED ELEMENT, not
+# to its descendants. A bad selector comes back as {error}, so a wait fails at once instead of
+# polling a selector that can never match until its timeout.
+_VISIBLE_JS = r"""
+(() => {
+  try {
+    const el = document.querySelector(%(selector)s);
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    return !(r.width === 0 && r.height === 0);
+  } catch (e) {
+    return {error: String((e && e.message) || e)};
+  }
+})()
+"""
+
+
 def query_js(spec):
     """The QUERY_JS expression for a match spec. The spec crosses into JS as a JSON string
     (never string-concatenated into the source) so a label regex can't break out."""
@@ -142,6 +226,22 @@ def query_js(spec):
 
 def next_page_js():
     return _NEXT_JS % {"sel": _SEL_JS}
+
+
+def extract_js(spec):
+    """The EXTRACT_JS expression for {selector, attr, all, pattern}. Same discipline as
+    query_js: the spec crosses as a JSON string, so a selector or regex can't break out."""
+    return EXTRACT_JS % {"spec": json.dumps(json.dumps(spec))}
+
+
+def element_visible_js(selector):
+    """The VISIBLE_JS expression for a selector (a JSON literal, never spliced in raw)."""
+    return _VISIBLE_JS % {"selector": json.dumps(selector)}
+
+
+def dom_click_js(selector):
+    """The DOM_CLICK_JS expression for a selector (a JSON literal, never spliced in raw)."""
+    return _DOM_CLICK_JS % {"selector": json.dumps(selector)}
 
 
 # A page's identity, for the pagination no-progress guard: if clicking "next" leaves the
@@ -290,6 +390,35 @@ class PinchTabBrowser:
     def check(self, selector):
         self.run(["check", selector])
 
+    def click_js(self, selector):
+        """Click from inside the page (`el.click()`) — for a click CDP would lose to an overlay.
+
+        A selector that matches nothing, or an eval that fails, is a FAILED CLICK and so
+        step-fatal exactly like `click`: every later step is aimed at the wrong page."""
+        try:
+            res = self.evaluate(dom_click_js(selector))
+        except BrowserError as exc:
+            raise BrowserError(str(exc), step_fatal=True)
+        if not (isinstance(res, dict) and res.get("ok")):
+            reason = res.get("reason") if isinstance(res, dict) else None
+            raise BrowserError("js click failed: %s %r" % (reason or "no result", selector),
+                               step_fatal=True)
+
+    def focus(self, selector):
+        """Focus an element. `pinchtab focus` takes a REF positionally; a CSS selector needs
+        `--css` (the same convention as `click`)."""
+        self.run(["focus", "--css", selector])
+
+    def press(self, key):
+        """Send ONE key (Enter, Escape, ArrowDown, …) to the focused element. A combination
+        like "Control+a" is typed literally by the CLI, so the flow layer refuses it."""
+        self.run(["press", key])
+
+    def keyboard_type(self, text):
+        """Type text at the current focus with REAL keystroke events (unlike `fill`, which
+        sets the value directly and fires none of the key events a combobox listens for)."""
+        self.run(["keyboard", "type", str(text)])
+
     def upload(self, selector, path):
         self.run(["upload", path, "-s", selector])
 
@@ -355,6 +484,25 @@ class PinchTabBrowser:
     def query(self, spec):
         """Controls on the current page matching a spec → [{selector, text, kind, href}]."""
         return self.evaluate(query_js(spec)) or []
+
+    def element_visible(self, selector):
+        """Does the element `selector` NAMES exist and occupy space? (`wait`'s probe.) A bad
+        selector raises BrowserError — it can never become true, so there is nothing to poll."""
+        res = self.evaluate(element_visible_js(selector))
+        if isinstance(res, dict) and res.get("error"):
+            raise BrowserError("bad selector %r: %s" % (selector, res["error"]))
+        return res is True
+
+    def extract(self, spec):
+        """{matched, values} for {selector, attr, all, pattern} (see EXTRACT_JS). A bad
+        selector or regex raises BrowserError naming the problem."""
+        res = self.evaluate(extract_js(spec))
+        if not isinstance(res, dict):
+            raise BrowserError("extract returned %s, not a result object"
+                               % type(res).__name__)
+        if res.get("error"):
+            raise BrowserError("extract failed: %s" % res["error"])
+        return {"matched": int(res.get("matched") or 0), "values": list(res.get("values") or [])}
 
     def next_page(self):
         """{found, exhausted, selector, text} for the current page's paginator."""

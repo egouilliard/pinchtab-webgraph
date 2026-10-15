@@ -23,10 +23,12 @@ class FakeBrowser:
 
     def __init__(self, *, query_results=None, next_pages=None, signatures=None,
                  content=None, fail=None, fetch_fails=False, download_fails=False,
-                 evaluate_results=None):
+                 evaluate_results=None, extract_results=None, visible_results=None):
         self.calls = []
         self.query_results = list(query_results or [])     # popped per query() call
         self.evaluate_results = list(evaluate_results or [])   # popped per evaluate() call
+        self.extract_results = list(extract_results or [])  # popped per extract() call
+        self.visible_results = list(visible_results or [])  # popped per element_visible() call
         self.next_pages = list(next_pages or [])           # popped per next_page() call
         self.signatures = list(signatures or [])           # popped per page_signature() call
         self._content = content or []
@@ -55,6 +57,18 @@ class FakeBrowser:
 
     def check(self, selector):
         self._rec("check", selector)
+
+    def click_js(self, selector):
+        self._rec("click_js", selector)
+
+    def focus(self, selector):
+        self._rec("focus", selector)
+
+    def press(self, key):
+        self._rec("press", key)
+
+    def keyboard_type(self, text):
+        self._rec("keyboard_type", text)
 
     def upload(self, selector, path):
         self._rec("upload", selector, path)
@@ -96,6 +110,21 @@ class FakeBrowser:
         self.calls.append(("query", spec))
         return self.query_results.pop(0) if self.query_results else []
 
+    def element_visible(self, selector):
+        # `wait {selector}`'s probe: is the element the selector NAMES present and visible?
+        self.calls.append(("element_visible", selector))
+        if "element_visible" in self.fail:
+            raise self.fail["element_visible"]
+        return self.visible_results.pop(0) if self.visible_results else False
+
+    def extract(self, spec):
+        # the port returns {matched, values}; default = the selector hit nothing.
+        self.calls.append(("extract", spec))
+        if "extract" in self.fail:
+            raise self.fail["extract"]
+        return (self.extract_results.pop(0) if self.extract_results
+                else {"matched": 0, "values": []})
+
     def next_page(self):
         self.calls.append(("next_page",))
         return (self.next_pages.pop(0) if self.next_pages
@@ -118,8 +147,8 @@ def _names(fb):
     return [c[0] for c in fb.calls]
 
 
-MUTATING = {"nav", "click", "fill", "select", "check", "upload", "download", "save_bytes",
-            "fetch_bytes"}
+MUTATING = {"nav", "click", "click_js", "fill", "select", "check", "upload", "download",
+            "save_bytes", "fetch_bytes", "focus", "press", "keyboard_type"}
 
 
 def _flow(steps, **kw):
@@ -603,6 +632,49 @@ def test_wait_for_a_selector_that_never_appears_errors():
     assert res["status"] == "error"
 
 
+def test_wait_selector_succeeds_when_the_named_element_itself_is_visible():
+    # regression: `wait {selector}` used to poll browser.query, which treats the selector as a
+    # ROOT and returns actionable DESCENDANTS — so waiting on a button or input (no actionable
+    # children) could never succeed. The probe is now the element itself, via element_visible.
+    fb, slept = FakeBrowser(visible_results=[False, False, True]), []
+    res = _run(fb, [{"op": "wait", "selector": "#some-button"}], sleep=slept.append)
+    assert res["status"] == "ok"
+    assert fb.calls == [("element_visible", "#some-button")] * 3      # polled, same selector
+    assert slept == [0.2, 0.2]
+    assert _events(res, "wait", "ok")[0]["target"] == "#some-button"
+    assert not any(c[0] == "query" for c in fb.calls)                 # never the descendant query
+
+
+def test_wait_selector_does_not_depend_on_the_descendant_query():
+    # even a page whose control query would return NOTHING satisfies a selector wait.
+    fb = FakeBrowser(query_results=[[]] * 10, visible_results=[True])
+    res = _run(fb, [{"op": "wait", "selector": "#some-input"}])
+    assert res["status"] == "ok" and fb.calls == [("element_visible", "#some-input")]
+
+
+def test_wait_text_still_polls_the_control_query_by_label():
+    fb, slept = FakeBrowser(query_results=[[], [{"selector": "#s", "text": "Send"}]]), []
+    res = _run(fb, [{"op": "wait", "text": "Send"}], sleep=slept.append)
+    assert res["status"] == "ok" and slept == [0.2]
+    assert [c[0] for c in fb.calls] == ["query", "query"]
+    assert fb.calls[0][1] == {"label": "Send", "limit": 1}      # literal label, unchanged
+    assert "element_visible" not in _names(fb)
+
+
+def test_wait_selector_with_a_bad_selector_fails_at_once_instead_of_timing_out():
+    fb = FakeBrowser(fail={"element_visible": BrowserError("bad selector '((': invalid")})
+    res = _run(fb, [{"op": "wait", "selector": "(("}])
+    assert _events(res, "wait", "error")[0]["error"].startswith("BrowserError") is False
+    assert "bad selector" in _events(res, "wait", "error")[0]["error"]
+    assert [c[0] for c in fb.calls] == ["element_visible"]       # one probe, no 10s poll
+
+
+def test_wait_selector_dry_run_probes_nothing():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "wait", "selector": "#b"}], dry_run=True)
+    assert fb.calls == [] and _events(res, "wait", "dry-run")[0]["target"] == "#b"
+
+
 # --- the run record ------------------------------------------------------------------
 
 def test_run_record_shape():
@@ -624,3 +696,456 @@ def test_emit_streams_every_event_live():
                          emit=seen.append, sleep=lambda s: None)
     assert seen == res["steps"]
     assert json.dumps(seen)          # every event is JSON-serializable (SSE / a run record)
+
+
+# --- goto query: deep links that carry free text ------------------------------------
+
+def test_goto_query_is_percent_encoded_and_appended():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "goto", "url": "https://app.test/l",
+                     "query": {"subject": "Q3 review & plan", "who": "Zoë"}}])
+    final = "https://app.test/l?subject=Q3%20review%20%26%20plan&who=Zo%C3%AB"
+    assert fb.calls == [("nav", final)]
+    assert _events(res, "goto", "ok")[0]["url"] == final       # the event carries the FINAL url
+
+
+def test_goto_query_values_are_substituted_first_then_encoded():
+    # the input holds raw text full of URL metacharacters; encoding happens AFTER the ${} lookup,
+    # so the text arrives as ONE intact parameter instead of splitting the link.
+    fb = FakeBrowser()
+    msg = "hi there & bye=1 #now"
+    runner.execute(
+        _flow([{"op": "goto", "url": "https://app.test/l", "query": {"m": "${msg}", "n": "${n}"}}],
+              inputs={"msg": {"type": "string"}, "n": {"type": "integer"}}),
+        browser=fb, inputs={"msg": msg, "n": 7}, sleep=lambda s: None)
+    assert fb.calls == [("nav", "https://app.test/l?m=hi%20there%20%26%20bye%3D1%20%23now&n=7")]
+
+
+def test_goto_query_appends_with_an_ampersand_when_the_url_has_a_query():
+    fb = FakeBrowser()
+    _run(fb, [{"op": "goto", "url": "https://app.test/l?a=1", "query": {"b": "x y"}}])
+    assert fb.calls == [("nav", "https://app.test/l?a=1&b=x%20y")]
+
+
+def test_goto_url_without_query_is_navigated_untouched():
+    fb = FakeBrowser()
+    _run(fb, [{"op": "goto", "url": "https://app.test/l?a=b c"}])
+    assert fb.calls == [("nav", "https://app.test/l?a=b c")]
+
+
+def test_goto_query_without_a_url_is_rejected_before_anything_runs():
+    fb = FakeBrowser()
+    with pytest.raises(Exception, match="only together with `url`"):
+        _run(fb, [{"op": "goto", "goal": "invoices", "query": {"q": "x"}}])
+    assert fb.calls == []
+
+
+def test_goto_query_host_guard_checks_the_final_url(monkeypatch):
+    seen = []
+    real = runner.Runner._guard_host
+    monkeypatch.setattr(runner.Runner, "_guard_host",
+                        lambda self, url, run: (seen.append(url), real(self, url, run))[1])
+    fb = FakeBrowser()
+    _run(fb, [{"op": "goto", "url": "https://app.test/l", "query": {"q": "a b"}}],
+         flow_kw={"host": "app.test"})
+    assert seen == ["https://app.test/l?q=a%20b"]            # the guard saw the url as navigated
+    assert fb.calls == [("nav", "https://app.test/l?q=a%20b")]
+
+
+def test_goto_query_cannot_smuggle_a_different_host():
+    # a value that LOOKS like a host change stays inert text after encoding…
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "goto", "url": "https://app.test/l",
+                     "query": {"next": "https://evil.test/x@evil.test"}}],
+               flow_kw={"host": "app.test"})
+    assert res["status"] == "ok"
+    assert fb.calls[0][1].startswith("https://app.test/l?next=https%3A%2F%2Fevil.test")
+    # …and a url that really leaves the declared host is still refused, query or no query.
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "goto", "url": "https://evil.test/l", "query": {"q": "x"}}],
+               flow_kw={"host": "app.test"})
+    assert res["status"] == "aborted" and "evil.test" in res["aborted"]
+    assert fb.calls == []
+
+
+def test_goto_query_value_that_resolved_to_nothing_aborts_without_navigating():
+    # an optional input that was not supplied binds None — a literal `None` in a link would be
+    # a silent wrong answer, so the step refuses.
+    fb = FakeBrowser()
+    res = runner.execute(
+        _flow([{"op": "goto", "url": "https://app.test/l", "query": {"q": "${q}"}}],
+              inputs={"q": {"type": "string"}}),
+        browser=fb, inputs={}, sleep=lambda s: None)
+    assert res["status"] == "aborted"
+    assert "query param 'q' has no value" in res["aborted"]
+    assert fb.calls == []
+
+
+def test_goto_query_dry_run_shows_the_final_url_and_navigates_nowhere():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "goto", "url": "https://app.test/l", "query": {"q": "a b"}}],
+               dry_run=True)
+    assert _events(res, "goto", "dry-run")[0]["url"] == "https://app.test/l?q=a%20b"
+    assert fb.calls == []
+
+
+# --- type: focus, then REAL keystrokes ------------------------------------------------
+
+def test_type_focuses_the_field_then_sends_keystrokes_not_a_value_set():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "type", "selector": "#to", "value": "ana"}])
+    assert fb.calls == [("focus", "#to"), ("keyboard_type", "ana")]    # in this order…
+    assert "fill" not in _names(fb)                                    # …and never `fill`
+    assert _events(res, "type", "ok")[0]["selector"] == "#to"
+
+
+def test_type_resolves_a_label_the_way_fill_does():
+    fb = FakeBrowser(query_results=[[{"selector": "#found", "text": "To"}]])
+    _run(fb, [{"op": "type", "label": "To", "value": "ana"}])
+    assert fb.calls[0][0] == "query" and fb.calls[0][1]["label"] == "To"
+    assert fb.calls[1:] == [("focus", "#found"), ("keyboard_type", "ana")]
+
+
+def test_type_substitutes_its_value():
+    # (the port stringifies a non-string, exactly as it does for `fill` — see test_browser)
+    fb = FakeBrowser()
+    runner.execute(_flow([{"op": "type", "selector": "#n", "value": "id-${n}"}],
+                         inputs={"n": {"type": "integer"}}),
+                   browser=fb, inputs={"n": 42}, sleep=lambda s: None)
+    assert fb.calls == [("focus", "#n"), ("keyboard_type", "id-42")]
+
+
+def test_type_dry_run_touches_nothing():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "type", "selector": "#to", "value": "ana"}], dry_run=True)
+    assert fb.calls == []
+    assert _events(res, "type", "dry-run")[0]["value"] == "ana"
+
+
+def test_type_failure_is_a_recorded_error_and_the_run_continues():
+    fb = FakeBrowser(fail={"focus": BrowserError("no such element")})
+    res = _run(fb, [{"op": "type", "selector": "#to", "value": "ana"},
+                    {"op": "log", "message": "still here"}])
+    assert _events(res, "type", "error")[0]["selector"] == "#to"
+    assert "keyboard_type" not in _names(fb)               # never typed into the wrong place
+    assert _events(res, "log", "ok")
+
+
+# --- press ------------------------------------------------------------------------------
+
+def test_press_sends_the_key_to_the_focused_element():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "press", "key": "Escape"}])
+    assert fb.calls == [("press", "Escape")]
+    assert _events(res, "press", "ok")[0]["key"] == "Escape"
+
+
+def test_press_with_a_selector_focuses_it_first():
+    fb = FakeBrowser()
+    _run(fb, [{"op": "press", "key": "ArrowDown", "selector": "#combo"}])
+    assert fb.calls == [("focus", "#combo"), ("press", "ArrowDown")]
+
+
+def test_press_failed_focus_means_the_key_is_never_sent():
+    fb = FakeBrowser(fail={"focus": BrowserError("no such element")})
+    res = _run(fb, [{"op": "press", "key": "Enter", "selector": "#gone"}])
+    assert "press" not in _names(fb)
+    assert _events(res, "press", "error")
+
+
+def test_press_rejects_a_combination_at_validate_time():
+    fb = FakeBrowser()
+    with pytest.raises(Exception, match="ONE key name"):
+        _run(fb, [{"op": "press", "key": "Control+a"}])
+    assert fb.calls == []
+
+
+def test_press_rechecks_a_key_that_only_resolves_at_run_time():
+    fb = FakeBrowser()
+    res = runner.execute(_flow([{"op": "press", "key": "${k}"}],
+                               inputs={"k": {"type": "string"}}),
+                         browser=fb, inputs={"k": "Control+a"}, sleep=lambda s: None)
+    assert res["status"] == "aborted" and "ONE key name" in res["aborted"]
+    assert fb.calls == []
+
+
+def test_press_dry_run_touches_nothing():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "press", "key": "Enter", "selector": "#b"}], dry_run=True)
+    assert fb.calls == []
+    assert _events(res, "press", "dry-run")[0]["key"] == "Enter"
+
+
+# --- extract ------------------------------------------------------------------------------
+
+def _ex(*values, matched=None):
+    """What the port's extract() returns: {matched, values}."""
+    return {"matched": len(values) if matched is None else matched, "values": list(values)}
+
+
+def test_extract_binds_the_first_value_for_later_steps_and_into_outputs():
+    fb = FakeBrowser(extract_results=[_ex("Quarterly plan")])
+    res = _run(fb, [{"op": "extract", "into": "title", "selector": "h1"},
+                    {"op": "log", "message": "got ${title}"}])
+    assert res["status"] == "ok"
+    assert _events(res, "log")[0]["message"] == "got Quarterly plan"      # ${into} is bound
+    assert res["outputs"] == {"title": "Quarterly plan"}                 # …and recorded
+    ev = _events(res, "extract", "ok")[0]
+    assert ev["into"] == "title" and ev["value"] == "Quarterly plan" and ev["count"] == 1
+    # the spec crossed the port with the documented defaults
+    assert fb.calls == [("extract", {"selector": "h1", "attr": "text", "all": False,
+                                     "pattern": None})]
+
+
+def test_extract_without_all_keeps_only_the_first_match():
+    fb = FakeBrowser(extract_results=[_ex("a", "b", "c")])
+    res = _run(fb, [{"op": "extract", "into": "x", "selector": "li"}])
+    assert res["outputs"] == {"x": "a"}
+
+
+def test_extract_all_binds_a_list_of_every_match():
+    fb = FakeBrowser(extract_results=[_ex("a", "b", "c")])
+    res = _run(fb, [{"op": "extract", "into": "xs", "selector": "li", "all": True},
+                    {"op": "log", "message": "${xs}"}])
+    assert res["outputs"] == {"xs": ["a", "b", "c"]}
+    assert fb.calls[0][1]["all"] is True
+    ev = _events(res, "extract", "ok")[0]
+    assert ev["count"] == 3 and "value" not in ev       # the list lives in outputs, not the log
+
+
+def test_extract_passes_attr_and_pattern_to_the_page():
+    fb = FakeBrowser(extract_results=[_ex("https://app.test/m/42")])
+    res = _run(fb, [{"op": "extract", "into": "link", "selector": "a.item", "attr": "href",
+                     "pattern": "/m/\\d+$"}])
+    assert fb.calls == [("extract", {"selector": "a.item", "attr": "href", "all": False,
+                                     "pattern": "/m/\\d+$"})]
+    assert res["outputs"] == {"link": "https://app.test/m/42"}
+
+
+def test_an_extracted_href_can_feed_a_goto_through_the_host_guard():
+    fb = FakeBrowser(extract_results=[_ex("https://app.test/m/42")])
+    _run(fb, [{"op": "extract", "into": "link", "selector": "a", "attr": "href"},
+              {"op": "goto", "url": "${link}"}], flow_kw={"host": "app.test"})
+    assert fb.calls[-1] == ("nav", "https://app.test/m/42")
+    fb = FakeBrowser(extract_results=[_ex("https://evil.test/m/42")])
+    res = _run(fb, [{"op": "extract", "into": "link", "selector": "a", "attr": "href"},
+                    {"op": "goto", "url": "${link}"}], flow_kw={"host": "app.test"})
+    assert res["status"] == "aborted"            # a scraped link is no more trusted than an input
+    assert not any(c[0] == "nav" for c in fb.calls)
+
+
+def test_extract_with_nothing_found_is_an_error_by_default_and_binds_nothing():
+    fb = FakeBrowser(extract_results=[_ex(matched=0)])
+    res = _run(fb, [{"op": "extract", "into": "title", "selector": "h1.missing"},
+                    {"op": "log", "message": "after"}])
+    ev = _events(res, "extract", "error")[0]
+    assert ev["into"] == "title" and ev["selector"] == "h1.missing"
+    assert "no element matches selector 'h1.missing'" in ev["error"]
+    assert res["status"] == "error"
+    assert res["outputs"] == {}
+    assert _events(res, "log", "ok")              # a step error, like `wait`: the run goes on
+
+
+def test_extract_error_says_when_elements_matched_but_none_fitted():
+    fb = FakeBrowser(extract_results=[_ex(matched=4)])
+    res = _run(fb, [{"op": "extract", "into": "id", "selector": "a", "attr": "href",
+                     "pattern": "^https://x"}])
+    err = _events(res, "extract", "error")[0]["error"]
+    assert "4 element(s) matched" in err and "usable href" in err and "/^https://x/i" in err
+
+
+def test_a_later_step_that_needs_an_unbound_extract_aborts_loudly():
+    fb = FakeBrowser(extract_results=[_ex(matched=0)])
+    res = _run(fb, [{"op": "extract", "into": "link", "selector": "a", "attr": "href"},
+                    {"op": "goto", "url": "${link}"}])
+    assert res["status"] == "aborted" and "unknown variable ${link}" in res["aborted"]
+    assert not any(c[0] == "nav" for c in fb.calls)      # never navigated to a guess
+
+
+@pytest.mark.parametrize("extra", [{}, {"all": True}])
+def test_extract_not_required_binds_null_instead_of_failing(extra):
+    fb = FakeBrowser(extract_results=[_ex(matched=0)])
+    res = _run(fb, [dict({"op": "extract", "into": "maybe", "selector": "p", "required": False},
+                         **extra),
+                    {"op": "set", "var": "seen", "value": "${maybe}"}])
+    assert res["status"] == "ok"
+    assert res["outputs"] == {"maybe": None}       # null, for a list-valued extract too
+    assert _events(res, "extract", "ok")[0]["count"] == 0
+
+
+def test_extract_required_true_is_the_default_and_false_must_be_explicit():
+    fb = FakeBrowser(extract_results=[_ex(matched=0)])
+    res = _run(fb, [{"op": "extract", "into": "t", "selector": "p", "required": True}])
+    assert _events(res, "extract", "error")
+
+
+def test_extract_page_error_is_a_recorded_step_error_and_the_run_continues():
+    fb = FakeBrowser(fail={"extract": BrowserError("extract failed: invalid selector")})
+    res = _run(fb, [{"op": "extract", "into": "t", "selector": "(("},
+                    {"op": "log", "message": "after"}])
+    assert "invalid selector" in _events(res, "extract", "error")[0]["error"]
+    assert _events(res, "log", "ok") and res["outputs"] == {}
+
+
+def test_extract_selector_is_substituted_per_loop_item():
+    fb = FakeBrowser(query_results=[_ITEMS], extract_results=[_ex("A"), _ex("B")])
+    res = _run(fb, [{"op": "for_each", "match": {}, "body": [
+        {"op": "extract", "into": "row", "selector": "${item.selector} td"}]}])
+    assert [c[1]["selector"] for c in fb.calls if c[0] == "extract"] == ["#a td", "#b td"]
+    assert res["outputs"] == {"row": "B"}        # last write wins, like any variable
+
+
+def test_extract_dry_run_reads_nothing_and_previews_later_steps():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "extract", "into": "link", "selector": "a", "attr": "href"},
+                    {"op": "goto", "url": "https://app.test/m?u=${link}"}], dry_run=True)
+    assert res["status"] == "ok"                 # ${link} resolves to a placeholder, no abort
+    assert fb.calls == []
+    assert _events(res, "extract", "dry-run")[0]["into"] == "link"
+    assert res["outputs"] == {}                  # nothing was read, so nothing is an output
+    assert _events(res, "goto", "dry-run")[0]["url"] == "https://app.test/m?u=<link>"
+
+
+def test_a_run_without_extracts_has_empty_outputs():
+    res = _run(FakeBrowser(), [{"op": "log", "message": "x"}])
+    assert res["outputs"] == {}
+
+
+# --- submit-gated click / press ----------------------------------------------------------------
+
+_SUBMIT_CAPS = {"capabilities": {"allow_submit": True}}
+
+
+@pytest.mark.parametrize("step", [
+    {"op": "click", "selector": "#send", "submit": True},
+    {"op": "press", "key": "Enter", "selector": "#box", "submit": True},
+])
+def test_submit_marked_steps_are_skipped_with_a_reason_without_the_callers_grant(step):
+    fb = FakeBrowser()
+    res = _run(fb, [step, {"op": "log", "message": "after"}], flow_kw=_SUBMIT_CAPS,
+               grant={"allow_submit": False})
+    ev = _events(res, step["op"], "skipped")[0]
+    assert ev["submit"] is True and "allow_submit" in ev["reason"]
+    assert fb.calls == []                         # not clicked, not focused, not pressed
+    assert _events(res, "log", "ok")              # recorded, never silently dropped
+    assert res["status"] == "ok"
+
+
+@pytest.mark.parametrize("step", [
+    {"op": "click", "selector": "#send", "submit": True},
+    {"op": "press", "key": "Enter", "submit": True},
+])
+def test_submit_marked_steps_default_to_withheld(step):
+    # no grant argument at all = the safe default: the caller has granted nothing.
+    fb = FakeBrowser()
+    res = _run(fb, [step], flow_kw=_SUBMIT_CAPS)
+    assert _events(res, step["op"], "skipped") and fb.calls == []
+
+
+def test_submit_marked_click_runs_when_declared_and_granted():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "click", "selector": "#send", "submit": True}],
+               flow_kw=_SUBMIT_CAPS, grant={"allow_submit": True})
+    assert fb.calls == [("click", "#send")]
+    assert _events(res, "click", "ok")[0]["submit"] is True
+
+
+def test_submit_marked_press_runs_when_declared_and_granted():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "press", "key": "Enter", "selector": "#box", "submit": True}],
+               flow_kw=_SUBMIT_CAPS, grant={"allow_submit": True})
+    assert fb.calls == [("focus", "#box"), ("press", "Enter")]
+    assert _events(res, "press", "ok")[0]["submit"] is True
+
+
+def test_an_unmarked_click_and_press_need_no_grant():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "click", "selector": "#a"}, {"op": "press", "key": "Tab"}])
+    assert fb.calls == [("click", "#a"), ("press", "Tab")]
+    assert not _events(res, status="skipped")
+
+
+def test_a_gated_click_by_text_does_not_even_query_the_page():
+    fb = FakeBrowser(query_results=[[{"selector": "#x", "text": "Send"}]])
+    res = _run(fb, [{"op": "click", "text": "Send", "submit": True}], flow_kw=_SUBMIT_CAPS)
+    assert fb.calls == []                         # not even the by-text control lookup
+    assert _events(res, "click", "skipped")[0]["text"] == "Send"
+
+
+def test_a_flow_that_does_not_declare_allow_submit_is_rejected_at_validate():
+    # the flow-side veto, before a browser is ever touched — even if the caller would grant it.
+    fb = FakeBrowser()
+    for step in ({"op": "click", "selector": "#s", "submit": True},
+                 {"op": "press", "key": "Enter", "submit": True}):
+        with pytest.raises(Exception, match="allow_submit"):
+            _run(fb, [step], grant={"allow_submit": True})
+    assert fb.calls == []
+
+
+@pytest.mark.parametrize("step", [
+    {"op": "click", "selector": "#send", "submit": True},
+    {"op": "press", "key": "Enter", "submit": True},
+])
+def test_dry_run_shows_a_submit_step_as_a_gated_write_without_touching_the_page(step):
+    # same grant a live run would get: withheld -> shown as skipped (the gate), no browser call
+    fb = FakeBrowser()
+    res = _run(fb, [step], flow_kw=_SUBMIT_CAPS, dry_run=True)
+    assert _events(res, step["op"], "skipped")[0]["reason"].startswith("submit not permitted")
+    assert fb.calls == []
+    # granted -> shown as a dry-run WRITE (submit=True) that would run
+    fb = FakeBrowser()
+    res = _run(fb, [step], flow_kw=_SUBMIT_CAPS, grant={"allow_submit": True}, dry_run=True)
+    assert _events(res, step["op"], "dry-run")[0]["submit"] is True
+    assert not (set(_names(fb)) & MUTATING)
+
+
+# --- click js: a DOM click for a click an overlay would swallow ---------------------------------
+
+def test_click_js_dispatches_in_the_page_and_not_through_the_cli_click():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "click", "selector": "#go", "js": True}])
+    assert fb.calls == [("click_js", "#go")]
+    assert "click" not in _names(fb)
+    assert _events(res, "click", "ok")[0]["js"] is True
+
+
+def test_click_without_js_is_unchanged():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "click", "selector": "#go", "js": False}])
+    assert fb.calls == [("click", "#go")]
+    assert "js" not in _events(res, "click", "ok")[0]
+
+
+def test_click_js_by_text_resolves_the_selector_then_clicks_in_page():
+    fb = FakeBrowser(query_results=[[{"selector": "#found", "text": "Go"}]])
+    _run(fb, [{"op": "click", "text": "Go", "js": True}])
+    assert fb.calls[-1] == ("click_js", "#found")
+
+
+def test_click_js_that_matches_nothing_is_step_fatal_like_a_failed_click():
+    fb = FakeBrowser(fail={"click_js": BrowserError("js click failed: no element matches "
+                                                    "selector '#gone'", step_fatal=True)})
+    res = _run(fb, [{"op": "click", "selector": "#gone", "js": True},
+                    {"op": "log", "message": "never"}])
+    assert res["status"] == "aborted"
+    assert _events(res, "click", "error")
+    assert not _events(res, "log")                # later steps never ran on the wrong page
+
+
+def test_click_js_combines_with_submit_gating():
+    step = {"op": "click", "selector": "#send", "submit": True, "js": True}
+    fb = FakeBrowser()
+    res = _run(fb, [step], flow_kw=_SUBMIT_CAPS, grant={"allow_submit": False})
+    assert fb.calls == [] and _events(res, "click", "skipped")        # gate unchanged
+    fb = FakeBrowser()
+    res = _run(fb, [step], flow_kw=_SUBMIT_CAPS, grant={"allow_submit": True})
+    assert fb.calls == [("click_js", "#send")]
+    ev = _events(res, "click", "ok")[0]
+    assert ev["submit"] is True and ev["js"] is True
+
+
+def test_click_js_dry_run_touches_nothing():
+    fb = FakeBrowser()
+    res = _run(fb, [{"op": "click", "selector": "#go", "js": True}], dry_run=True)
+    assert fb.calls == []
+    assert _events(res, "click", "dry-run")[0]["js"] is True

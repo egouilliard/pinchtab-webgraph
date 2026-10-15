@@ -41,15 +41,15 @@ def _flow_doc(name="smoke-flow", **extra):
 
 # --- 1. the Flows REST surface -----------------------------------------------
 
-def test_op_schema_publishes_the_whole_14_op_vocabulary():
-    # 12 leaf ops + 2 body ops = the 14 the canvas draws its forms from. Asserted against
+def test_op_schema_publishes_the_whole_17_op_vocabulary():
+    # 15 leaf ops + 2 body ops = the 17 the canvas draws its forms from. Asserted against
     # flow.py's own tables so the route can never silently drift from the validator.
     r = client.get("/api/flows/op_schema")
     assert r.status_code == 200
     body = r.json()
     assert set(body["leaf_ops"]) == set(flow_mod.LEAF_OPS)
     assert set(body["body_ops"]) == set(flow_mod.BODY_OPS)
-    assert len(body["leaf_ops"]) + len(body["body_ops"]) == 14
+    assert len(body["leaf_ops"]) + len(body["body_ops"]) == 17
     assert body["capabilities"] == flow_mod.DEFAULT_CAPABILITIES
     assert body["write_ops"] == sorted(flow_mod.WRITE_OPS)
 

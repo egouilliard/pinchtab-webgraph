@@ -783,6 +783,17 @@ def test_flow_system_prompt_is_generated_from_the_flow_tables():
     assert "Never invent a selector" in prompt
 
 
+def test_flow_system_prompt_lists_the_new_ops_keys_and_the_submit_gate():
+    from pinchtab_webgraph import flow as flow_mod
+    prompt = chat.build_flow_system_prompt("site.test")
+    for op in ("press", "type", "extract"):
+        assert op in flow_mod.LEAF_OPS and ("  %-9s " % op) in prompt   # in the GENERATED table
+    assert "query" in prompt and "js" in prompt and "pattern" in prompt
+    # the write gate now covers click/press, not only `do`
+    assert "`do`, `click` or `press` step with submit=true" in prompt
+    assert "Control+a" in prompt                       # the no-combination rule is stated
+
+
 def test_system_prompt_for_picks_by_mode():
     assert chat.system_prompt_for("h", "workspace") == chat.build_system_prompt("h")
     assert chat.system_prompt_for("h") == chat.build_system_prompt("h")

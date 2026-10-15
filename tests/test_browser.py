@@ -111,6 +111,138 @@ def test_step_fatal_is_true_only_for_nav_and_click(argv, fatal):
     assert "boom" in str(exc.value)
 
 
+# --- focus / press / keyboard_type / click_js ---------------------------------------
+
+def test_focus_press_and_keyboard_type_send_the_exact_argv():
+    b, run = _browser()
+    b.focus("#to")
+    b.press("Enter")
+    b.keyboard_type("hello world & more")
+    assert run.calls == [
+        # a positional arg to `pinchtab focus` is a REF; a CSS selector needs --css (as in click)
+        ["focus", "--css", "#to"],
+        ["press", "Enter"],
+        ["keyboard", "type", "hello world & more"],     # ONE argv token, however odd the text
+    ]
+
+
+def test_keyboard_type_stringifies_a_non_string_value():
+    b, run = _browser()
+    b.keyboard_type(42)
+    assert run.calls == [["keyboard", "type", "42"]]
+
+
+@pytest.mark.parametrize("method, args", [("focus", ("#x",)), ("press", ("Enter",)),
+                                          ("keyboard_type", ("t",))])
+def test_a_failed_focus_press_or_type_raises_a_non_fatal_browser_error(method, args):
+    b, _ = _browser(rc=1, err="no such element")
+    with pytest.raises(B.BrowserError, match="no such element") as exc:
+        getattr(b, method)(*args)
+    assert exc.value.step_fatal is False         # only nav/click strand the flow on a wrong page
+
+
+def test_click_js_clicks_inside_the_page_and_never_uses_the_cli_click():
+    b, run = _browser(out=json.dumps({"ok": True}))
+    b.click_js("#go")
+    assert len(run.calls) == 1 and run.calls[0][0] == "eval"      # no `click` argv at all
+    js = run.calls[0][1]
+    assert "el.click()" in js and "scrollIntoView({block: 'center'})" in js
+    assert json.dumps("#go") in js
+
+
+def test_click_js_selector_is_a_json_literal_never_spliced_in_raw():
+    sel = 'a"); alert(1); (".x'
+    js = B.dom_click_js(sel)
+    assert json.dumps(sel) in js
+    assert sel not in js
+    assert js.count("document.querySelector") == 1
+
+
+@pytest.mark.parametrize("out", [json.dumps({"ok": False, "reason": "no element matches selector"}),
+                                 "null", json.dumps("surprise")])
+def test_click_js_that_hits_nothing_is_a_step_fatal_failure_naming_the_selector(out):
+    b, _ = _browser(out=out)
+    with pytest.raises(B.BrowserError) as exc:
+        b.click_js("#gone")
+    assert exc.value.step_fatal is True            # same as a failed `click`
+    assert "'#gone'" in str(exc.value)
+
+
+def test_click_js_eval_failure_is_step_fatal_too():
+    b, _ = _browser(rc=1, err="eval blew up")
+    with pytest.raises(B.BrowserError, match="eval blew up") as exc:
+        b.click_js("#go")
+    assert exc.value.step_fatal is True
+
+
+# --- element_visible (wait {selector}'s probe) ---------------------------------------------
+
+def test_element_visible_js_checks_the_matched_element_itself_not_its_descendants():
+    # regression: the old probe was QUERY_JS, whose `selector` is a ROOT searched for actionable
+    # DESCENDANTS (`root.querySelectorAll(CANDIDATES)`) — it could never match the element the
+    # selector names. The new probe must look at THE element's own box.
+    js = B.element_visible_js("#some-button")
+    assert "document.querySelector(" in js and "getBoundingClientRect()" in js
+    assert "querySelectorAll" not in js                    # no descendant search
+    assert json.dumps("#some-button") in js
+    assert "querySelectorAll" in B.query_js({"selector": "#some-button"})   # the bug's source
+
+
+def test_element_visible_js_selector_is_a_json_literal_never_spliced_in_raw():
+    sel = 'a"); alert(1); (".x'
+    js = B.element_visible_js(sel)
+    assert json.dumps(sel) in js and sel not in js
+    assert js.count("document.querySelector") == 1
+
+
+@pytest.mark.parametrize("out, expected", [("true", True), ("false", False), ("null", False)])
+def test_element_visible_returns_a_bool(out, expected):
+    b, run = _browser(out=out)
+    assert b.element_visible("#x") is expected
+    assert run.calls[0][0] == "eval" and len(run.calls) == 1
+
+
+def test_element_visible_raises_on_a_bad_selector():
+    b, _ = _browser(out=json.dumps({"error": "SyntaxError: '((' is not a valid selector"}))
+    with pytest.raises(B.BrowserError, match="bad selector '\\(\\(': .*not a valid selector"):
+        b.element_visible("((")
+
+
+# --- extract ----------------------------------------------------------------------------
+
+def test_extract_returns_matched_and_values():
+    b, run = _browser(out=json.dumps({"matched": 3, "values": ["a", "b"]}))
+    assert b.extract({"selector": "li", "attr": "text", "all": True, "pattern": None}) == {
+        "matched": 3, "values": ["a", "b"]}
+    assert run.calls[0][0] == "eval"
+
+
+def test_extract_js_json_escapes_a_hostile_selector_and_pattern():
+    spec = {"selector": 'a"); alert(1); //', "attr": "text", "all": False,
+            "pattern": '"); alert(2); //'}
+    js = B.extract_js(spec)
+    assert "JSON.parse(" in js
+    assert json.dumps(json.dumps(spec)) in js
+    assert 'alert(1); //"' not in js and 'alert(2); //"' not in js    # no raw, unescaped form
+
+
+@pytest.mark.parametrize("out, needle", [
+    (json.dumps({"error": "SyntaxError: '((' is not a valid selector"}), "not a valid selector"),
+    ("null", "not a result object"),
+    (json.dumps([1, 2]), "not a result object"),
+])
+def test_extract_surfaces_a_page_side_error_as_browsererror(out, needle):
+    b, _ = _browser(out=out)
+    with pytest.raises(B.BrowserError, match=needle):
+        b.extract({"selector": "((", "attr": "text", "all": False, "pattern": None})
+
+
+def test_extract_tolerates_missing_keys():
+    b, _ = _browser(out=json.dumps({}))
+    assert b.extract({"selector": "p", "attr": "text", "all": False, "pattern": None}) == {
+        "matched": 0, "values": []}
+
+
 # --- evaluate: ONE decode, every type ------------------------------------------
 # regression: `pinchtab eval` prints a string result UNQUOTED, and because we always wrap the
 # expression in JSON.stringify(...) stdout is ALWAYS valid JSON. A second json.loads therefore

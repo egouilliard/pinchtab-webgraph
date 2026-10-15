@@ -29,6 +29,8 @@ from urllib.parse import urlparse
 
 from . import api, browser as browser_mod, commands, flow as flow_mod
 
+_SUBMIT_DENIED = "submit not permitted (capabilities.allow_submit)"
+
 MAX_TOTAL_STEPS = 10000        # runaway guard: a flow cannot execute more than this
 DEFAULT_FOR_EACH_MAX = 200
 DEFAULT_MAX_PAGES = 25
@@ -48,6 +50,7 @@ class Run:
         self.steps = []
         self.artifacts = []
         self.collected = {}
+        self.outputs = {}          # `extract` results by `into`: the run's answer
         self.executed = 0
         self.started = time.time()
         self.aborted = None
@@ -118,6 +121,7 @@ class Runner:
             "steps": run.steps,
             "artifacts": run.artifacts,
             "collected": run.collected,
+            "outputs": run.outputs,
             "stats": {
                 "steps_executed": run.executed,
                 "artifacts_new": sum(1 for a in run.artifacts if a.get("status") == "new"),
@@ -164,11 +168,18 @@ class Runner:
 
     def _op_goto(self, step, r, run, _extra):
         if r.get("url"):
-            self._guard_host(r["url"], run)
+            url = r["url"]
+            if r.get("query") is not None:
+                try:
+                    url = flow_mod.with_query(url, r["query"])
+                except flow_mod.FlowError as exc:
+                    raise _Abort(str(exc))
+            # the guard sees the FINAL url — the one that is actually navigated.
+            self._guard_host(url, run)
             if run.dry_run:
-                return run.record("goto", "dry-run", url=r["url"])
-            self.browser.nav(r["url"])
-            return run.record("goto", "ok", url=r["url"])
+                return run.record("goto", "dry-run", url=url)
+            self.browser.nav(url)
+            return run.record("goto", "ok", url=url)
 
         plan = self._resolve(r.get("goal"), r, run)
         if run.dry_run:
@@ -213,11 +224,25 @@ class Runner:
     # --- direct element ops ------------------------------------------------------
 
     def _op_click(self, step, r, run, _extra):
+        # A `submit: true` click is a WRITE: gate it before anything touches the browser (not
+        # even the by-text lookup), and say so — never drop it silently.
+        if self._submit_gated(r, run):
+            return run.record("click", "skipped", selector=r.get("selector"),
+                              text=r.get("text"), submit=True, reason=_SUBMIT_DENIED)
         sel = r.get("selector") or self._selector_for_text(r.get("text"), run)
+        flags = {k: True for k in ("submit", "js") if r.get(k)}
         if run.dry_run:
-            return run.record("click", "dry-run", selector=sel, text=r.get("text"))
-        self.browser.click(sel)
-        run.record("click", "ok", selector=sel, text=r.get("text"))
+            return run.record("click", "dry-run", selector=sel, text=r.get("text"), **flags)
+        if r.get("js"):
+            self.browser.click_js(sel)
+        else:
+            self.browser.click(sel)
+        run.record("click", "ok", selector=sel, text=r.get("text"), **flags)
+
+    def _submit_gated(self, r, run):
+        """Is this step marked `submit` while the effective allow_submit is off? The effective
+        capability is the AND of the flow's declaration and the caller's grant."""
+        return bool(r.get("submit")) and not run.caps["allow_submit"]
 
     def _selector_for_text(self, text, run):
         if run.dry_run:
@@ -247,6 +272,33 @@ class Runner:
             return run.record("check", "dry-run", selector=sel)
         self.browser.check(sel)
         run.record("check", "ok", selector=sel, label=r.get("label"))
+
+    def _op_type(self, step, r, run, _extra):
+        """Focus the field, then type with REAL keystroke events. `fill` sets the value
+        directly and fires no key events; a combobox, people picker, autocomplete or rich-text
+        editor often only reacts to the keys, so `fill` leaves its suggestions empty."""
+        sel = self._field_selector(r, run)
+        if run.dry_run:
+            return run.record("type", "dry-run", selector=sel, value=r["value"])
+        self.browser.focus(sel)
+        self.browser.keyboard_type(r["value"])
+        run.record("type", "ok", selector=sel, label=r.get("label"))
+
+    def _op_press(self, step, r, run, _extra):
+        problem = flow_mod.press_key_error(r["key"])      # re-checked: the key may be a ${…}
+        if problem:
+            raise _Abort("op 'press' " + problem)
+        if self._submit_gated(r, run):
+            return run.record("press", "skipped", key=r["key"], selector=r.get("selector"),
+                              submit=True, reason=_SUBMIT_DENIED)
+        flags = {"submit": True} if r.get("submit") else {}
+        if run.dry_run:
+            return run.record("press", "dry-run", key=r["key"], selector=r.get("selector"),
+                              **flags)
+        if r.get("selector"):
+            self.browser.focus(r["selector"])
+        self.browser.press(r["key"])
+        run.record("press", "ok", key=r["key"], selector=r.get("selector"), **flags)
 
     def _op_upload(self, step, r, run, _extra):
         if not run.caps["allow_upload"]:
@@ -344,8 +396,7 @@ class Runner:
         plan = self._resolve(r.get("goal"), r, run)
         want_submit = bool(r.get("submit"))
         if want_submit and not run.caps["allow_submit"]:
-            return run.record("do", "skipped", goal=r.get("goal"),
-                              reason="submit not permitted (capabilities.allow_submit)")
+            return run.record("do", "skipped", goal=r.get("goal"), reason=_SUBMIT_DENIED)
 
         cmd_steps = commands.steps_for_trigger(
             plan["trigger"], plan["path_steps"], plan["start_url"],
@@ -501,6 +552,39 @@ class Runner:
                    collections=len(collections), items=sum(
                        len(c.get("items") or []) for c in collections))
 
+    def _op_extract(self, step, r, run, _extra):
+        """Read a value out of the page into `${into}` AND into `run.outputs[into]`.
+
+        `all` is a list of every usable match, otherwise the first one. Nothing usable is an
+        error unless `required: false`, which binds null. The page is read as it is NOW — this
+        does not wait for a late render."""
+        into, sel = r["into"], r["selector"]
+        want_all = bool(r.get("all"))
+        required = r.get("required", True) is not False
+        attr = r.get("attr") or "text"
+        if run.dry_run:
+            run.vars[into] = "<%s>" % into      # a placeholder, so later ${into} steps preview
+            return run.record("extract", "dry-run", into=into, selector=sel, attr=attr,
+                              all=want_all)
+
+        found = self.browser.extract({"selector": sel, "attr": attr, "all": want_all,
+                                      "pattern": r.get("pattern") or None})
+        values = list(found.get("values") or [])
+        if not want_all:
+            values = values[:1]
+        if not values and required:
+            what = ("no element matches selector %r" % sel if not found.get("matched")
+                    else "%d element(s) matched %r but none had a usable %s%s"
+                    % (found["matched"], sel, attr,
+                       (" matching /%s/i" % r["pattern"]) if r.get("pattern") else ""))
+            return run.record("extract", "error", into=into, selector=sel, error=what)
+        value = (values if want_all else values[0]) if values else None
+        run.vars[into] = value
+        run.outputs[into] = value
+        extra = {} if want_all else {"value": value}
+        run.record("extract", "ok", into=into, selector=sel, attr=attr, count=len(values),
+                   **extra)
+
     def _op_wait(self, step, r, run, _extra):
         if r.get("ms") is not None:
             if run.dry_run:
@@ -513,11 +597,17 @@ class Runner:
         if run.dry_run:
             return run.record("wait", "dry-run", target=target, timeout_ms=timeout_ms)
 
-        spec = ({"selector": r["selector"], "limit": 1} if r.get("selector")
-                else {"label": _literal_re(r["text"]), "limit": 1})
+        if r.get("selector"):
+            # The element the selector NAMES must be present and visible. Not browser.query:
+            # that takes a selector as a ROOT and returns actionable DESCENDANTS, so a wait on
+            # `#some-button` or `#some-input` (no actionable children) could never succeed.
+            present = lambda: self.browser.element_visible(r["selector"])   # noqa: E731
+        else:
+            spec = {"label": _literal_re(r["text"]), "limit": 1}
+            present = lambda: bool(self.browser.query(spec))                # noqa: E731
         deadline = time.time() + timeout_ms / 1000.0
         while time.time() < deadline:
-            if self.browser.query(spec):
+            if present():
                 return run.record("wait", "ok", target=target)
             self.sleep(0.2)
         run.record("wait", "error", target=target,
@@ -543,7 +633,7 @@ def _literal_re(text):
 
 def _target(resolved):
     """The bits of a step worth putting on an error event."""
-    keep = ("selector", "href", "url", "goal", "label", "text")
+    keep = ("selector", "href", "url", "goal", "label", "text", "key")
     return {k: resolved[k] for k in keep if resolved.get(k)}
 
 

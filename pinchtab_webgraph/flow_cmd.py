@@ -38,8 +38,8 @@ _MARKS = {"ok": "✓", "new": "✓", "triggered": "✓", "dupe": "=", "dry-run":
           "page": "·", "started": "▸", "skipped": "–", "error": "✗", "aborted": "✗"}
 # The fields worth showing on a progress line, in the order a human reads them.
 _DETAIL = ("flow", "goal", "match", "url", "target", "name", "href", "selector", "label",
-           "value", "into", "message", "page", "pages", "found", "via", "size", "filled",
-           "note", "reason", "error")
+           "key", "value", "into", "attr", "count", "message", "page", "pages", "found", "via",
+           "size", "filled", "note", "reason", "error")
 
 
 def _describe(event):
@@ -259,6 +259,10 @@ def _op_run(a):
                  stats["artifacts_dupe"], result["duration_s"]))
         if store:
             print("    artifacts: %s" % store.root)
+        if result.get("outputs"):
+            print("    outputs:")
+            for name, value in result["outputs"].items():
+                print("      %s = %s" % (name, json.dumps(value, ensure_ascii=False)))
     return 0 if result["status"] == "ok" else 1
 
 

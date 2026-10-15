@@ -178,10 +178,20 @@ FORM_JS = r"""
     if(el.isContentEditable) return 'text';
     return 'control';
   }
+  // an ARIA search landmark is page furniture, never the form a trigger just opened
+  const inSearch=el=>!!el.closest('[role="search"],search');
   const dialog=[...document.querySelectorAll('[role="dialog"],[aria-modal="true"],dialog[open]')].filter(vis).pop();
-  const scope=dialog||document.querySelector('form')||document;
+  // the opened form = the visible non-search <form> holding the most visible fields — NOT the
+  // first <form> in the DOM (on app shells that is the header search box, so every view-swap
+  // form read came back empty or as just the search input)
+  let bestForm=null, bestN=0;
+  [...document.querySelectorAll('form')].filter(f=>vis(f)&&!inSearch(f)).forEach(f=>{
+    const n=[...f.querySelectorAll(FIELD_SEL)].filter(el=>vis(el)&&!inSearch(el)).length;
+    if(n>bestN){bestN=n; bestForm=f;}
+  });
+  const scope=dialog||bestForm||document;
   const raw=[...scope.querySelectorAll(FIELD_SEL)].filter(el=>{
-    if(!vis(el)) return false;
+    if(!vis(el)||inSearch(el)) return false;
     const type=typeOf(el);
     if(['hidden','submit','button','image'].includes(type)) return false;
     const lab=(label(el)||'')+' '+(el.getAttribute('placeholder')||'');
